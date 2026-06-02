@@ -1,0 +1,16 @@
+# Deploy no Render: https://render.com/docs/blueprint-spec
+# New > Blueprint > conectar repositório > caminho server/render.yaml
+services:
+  - type: web
+    name: dragonfall-multiplayer
+    runtime: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CORS_ORIGIN
+        value: "*"

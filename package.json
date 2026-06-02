@@ -1,0 +1,15 @@
+{
+  "name": "dragonfall-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Servidor multiplayer Dragonfall (salas + sincronização de ações)",
+  "scripts": {
+    "start": "node index.mjs",
+    "dev": "node index.mjs"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  }
+}
