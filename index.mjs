@@ -21,6 +21,12 @@ import {
   canHostStart,
   listRoomsCount,
 } from "./rooms.mjs";
+import {
+  addToQueue,
+  removeFromQueue,
+  takePair,
+  isInQueue,
+} from "./matchmaking.mjs";
 
 const PORT = Number(process.env.PORT) || 8787;
 const corsOrigin = process.env.CORS_ORIGIN || "*";
@@ -46,6 +52,64 @@ const io = new Server(httpServer, {
 
 /** socket.id -> room code */
 const socketRoom = new Map();
+
+function leaveSocketRoom(socket) {
+  const code = socketRoom.get(socket.id);
+  const room = getRoom(code);
+  if (room) {
+    const info = leaveRoom(room, socket.id);
+    socket.leave(room.code);
+    emitRoom(room, "peer_left", { seat: info?.seat });
+    broadcastRoomState(room);
+  }
+  socketRoom.delete(socket.id);
+}
+
+function startMatchForRoom(room, io) {
+  if (room.status !== "lobby") return null;
+  if (!room.sockets[0] || !room.sockets[1]) return null;
+  if (!room.heroes[0] || !room.heroes[1]) return null;
+  room.winPoints = 15;
+  room.status = "playing";
+  room.actionSeq = 0;
+  room.ready = [true, true];
+  const firstPlayer = Math.random() < 0.5 ? 0 : 1;
+  const deckSeed = Math.floor(Math.random() * 2147483646) + 1;
+  const match = {
+    heroIds: [room.heroes[0], room.heroes[1]],
+    winPoints: room.winPoints,
+    firstPlayer,
+    deckSeed,
+  };
+  for (let seat = 0; seat < 2; seat++) {
+    const sid = room.sockets[seat];
+    if (!sid) continue;
+    io.to(sid).emit("match_start", { ...match, yourSeat: seat });
+  }
+  broadcastRoomState(room);
+  return match;
+}
+
+function pairQueueSockets(io) {
+  let pair = takePair();
+  while (pair) {
+    const [sid0, sid1] = pair;
+    const room = createRoom();
+    room.winPoints = 15;
+    room.sockets[0] = sid0;
+    room.sockets[1] = sid1;
+    socketRoom.set(sid0, room.code);
+    socketRoom.set(sid1, room.code);
+    const s0 = io.sockets.sockets.get(sid0);
+    const s1 = io.sockets.sockets.get(sid1);
+    s0?.join(room.code);
+    s1?.join(room.code);
+    io.to(sid0).emit("match_found", { ...roomPublicView(room, 0), seat: 0 });
+    io.to(sid1).emit("match_found", { ...roomPublicView(room, 1), seat: 1 });
+    broadcastRoomState(room);
+    pair = takePair();
+  }
+}
 
 function emitRoom(room, event, payload) {
   for (const sid of room.sockets) {
@@ -102,6 +166,9 @@ io.on("connection", (socket) => {
     room.heroes[seat] = heroId;
     room.ready[seat] = false;
     broadcastRoomState(room);
+    if (room.heroes[0] && room.heroes[1]) {
+      startMatchForRoom(room, io);
+    }
     ack?.({ ok: true });
   });
 
@@ -134,23 +201,38 @@ io.on("connection", (socket) => {
     const room = getRoom(socketRoom.get(socket.id));
     if (!room) return ack?.({ ok: false, error: "NOT_IN_ROOM" });
     if (!canHostStart(room, socket.id)) return ack?.({ ok: false, error: "CANNOT_START" });
-    room.status = "playing";
-    room.actionSeq = 0;
-    const firstPlayer = Math.random() < 0.5 ? 0 : 1;
-    const deckSeed = Math.floor(Math.random() * 2147483646) + 1;
-    const match = {
-      heroIds: [room.heroes[0], room.heroes[1]],
-      winPoints: room.winPoints,
-      firstPlayer,
-      deckSeed,
-    };
-    for (let seat = 0; seat < 2; seat++) {
-      const sid = room.sockets[seat];
-      if (!sid) continue;
-      io.to(sid).emit("match_start", { ...match, yourSeat: seat });
-    }
-    broadcastRoomState(room);
+    const match = startMatchForRoom(room, io);
+    if (!match) return ack?.({ ok: false, error: "CANNOT_START" });
     ack?.({ ok: true, ...match });
+  });
+
+  socket.on("join_queue", (_payload, ack) => {
+    removeFromQueue(socket.id);
+    const code = socketRoom.get(socket.id);
+    if (code) {
+      const room = getRoom(code);
+      const seat = room ? seatForSocket(room, socket.id) : null;
+      if (room && seat !== null) {
+        ack?.({ ok: true, matched: true, ...roomPublicView(room, seat), seat });
+        return;
+      }
+    }
+    leaveSocketRoom(socket);
+    addToQueue(socket.id);
+    pairQueueSockets(io);
+    const paired = socketRoom.get(socket.id);
+    if (paired) {
+      const room = getRoom(paired);
+      const seat = seatForSocket(room, socket.id);
+      ack?.({ ok: true, matched: true, ...roomPublicView(room, seat), seat });
+      return;
+    }
+    ack?.({ ok: true, inQueue: true, joinedAt: Date.now() });
+  });
+
+  socket.on("leave_queue", (_payload, ack) => {
+    removeFromQueue(socket.id);
+    ack?.({ ok: true });
   });
 
   socket.on("game_action", (payload, ack) => {
@@ -194,19 +276,13 @@ io.on("connection", (socket) => {
   });
 
   socket.on("leave_room", (_payload, ack) => {
-    const code = socketRoom.get(socket.id);
-    const room = getRoom(code);
-    if (room) {
-      const info = leaveRoom(room, socket.id);
-      socket.leave(room.code);
-      emitRoom(room, "peer_left", { seat: info?.seat });
-      broadcastRoomState(room);
-    }
-    socketRoom.delete(socket.id);
+    removeFromQueue(socket.id);
+    leaveSocketRoom(socket);
     ack?.({ ok: true });
   });
 
   socket.on("disconnect", () => {
+    removeFromQueue(socket.id);
     const code = socketRoom.get(socket.id);
     const room = getRoom(code);
     if (!room) return;
