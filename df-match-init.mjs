@@ -1,7 +1,7 @@
 /**
  * Estado inicial de partida 1v1 no servidor (mesma lógica que resetState + deckSeed).
  */
-import { bootDragonfallEngine } from "../scripts/lib/df-node-boot.mjs";
+import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
 
 function mulberry32(seed) {
   let a = seed >>> 0;

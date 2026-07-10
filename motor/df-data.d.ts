@@ -1,0 +1,143 @@
+/** Dragonfall — DfData (motor TS, Fase 2). */
+declare const DfData: {
+    heroDefs: {
+        id: string;
+        name: string;
+        emoji: string;
+        image: string;
+        ultimateName: string;
+        ultimateDesc: string;
+        ultimateType: string;
+    }[];
+    cardDefs: ({
+        name: string;
+        power: number;
+        category: string;
+        abilityType: string;
+        abilityName: string;
+        abilityDesc: string;
+        onDestroy: string;
+        onEnter: any;
+        constantEffect?: undefined;
+        summonRitual?: undefined;
+        talentEffect?: undefined;
+        subcategory?: undefined;
+        hidden?: undefined;
+    } | {
+        name: string;
+        power: number;
+        category: string;
+        abilityType: string;
+        abilityName: string;
+        abilityDesc: string;
+        onDestroy: any;
+        onEnter: string;
+        constantEffect?: undefined;
+        summonRitual?: undefined;
+        talentEffect?: undefined;
+        subcategory?: undefined;
+        hidden?: undefined;
+    } | {
+        name: string;
+        power: number;
+        category: string;
+        abilityType: string;
+        abilityName: string;
+        abilityDesc: string;
+        onDestroy: any;
+        onEnter: any;
+        constantEffect: string;
+        summonRitual?: undefined;
+        talentEffect?: undefined;
+        subcategory?: undefined;
+        hidden?: undefined;
+    } | {
+        name: string;
+        power: number;
+        category: string;
+        abilityType: string;
+        abilityName: string;
+        abilityDesc: string;
+        onDestroy: any;
+        onEnter: any;
+        summonRitual: number;
+        constantEffect?: undefined;
+        talentEffect?: undefined;
+        subcategory?: undefined;
+        hidden?: undefined;
+    } | {
+        name: string;
+        power: number;
+        category: string;
+        abilityType: string;
+        abilityName: string;
+        abilityDesc: string;
+        onDestroy: any;
+        onEnter: any;
+        talentEffect: string;
+        constantEffect?: undefined;
+        summonRitual?: undefined;
+        subcategory?: undefined;
+        hidden?: undefined;
+    } | {
+        name: string;
+        power: number;
+        category: string;
+        subcategory: string;
+        abilityType: string;
+        abilityName: string;
+        abilityDesc: string;
+        onDestroy: any;
+        onEnter: any;
+        talentEffect: string;
+        constantEffect?: undefined;
+        summonRitual?: undefined;
+        hidden?: undefined;
+    } | {
+        name: string;
+        power: number;
+        category: string;
+        abilityType: string;
+        abilityName: string;
+        abilityDesc: string;
+        onDestroy: any;
+        onEnter: any;
+        hidden: boolean;
+        constantEffect?: undefined;
+        summonRitual?: undefined;
+        talentEffect?: undefined;
+        subcategory?: undefined;
+    })[];
+    babyDragonDef: {
+        name: string;
+        power: number;
+        category: string;
+        abilityType: string;
+        abilityName: string;
+        abilityDesc: string;
+        onDestroy: any;
+        onEnter: any;
+    };
+    cubicDragonDef: {
+        name: string;
+        power: number;
+        category: string;
+        abilityType: string;
+        abilityName: string;
+        abilityDesc: string;
+        onDestroy: any;
+        onEnter: any;
+    };
+    dragonTokenDef(name: any): {
+        name: string;
+        power: number;
+        category: string;
+        abilityType: string;
+        abilityName: string;
+        abilityDesc: string;
+        onDestroy: any;
+        onEnter: any;
+    };
+};
+export { DfData };
+export type DfDataApi = typeof DfData;

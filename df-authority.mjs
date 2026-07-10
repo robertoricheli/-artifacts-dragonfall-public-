@@ -1,11 +1,11 @@
 /**
  * Servidor autoritativo — valida + aplica ações via DfEngine + event log.
  */
-import { bootDragonfallEngine } from "../scripts/lib/df-node-boot.mjs";
+import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
 import {
   appendEventLogEntry,
   exportEventLog,
-} from "../artifacts/dragonfall/motor/dist/df-event-log.js";
+} from "./motor/df-event-log.js";
 import {
   unwrapGameState,
   validateSnapshotUpdate,
