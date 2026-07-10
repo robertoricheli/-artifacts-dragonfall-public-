@@ -14,6 +14,8 @@ const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
  *   winPoints: number,
  *   ready: [boolean, boolean],
  *   lastSnapshot: object|null,
+ *   gameState: object|null,
+ *   eventLog: object[],
  *   actionSeq: number,
  * }} Room */
 
@@ -46,6 +48,8 @@ export function createRoom() {
     winPoints: 15,
     ready: [false, false],
     lastSnapshot: null,
+    gameState: null,
+    eventLog: [],
     actionSeq: 0,
   };
   rooms.set(code, room);
@@ -79,23 +83,21 @@ export function seatForSocket(room, socketId) {
 /**
  * @returns {{ ok: true, seat: 0|1, room: Room } | { ok: false, error: string }}
  */
-export function joinRoom(code, socketId, preferCreate = false) {
+export function joinRoom(code, socketId, preferSeat = null) {
   pruneOldRooms();
   let room = getRoom(code);
-
-  if (!room && preferCreate) {
-    room = createRoom();
-    if (code && code !== room.code) {
-      rooms.delete(room.code);
-      room.code = String(code).trim().toUpperCase();
-      rooms.set(room.code, room);
-    }
-  }
 
   if (!room) return { ok: false, error: "ROOM_NOT_FOUND" };
 
   const existing = seatForSocket(room, socketId);
-  if (existing !== null) return { ok: true, seat: existing, room };
+  if (existing !== null) return { ok: true, seat: existing, room, reconnected: true };
+
+  if (preferSeat === 0 || preferSeat === 1) {
+    if (!room.sockets[preferSeat] && room.heroes[preferSeat]) {
+      room.sockets[preferSeat] = socketId;
+      return { ok: true, seat: preferSeat, room, reconnected: true };
+    }
+  }
 
   if (!room.sockets[0]) {
     room.sockets[0] = socketId;
@@ -108,6 +110,15 @@ export function joinRoom(code, socketId, preferCreate = false) {
   return { ok: false, error: "ROOM_FULL" };
 }
 
+/** Queda de conexão — preserva partida para reconexão (Fase 4). */
+export function disconnectSocket(room, socketId) {
+  const seat = seatForSocket(room, socketId);
+  if (seat === null) return null;
+  room.sockets[seat] = null;
+  return { deleted: false, seat, disconnected: true };
+}
+
+/** Saída voluntária — limpa assento e encerra sala se vazia. */
 export function leaveRoom(room, socketId) {
   const seat = seatForSocket(room, socketId);
   if (seat === null) return null;
@@ -118,7 +129,9 @@ export function leaveRoom(room, socketId) {
     deleteRoom(room.code);
     return { deleted: true, seat };
   }
-  if (room.status === "playing") room.status = "lobby";
+  if (room.status === "playing" && !room.sockets[0] && !room.sockets[1]) {
+    room.status = "ended";
+  }
   return { deleted: false, seat };
 }
 
@@ -151,6 +164,8 @@ export function roomPublicView(room, yourSeat = null) {
       room.heroes[1] &&
       room.ready[0] &&
       room.ready[1],
+    actionSeq: room.actionSeq || 0,
+    turnDeadline: room.turnDeadline || null,
   };
 }
 
@@ -160,4 +175,30 @@ export function canHostStart(room, socketId) {
 
 export function listRoomsCount() {
   return rooms.size;
+}
+
+/** Restaura sala persistida (sem sockets — reconexão preenche assentos). */
+export function importPersistedRoom(data) {
+  if (!data?.code || rooms.has(data.code)) return null;
+  const room = {
+    code: data.code,
+    createdAt: data.createdAt || Date.now(),
+    status: data.status || "playing",
+    sockets: [null, null],
+    heroes: data.heroes || [null, null],
+    winPoints: data.winPoints ?? 15,
+    ready: data.ready || [false, false],
+    lastSnapshot: data.lastSnapshot || null,
+    gameState: data.gameState || null,
+    eventLog: data.eventLog || [],
+    actionSeq: data.actionSeq || 0,
+    turnDeadline: data.turnDeadline || null,
+    turnTimer: null,
+  };
+  rooms.set(room.code, room);
+  return room;
+}
+
+export function listPlayingRooms() {
+  return [...rooms.values()].filter((r) => r.status === "playing");
 }

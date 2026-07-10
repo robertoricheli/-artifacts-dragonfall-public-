@@ -3,13 +3,25 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Servidor multiplayer Dragonfall (salas + sincronização de ações)",
+  "description": "Servidor multiplayer Dragonfall (porta 8787 — salas PvP). Para jogar localmente use na raiz do projeto: jogar-local.bat ou node scripts/serve-local.mjs (porta 5173).",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node index.mjs",
     "dev": "node index.mjs"
   },
   "dependencies": {
     "express": "^4.21.2",
+    "nodemailer": "^6.10.1",
     "socket.io": "^4.8.1"
+  },
+  "optionalDependencies": {
+    "bullmq": "^5.34.5",
+    "ioredis": "^5.4.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.1"
   }
 }

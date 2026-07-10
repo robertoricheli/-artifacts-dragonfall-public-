@@ -1,0 +1,8 @@
+{
+  "host": "smtp.gmail.com",
+  "port": 587,
+  "secure": false,
+  "user": "seu-email@gmail.com",
+  "pass": "SUA-SENHA-DE-APP-GOOGLE",
+  "from": "Dragonfall <seu-email@gmail.com>"
+}
