@@ -323,21 +323,32 @@ async function authProfile(req, body) {
   }
 
   if (body.displayName != null) {
-    if (player.displayNameLocked) {
-      return { status: 403, data: { ok: false, error: "NAME_LOCKED" } };
-    }
     const name = String(body.displayName).trim();
-    if (!isValidDisplayName(name)) {
-      return { status: 400, data: { ok: false, error: "BAD_NAME" } };
+    if (player.displayNameLocked) {
+      if (name !== player.displayName) {
+        return { status: 403, data: { ok: false, error: "NAME_LOCKED" } };
+      }
+      /* mesmo nome já bloqueado — ignora (permite sync de baralhos/XP no mesmo PATCH) */
+    } else {
+      if (!isValidDisplayName(name)) {
+        return { status: 400, data: { ok: false, error: "BAD_NAME" } };
+      }
+      const key = name.toLowerCase();
+      const owner = await getDisplayNameOwner(key);
+      if (owner && owner !== player.id) {
+        return { status: 409, data: { ok: false, error: "NAME_TAKEN" } };
+      }
+      await updateDisplayName(player.id, player.displayName, name);
+      player.displayName = name;
+      player.displayNameLocked = true;
     }
-    const key = name.toLowerCase();
-    const owner = await getDisplayNameOwner(key);
-    if (owner && owner !== player.id) {
-      return { status: 409, data: { ok: false, error: "NAME_TAKEN" } };
+  }
+
+  if (body.xpTotal != null) {
+    const incoming = Math.max(0, Number(body.xpTotal) | 0);
+    if (Number.isFinite(incoming)) {
+      player.xpTotal = Math.max(player.xpTotal || 0, incoming);
     }
-    await updateDisplayName(player.id, player.displayName, name);
-    player.displayName = name;
-    player.displayNameLocked = true;
   }
 
   if (body.customDecks != null) {
