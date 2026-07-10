@@ -1,0 +1,92 @@
+/**
+ * Dragonfall — protocolo de ações (fonte TS do motor).
+ * Catálogo: docs/MULTIPLAYER-ACTIONS.md
+ */
+import type { GameAction } from "./df-types.js";
+export declare const ACTION_TYPES: Readonly<{
+    LOBBY_CREATE: "LOBBY_CREATE";
+    LOBBY_JOIN: "LOBBY_JOIN";
+    SETUP_HERO: "SETUP_HERO";
+    SETUP_WIN_POINTS: "SETUP_WIN_POINTS";
+    MATCH_START: "MATCH_START";
+    END_TURN: "END_TURN";
+    DRAW_CARD: "DRAW_CARD";
+    SURRENDER: "SURRENDER";
+    RESTART_MATCH: "RESTART_MATCH";
+    SUMMON: "SUMMON";
+    ATTACK_START: "ATTACK_START";
+    ATTACK_PICK_ATTACKER: "ATTACK_PICK_ATTACKER";
+    ATTACK_PICK_DEFENDER: "ATTACK_PICK_DEFENDER";
+    ATTACK_RESOLVE: "ATTACK_RESOLVE";
+    REACTIVE_BLOCK_QUERY: "REACTIVE_BLOCK_QUERY";
+    REACTIVE_BLOCK_ANSWER: "REACTIVE_BLOCK_ANSWER";
+    REACTIVE_PROTECTION_QUERY: "REACTIVE_PROTECTION_QUERY";
+    REACTIVE_PROTECTION_ANSWER: "REACTIVE_PROTECTION_ANSWER";
+    ON_ENTER_RESOLVE: "ON_ENTER_RESOLVE";
+    TALENT_START: "TALENT_START";
+    TALENT_TARGET: "TALENT_TARGET";
+    ABILITY_START: "ABILITY_START";
+    ABILITY_TARGET: "ABILITY_TARGET";
+    ULTIMATE_START: "ULTIMATE_START";
+    ULTIMATE_TARGET: "ULTIMATE_TARGET";
+    MENU_CHOICE: "MENU_CHOICE";
+    NECROMANCIA_PICK: "NECROMANCIA_PICK";
+    UNFREEZE_CONFIRM: "UNFREEZE_CONFIRM";
+    OPEN_DISCARD: "OPEN_DISCARD";
+    SYNC_STATE: "SYNC_STATE";
+    ULTIMATE_PLAY: "ULTIMATE_PLAY";
+    PLAY_VISUAL: "PLAY_VISUAL";
+}>;
+export declare const GAME_PHASES: readonly string[];
+export declare const REQUIRES_NORMAL_PHASE: Set<string>;
+export type ValidateShapeResult = {
+    ok: true;
+    action: GameAction;
+} | {
+    ok: false;
+    error: string;
+};
+export declare function validateActionShape(action: unknown): ValidateShapeResult;
+export declare function createAction(type: string, fields?: Record<string, unknown>): GameAction;
+export declare const DfProtocol: Readonly<{
+    VERSION: 2;
+    ACTION_TYPES: Readonly<{
+        LOBBY_CREATE: "LOBBY_CREATE";
+        LOBBY_JOIN: "LOBBY_JOIN";
+        SETUP_HERO: "SETUP_HERO";
+        SETUP_WIN_POINTS: "SETUP_WIN_POINTS";
+        MATCH_START: "MATCH_START";
+        END_TURN: "END_TURN";
+        DRAW_CARD: "DRAW_CARD";
+        SURRENDER: "SURRENDER";
+        RESTART_MATCH: "RESTART_MATCH";
+        SUMMON: "SUMMON";
+        ATTACK_START: "ATTACK_START";
+        ATTACK_PICK_ATTACKER: "ATTACK_PICK_ATTACKER";
+        ATTACK_PICK_DEFENDER: "ATTACK_PICK_DEFENDER";
+        ATTACK_RESOLVE: "ATTACK_RESOLVE";
+        REACTIVE_BLOCK_QUERY: "REACTIVE_BLOCK_QUERY";
+        REACTIVE_BLOCK_ANSWER: "REACTIVE_BLOCK_ANSWER";
+        REACTIVE_PROTECTION_QUERY: "REACTIVE_PROTECTION_QUERY";
+        REACTIVE_PROTECTION_ANSWER: "REACTIVE_PROTECTION_ANSWER";
+        ON_ENTER_RESOLVE: "ON_ENTER_RESOLVE";
+        TALENT_START: "TALENT_START";
+        TALENT_TARGET: "TALENT_TARGET";
+        ABILITY_START: "ABILITY_START";
+        ABILITY_TARGET: "ABILITY_TARGET";
+        ULTIMATE_START: "ULTIMATE_START";
+        ULTIMATE_TARGET: "ULTIMATE_TARGET";
+        MENU_CHOICE: "MENU_CHOICE";
+        NECROMANCIA_PICK: "NECROMANCIA_PICK";
+        UNFREEZE_CONFIRM: "UNFREEZE_CONFIRM";
+        OPEN_DISCARD: "OPEN_DISCARD";
+        SYNC_STATE: "SYNC_STATE";
+        ULTIMATE_PLAY: "ULTIMATE_PLAY";
+        PLAY_VISUAL: "PLAY_VISUAL";
+    }>;
+    GAME_PHASES: readonly string[];
+    REQUIRES_NORMAL_PHASE: Set<string>;
+    validateActionShape: typeof validateActionShape;
+    createAction: typeof createAction;
+}>;
+export type DfProtocolApi = typeof DfProtocol;
