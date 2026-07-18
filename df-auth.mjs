@@ -52,7 +52,7 @@ function isValidPassword(pw) {
 
 function isValidDisplayName(name) {
   const n = String(name || "").trim();
-  return n.length >= 3 && n.length <= 20 && /^[\p{L}\p{N}_][\p{L}\p{N}_\s.-]*$/u.test(n);
+  return n.length >= 3 && n.length <= 10 && /^[\p{L}\p{N}_][\p{L}\p{N}_\s.-]*$/u.test(n);
 }
 
 function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
