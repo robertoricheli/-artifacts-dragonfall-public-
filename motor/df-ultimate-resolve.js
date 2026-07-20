@@ -16,7 +16,7 @@ function data() {
 export function getMaxUltimateUses(heroId) {
     const four = new Set([
         "vaughan", "linguarudo", "pirate", "euravia",
-        "ironGuard", "thor", "alexander", "violencia",
+        "ironGuard", "thor",
     ]);
     const three = new Set([
         "iceWitch", "princesaSlime", "jekiro", "sangueDragao", "gancho",
@@ -103,7 +103,9 @@ function destroyChampion(state, ownerIdx, fieldIdx, killerIdx, opts = {}, events
             owner.destroyedChampions = [];
         owner.destroyedChampions.push(target);
     }
-    const noHonor = resolveOnDestroy(target) === "noHonor" && !target.silenced;
+    const noHonor = rules().hasNoHonor
+        ? rules().hasNoHonor(target)
+        : resolveOnDestroy(target) === "noHonor" && !target.silenced;
     if (killerIdx != null && !opts.noVpOnKill && !noHonor) {
         state.players[killerIdx].vp =
             (state.players[killerIdx].vp ?? 0) + 1;
@@ -160,7 +162,18 @@ function destroyChampion(state, ownerIdx, fieldIdx, killerIdx, opts = {}, events
             }
         }
     }
-    events.push({ type: "DESTROY", p: ownerIdx, i: fieldIdx, reason: opts.reason || "ultimate", killer: killerIdx });
+    const reason = opts.reason || "ultimate";
+    const burst = rules().applyOnDestroyBurst?.(state, ownerIdx, target, reason, rng);
+    if (burst?.ability) {
+        events.push({
+            type: "ON_DESTROY_BURST",
+            ownerIdx,
+            source: target.name,
+            reason,
+            ...burst,
+        });
+    }
+    events.push({ type: "DESTROY", p: ownerIdx, i: fieldIdx, reason, killer: killerIdx });
 }
 function pickTrickerySwapTarget(state, casterIdx, rng) {
     const pow2 = [];
@@ -170,8 +183,6 @@ function pickTrickerySwapTarget(state, casterIdx, rng) {
         if (ep === casterIdx)
             continue;
         (state.players[ep]?.field || []).forEach((c, i) => {
-            if (c.shielded)
-                return;
             const pw = c.currentPower;
             if (pw === 2)
                 pow2.push({ p: ep, i });
@@ -193,8 +204,10 @@ function performTrickerySwap(state, casterIdx, allyI, enemyP, enemyI) {
         return;
     for (const ch of [a, e]) {
         ch.freeAttack = false;
-        ch.shielded = false;
-        ch.shieldedTurns = 0;
+        if (!ch.shieldedPermanent) {
+            ch.shielded = false;
+            ch.shieldedTurns = 0;
+        }
         ch.guerraBuff = false;
         ch.guerraBuffTurns = 0;
     }
@@ -295,11 +308,38 @@ function scareReturn(state, pIdx, targetP, targetI, events) {
     if (!champ)
         return;
     owner.field.splice(targetI, 1);
-    champ.currentPower = champ.basePower ?? champ.power;
+    const base = (champ.basePower ?? champ.power ?? champ.currentPower);
+    champ.currentPower = base;
+    champ.basePower = base;
+    champ.power = base;
     champ.tapped = false;
     champ.frozen = false;
+    champ.frozenTurns = 0;
     champ.freeAttack = false;
     champ.shielded = false;
+    champ.shieldedTurns = 0;
+    champ.silenced = false;
+    champ.pulled = false;
+    champ.pulledFromOwner = -1;
+    champ.pulledTurns = 0;
+    champ.poisoned = false;
+    champ.poisonTurns = 0;
+    champ.poisonedByP = -1;
+    champ.vulnerable = false;
+    champ.corruptedNoHonor = false;
+    champ.barrier = false;
+    champ.barrierTurns = 0;
+    champ.barrierPermanent = false;
+    champ.fireAura = false;
+    champ.fireAuraTurns = 0;
+    champ.fury = false;
+    champ.furyTurns = 0;
+    champ.furyStacks = 0;
+    champ.furyBonusActive = false;
+    champ.wallBuff = false;
+    champ.foreverGrowth = false;
+    champ.guerraBuff = false;
+    champ.guerraBuffTurns = 0;
     owner.hand.push(champ);
     events.push({ type: "SCARE_RETURN", playerId: pIdx, targetP, targetI, card: champ.name });
 }
@@ -348,7 +388,7 @@ export function validateUltimatePlay(state, action) {
                 return { ok: false, code: "ALREADY_POISONED" };
             if (ut === "scareReturn") {
                 const t = state.players[tp].field[ti];
-                if (t.currentPower > 2 || t.shielded)
+                if (t.currentPower > 2)
                     return { ok: false, code: "INVALID_TARGET" };
             }
             if (ut === "vampirism" && !R.gatherAllyTargets(state, pid, -1, allyCanGainPower).length) {

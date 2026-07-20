@@ -4,7 +4,7 @@
  */
 import crypto from "crypto";
 import { sendPasswordResetEmail, sendPasswordChangedEmail } from "./df-auth-mail.mjs";
-import { encryptPassword, decryptPassword } from "./df-auth-secret.mjs";
+import { encryptPassword } from "./df-auth-secret.mjs";
 import {
   initAuthStore,
   getAuthStoreMode,
@@ -17,25 +17,37 @@ import {
   authPlayerFromToken,
   getDisplayNameOwner,
   updateDisplayName,
+  prunePlayerSessions,
 } from "./df-auth-store.mjs";
+import { createRateLimiter } from "./rate-limit.mjs";
 
 export { initAuthStore, getAuthStoreMode };
 
 const SESSION_DAYS = 90;
+const MAX_SESSIONS_PER_PLAYER = 8;
+const FORGOT_COOLDOWN_MS = 90_000;
+const forgotLastSent = new Map();
+const authIpLimit = createRateLimiter({ maxPerWindow: 20, windowMs: 60_000 });
+const authEmailLimit = createRateLimiter({ maxPerWindow: 8, windowMs: 60_000 });
 
 const HERO_IDS = new Set([
   "vaughan", "iceWitch", "linguarudo", "pirate", "euravia", "ironGuard",
   "princesaSlime", "thor", "jekiro", "sangueDragao", "gancho", "paladino",
-  "alquimista", "valmont", "tecnomago", "alexander", "quimera", "hercules",
-  "sinistrela", "estrelar", "violencia",
+  "alquimista", "valmont", "tecnomago", "quimera", "hercules",
+  "sinistrela", "estrelar",
 ]);
 
 const HUB_BG_IDS = new Set([
-  "vila-dos-cristais",
-  "montanha-flamejante",
   "reino-encantado",
+  "frente-de-batalha",
+  "cidade-steampunk",
+  "abismo-ametista",
+  "arcadia",
+  "montanha-flamejante",
   "masmorra-sem-fim",
   "bosque-dos-elfos",
+  // Legado (conta antiga) — cliente mapeia para reino-encantado
+  "vila-dos-cristais",
 ]);
 
 function normEmail(email) {
@@ -133,6 +145,7 @@ async function authFromHeader(req) {
 }
 
 async function createSession(playerId) {
+  await prunePlayerSessions(playerId, MAX_SESSIONS_PER_PLAYER - 1);
   const token = newToken();
   await createSessionRecord(token, playerId, sessionExpiry());
   return token;
@@ -145,7 +158,35 @@ function setPlayerPassword(player, password) {
   player.passwordEnc = encryptPassword(password);
 }
 
-async function authRegister(body) {
+/** Senha temporária aleatória (não reutiliza passwordEnc reversível). */
+function newTemporaryPassword() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  const bytes = crypto.randomBytes(12);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += alphabet[bytes[i] % alphabet.length];
+  return out;
+}
+
+function clientIp(req) {
+  const xf = req?.headers?.["x-forwarded-for"];
+  if (typeof xf === "string" && xf.trim()) return xf.split(",")[0].trim();
+  return req?.socket?.remoteAddress || req?.ip || "unknown";
+}
+
+function allowAuthAttempt(req, email) {
+  const ip = clientIp(req);
+  if (!authIpLimit(`ip:${ip}`)) {
+    return { status: 429, data: { ok: false, error: "RATE_LIMIT", retryAfterSec: 60 } };
+  }
+  if (email && !authEmailLimit(`email:${normEmail(email)}`)) {
+    return { status: 429, data: { ok: false, error: "RATE_LIMIT", retryAfterSec: 60 } };
+  }
+  return null;
+}
+
+async function authRegister(req, body) {
+  const limited = allowAuthAttempt(req, body?.email);
+  if (limited) return limited;
   const email = normEmail(body?.email);
   const password = body?.password;
   if (!isValidEmail(email)) return { status: 400, data: { ok: false, error: "EMAIL_INVALID" } };
@@ -180,7 +221,9 @@ async function authRegister(body) {
   return { status: 200, data: { ok: true, token, player: playerPublic(saved) } };
 }
 
-async function authLogin(body) {
+async function authLogin(req, body) {
+  const limited = allowAuthAttempt(req, body?.email);
+  if (limited) return limited;
   const email = normEmail(body?.email);
   const password = body?.password;
   const player = await findPlayerByEmail(email);
@@ -198,7 +241,9 @@ async function authLogin(body) {
   return { status: 200, data: { ok: true, token, player: playerPublic(player) } };
 }
 
-async function authForgotPassword(body) {
+async function authForgotPassword(req, body) {
+  const limited = allowAuthAttempt(req, body?.email);
+  if (limited) return limited;
   const email = normEmail(body?.email);
   if (!isValidEmail(email)) {
     return { status: 400, data: { ok: false, error: "EMAIL_INVALID" } };
@@ -207,12 +252,22 @@ async function authForgotPassword(body) {
   if (!player) {
     return { status: 200, data: { ok: true, sent: false } };
   }
-  const plain = decryptPassword(player.passwordEnc);
-  if (!plain) {
-    return { status: 503, data: { ok: false, error: "PASSWORD_NOT_RECOVERABLE" } };
+  const lastAt = forgotLastSent.get(email) || 0;
+  if (Date.now() - lastAt < FORGOT_COOLDOWN_MS) {
+    const waitSec = Math.ceil((FORGOT_COOLDOWN_MS - (Date.now() - lastAt)) / 1000);
+    return {
+      status: 429,
+      data: { ok: false, error: "FORGOT_COOLDOWN", retryAfterSec: waitSec },
+    };
+  }
+  const tempPassword = newTemporaryPassword();
+  setPlayerPassword(player, tempPassword);
+  const save = await persistPlayer(player);
+  if (!save.ok) {
+    return { status: 500, data: { ok: false, error: save.error || "SAVE_FAILED" } };
   }
   try {
-    await sendPasswordResetEmail(email, plain);
+    await sendPasswordResetEmail(email, tempPassword);
   } catch (e) {
     const code = String(e?.message || "").includes("MAIL_NOT_CONFIGURED")
       ? "MAIL_NOT_CONFIGURED"
@@ -222,7 +277,8 @@ async function authForgotPassword(body) {
     console.error("[auth] forgot-password:", e?.cause?.message || e?.message || e);
     return { status: 503, data: { ok: false, error: code } };
   }
-  console.log(`[auth] senha lembrada por e-mail (sem alterar) → ${email}`);
+  forgotLastSent.set(email, Date.now());
+  console.log(`[auth] senha temporária enviada por e-mail → ${email}`);
   return { status: 200, data: { ok: true, sent: true } };
 }
 
@@ -251,20 +307,16 @@ async function authChangePassword(req, body) {
     return { status: 500, data: { ok: false, error: r.error || "SAVE_FAILED" } };
   }
 
+  let mailSent = true;
   try {
     await sendPasswordChangedEmail(player.email, next);
   } catch (e) {
-    const code = String(e?.message || "").includes("MAIL_NOT_CONFIGURED")
-      ? "MAIL_NOT_CONFIGURED"
-      : String(e?.message || "").includes("MAIL_BAD_CREDENTIALS")
-        ? "MAIL_BAD_CREDENTIALS"
-        : "MAIL_FAILED";
+    mailSent = false;
     console.error("[auth] change-password mail:", e?.cause?.message || e?.message || e);
-    return { status: 503, data: { ok: false, error: code } };
   }
 
-  console.log(`[auth] senha alterada e enviada por e-mail → ${player.email}`);
-  return { status: 200, data: { ok: true } };
+  console.log(`[auth] senha alterada → ${player.email} (mailSent=${mailSent})`);
+  return { status: 200, data: { ok: true, mailSent } };
 }
 
 async function authMe(req) {
@@ -334,11 +386,22 @@ async function authProfile(req, body) {
         return { status: 400, data: { ok: false, error: "BAD_NAME" } };
       }
       const key = name.toLowerCase();
-      const owner = await getDisplayNameOwner(key);
-      if (owner && owner !== player.id) {
+      const existing = await getDisplayNameOwner(key);
+      if (existing && existing !== player.id) {
         return { status: 409, data: { ok: false, error: "NAME_TAKEN" } };
       }
-      await updateDisplayName(player.id, player.displayName, name);
+      try {
+        await updateDisplayName(player.id, player.displayName, name);
+      } catch (e) {
+        if (String(e?.message || e) === "NAME_TAKEN") {
+          return { status: 409, data: { ok: false, error: "NAME_TAKEN" } };
+        }
+        throw e;
+      }
+      const owner = await getDisplayNameOwner(key);
+      if (!owner || owner !== player.id) {
+        return { status: 409, data: { ok: false, error: "NAME_TAKEN" } };
+      }
       player.displayName = name;
       player.displayNameLocked = true;
     }
@@ -375,20 +438,34 @@ async function authProfile(req, body) {
 
 const MATCH_XP = {
   ai: { win: 2, lose: 1 },
-  pvp: { win: 4, lose: 2 },
+  ai_normal: { win: 2, lose: 1 },
+  ai_hard: { win: 3, lose: 1 },
+  pvp: { win: 5, lose: 2 },
 };
+
+function resolveMatchXpKey(matchType, aiDifficulty) {
+  if (matchType === "pvp") return "pvp";
+  if (matchType !== "ai") return null;
+  if (aiDifficulty === "hard" || matchType === "ai_hard") return "ai_hard";
+  return "ai_normal";
+}
 
 async function authAwardMatchXp(req, body) {
   const player = await authFromHeader(req);
   if (!player) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
 
-  const matchType = body?.matchType === "pvp" ? "pvp" : body?.matchType === "ai" ? "ai" : null;
+  const rawType = body?.matchType;
+  const matchType = rawType === "pvp" || rawType === "ai" || rawType === "ai_hard" || rawType === "ai_normal"
+    ? rawType
+    : null;
   const outcome = body?.outcome === "win" ? "win" : body?.outcome === "lose" ? "lose" : null;
   if (!matchType || !outcome) {
     return { status: 400, data: { ok: false, error: "BAD_MATCH" } };
   }
 
-  const gain = MATCH_XP[matchType][outcome];
+  const key = resolveMatchXpKey(matchType, body?.aiDifficulty)
+    || (matchType === "pvp" ? "pvp" : "ai_normal");
+  const gain = MATCH_XP[key]?.[outcome] ?? MATCH_XP.ai[outcome];
   const before = statsFromTotalXp(player.xpTotal || 0);
   player.xpTotal = (player.xpTotal || 0) + gain;
   const r = await persistPlayer(player, { expectedRevision: Number(player.profileRevision ?? 0) });
@@ -402,6 +479,7 @@ async function authAwardMatchXp(req, body) {
     data: {
       ok: true,
       gain,
+      matchKey: key,
       leveledUp: after.level > before.level,
       player: playerPublic(r.player),
     },
@@ -473,11 +551,11 @@ export async function handleAuthHttp(req, res) {
     }
   }
 
-  const fakeReq = { method: req.method, headers: req.headers, body };
+  const fakeReq = { method: req.method, headers: req.headers, body, socket: req.socket, ip: req.socket?.remoteAddress };
   let result = null;
-  if (req.method === "POST" && pathname === "/auth/register") result = await authRegister(body);
-  else if (req.method === "POST" && pathname === "/auth/login") result = await authLogin(body);
-  else if (req.method === "POST" && pathname === "/auth/forgot-password") result = await authForgotPassword(body);
+  if (req.method === "POST" && pathname === "/auth/register") result = await authRegister(fakeReq, body);
+  else if (req.method === "POST" && pathname === "/auth/login") result = await authLogin(fakeReq, body);
+  else if (req.method === "POST" && pathname === "/auth/forgot-password") result = await authForgotPassword(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/change-password") result = await authChangePassword(fakeReq, body);
   else if (req.method === "GET" && pathname === "/auth/me") result = await authMe(fakeReq);
   else if (req.method === "PATCH" && pathname === "/auth/profile") result = await authProfile(fakeReq, body);
@@ -492,17 +570,17 @@ export async function handleAuthHttp(req, res) {
 
 export function registerAuthRoutes(app) {
   app.post("/auth/register", async (req, res) => {
-    const r = await authRegister(req.body);
+    const r = await authRegister(req, req.body);
     res.status(r.status).json(r.data);
   });
 
   app.post("/auth/login", async (req, res) => {
-    const r = await authLogin(req.body);
+    const r = await authLogin(req, req.body);
     res.status(r.status).json(r.data);
   });
 
   app.post("/auth/forgot-password", async (req, res) => {
-    const r = await authForgotPassword(req.body);
+    const r = await authForgotPassword(req, req.body);
     res.status(r.status).json(r.data);
   });
 

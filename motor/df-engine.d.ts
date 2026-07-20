@@ -39,6 +39,13 @@ export interface RulesApi {
     defaultSummonInsertIndex(fieldLen: number): number;
     championSummonCost(card: Record<string, unknown>): number;
     combatOutcome(att: Record<string, unknown>, def: Record<string, unknown>): Record<string, unknown>;
+    combatVictoryPointReward(champ: Record<string, unknown>): number;
+    hasNoHonor(champ: Record<string, unknown>): boolean;
+    applyOnDestroyBurst(state: GameState, ownerIdx: number, champ: Record<string, unknown>, reason: string, rng?: () => number): {
+        ability?: string | null;
+        targets?: Record<string, unknown>[];
+        applied?: Record<string, unknown>[];
+    };
     getAttackActionCost(att: Record<string, unknown>, def: Record<string, unknown>): number;
     applyMaintenanceCounters(state: GameState, pid: number): void;
     computeMaintenancePlan(state: GameState, pid: number): {

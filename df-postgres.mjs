@@ -45,10 +45,16 @@ export async function initPostgres() {
     console.log("[postgres] histórico/replays ativo");
     return { enabled: true };
   } catch (e) {
-    console.warn("[postgres] indisponível:", e.message);
     enabled = false;
     pool = null;
-    return { enabled: false, error: e.message };
+    const msg = e?.message || String(e);
+    // Produção com DATABASE_URL: nunca cair em accounts.json efêmero (perda de dados).
+    if (process.env.NODE_ENV === "production" || process.env.DF_REQUIRE_POSTGRES === "1") {
+      console.error("[postgres] FATAL: DATABASE_URL definida mas init falhou:", msg);
+      throw new Error(`POSTGRES_REQUIRED_FAILED: ${msg}`);
+    }
+    console.warn("[postgres] indisponível (dev):", msg);
+    return { enabled: false, error: msg };
   }
 }
 

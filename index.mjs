@@ -41,6 +41,7 @@ import {
 import { getMmr, getRankedProfile, recordRankedMatch } from "./df-ranked-store.mjs";
 import { initPostgres, isPostgresEnabled, getReplayByRoomCode, shutdownPostgres } from "./df-postgres.mjs";
 import { initAuthStore, getAuthStoreMode } from "./df-auth.mjs";
+import { authPlayerFromToken } from "./df-auth-store.mjs";
 import { recordMatchEnd } from "./df-match-history.mjs";
 import { applyAuthoritativeAction, seedRoomFromSnapshot, buildReplayPayload } from "./df-authority.mjs";
 import { loadPersistedRooms, schedulePersistRooms, flushPersistRooms } from "./room-persist.mjs";
@@ -48,7 +49,7 @@ import { createRateLimiter } from "./rate-limit.mjs";
 import { readGameVersion } from "./df-game-version.mjs";
 import { createInitialMatchState } from "./df-match-init.mjs";
 import { registerAuthRoutes } from "./df-auth.mjs";
-import { logMailStatusOnBoot } from "./df-auth-mail.mjs";
+import { logMailStatusOnBoot, isMailConfigured } from "./df-auth-mail.mjs";
 import {
   validateJoinRoom,
   validateSetHero,
@@ -105,6 +106,7 @@ app.get("/health", (_req, res) => {
     matchmaking: getMatchmakingMode(),
     postgres: isPostgresEnabled(),
     authStore: getAuthStoreMode(),
+    mailConfigured: isMailConfigured(),
   });
 });
 
@@ -428,7 +430,7 @@ io.on("connection", (socket) => {
     ack?.({ ok: true, ...match });
   });
 
-  socket.on("join_ranked_queue", (payload, ack) => {
+  socket.on("join_ranked_queue", async (payload, ack) => {
     const schema = validateJoinRankedQueue(payload);
     if (!schema.ok) return ack?.({ ok: false, error: schema.error });
     removeFromQueue(socket.id);
@@ -443,7 +445,15 @@ io.on("connection", (socket) => {
       }
     }
     leaveSocketRoom(socket);
-    const playerId = schema.playerId || `anon-${socket.id.slice(0, 12)}`;
+    let playerId = schema.playerId || null;
+    const tok = payload?.token || payload?.authToken;
+    if (tok) {
+      try {
+        const account = await authPlayerFromToken(String(tok));
+        if (account?.id) playerId = account.id;
+      } catch (e) { /* keep schema playerId */ }
+    }
+    if (!playerId) playerId = `anon-${socket.id.slice(0, 12)}`;
     const info = addToRankedQueue(socket.id, playerId);
     ack?.({
       ok: true,
@@ -452,6 +462,7 @@ io.on("connection", (socket) => {
       mmr: info.mmr,
       joinedAt: Date.now(),
       mode: getMatchmakingMode(),
+      playerId,
     });
   });
 

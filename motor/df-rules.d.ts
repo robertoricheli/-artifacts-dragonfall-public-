@@ -5,9 +5,11 @@ declare const LIMITS: Readonly<{
     MAX_FIELD: 6;
     MAX_HAND: 8;
     PASSIVE_VP_PER_TURN_CAP: 2;
-    /** @deprecated Use MAX_FIELD — mantido só por compat de tipos. */
+    /** Manual §3: invocar dragão bloqueado com 4+ aliados em campo. */
     INVOKE_DRAGON_MAX_FIELD: 4;
 }>;
+/** Invocar dragão/filhote bloqueado com 4+ aliados (manual), independente do teto de campo. */
+declare function invokeDragonBlocked(state: any, pIdx: any, card: any, limits?: typeof LIMITS): boolean;
 declare function championPrintedPower(c: any): any;
 declare function championSummonCost(c: any): any;
 declare function isOverpower(c: any): boolean;
@@ -18,6 +20,27 @@ declare function onEnterNeedsEnemy(onEnter: any): boolean;
 declare function totalEnemyFieldCount(state: any, pIdx: any): number;
 declare function gatherEnemyTargets(state: any, casterIdx: any, filterFn: any): any[];
 declare function gatherAllyTargets(state: any, casterIdx: any, exclude: any, filter: any): any[];
+/** Sem Honra nativo, copiado ou concedido por Corromper; Silêncio desativa todos. */
+declare function hasNoHonor(champ: any): boolean;
+/** Habilidade passiva efetiva disparada após a destruição. */
+declare function resolveOnDestroyAbility(champ: any): any;
+declare function getFuryStacks(champ: any): number;
+/** Concede cargas acumuláveis de Fúria com uma única duração renovada. */
+declare function grantFuryStacks(champ: any, amount?: number): number;
+/** Remove cargas porque houve redução real; o Poder já foi reduzido pelo chamador. */
+declare function consumeFuryStacks(champ: any, amount: any): number;
+/** Expira todas as cargas sem tratar a retirada do bônus como dano real. */
+declare function expireFuryStacks(champ: any): number;
+declare function isCombatOrPowerReductionDestroy(reason: any): boolean;
+/**
+ * Resolve Explosão de Gelo/Venenosa e Retaliação após retirar o portador.
+ * Retorna alvos escolhidos sem repetição; não concede PV imediato.
+ */
+declare function applyOnDestroyBurst(state: any, ownerIdx: any, champ: any, reason: any, rng?: () => number): {
+    ability: any;
+    targets: any[];
+    applied: any[];
+};
 declare function hasNecromanciaTarget(state: any, pIdx: any): boolean;
 declare function hasTrocaInjustaTarget(state: any, pIdx: any): boolean;
 declare function hasPesadeloTarget(state: any, casterIdx: any): boolean;
@@ -114,6 +137,8 @@ declare function combatOutcome(a: any, d: any): {
     swords: string[];
     over: boolean;
 };
+/** Recompensa de uma destruição válida em combate; Sem Honra é avaliado no alvo. */
+declare function combatVictoryPointReward(winner: any): 1 | 2;
 /** Lista pares de ataque legais para um jogador. */
 declare function listLegalAttacks(state: any, attOwner: any): any[];
 declare function findReactiveTalentHandIndex(state: any, pIdx: any, talentEffect: any): any;
@@ -166,11 +191,14 @@ declare function computeMaintenancePlan(state: any, pIdx: any): {
     clearGuerra: boolean;
 };
 /**
- * Reduz Poder do campeão. Qualquer redução real dissolve Muralha (`wallBuff`).
- * @returns {{ dissolvedWall: boolean }}
+ * Reduz Poder do campeão. Redução real dissolve Muralha e consome primeiro
+ * a mesma quantidade de cargas de Fúria, preservando o Poder permanente.
+ * @returns {{ dissolvedWall: boolean, clearedFury: boolean, furyStacksRemoved: number }}
  */
 declare function reduceChampionPower(champ: any, amount: any, opts?: Record<string, unknown>): {
     dissolvedWall: boolean;
+    clearedFury: boolean;
+    furyStacksRemoved: number;
 };
 /** Início do turno do dono da Muralha: remove o +1 temporário (só quem tem wallBuff). */
 declare function expireWallBonusOnTurnStart(state: any, pIdx: any): void;
@@ -229,10 +257,11 @@ declare const DfRules: {
         MAX_FIELD: 6;
         MAX_HAND: 8;
         PASSIVE_VP_PER_TURN_CAP: 2;
-        /** @deprecated Use MAX_FIELD — mantido só por compat de tipos. */
+        /** Manual §3: invocar dragão bloqueado com 4+ aliados em campo. */
         INVOKE_DRAGON_MAX_FIELD: 4;
     }>;
     ON_ENTER_NEEDS_ENEMY: readonly string[];
+    invokeDragonBlocked: typeof invokeDragonBlocked;
     championPrintedPower: typeof championPrintedPower;
     championSummonCost: typeof championSummonCost;
     isOverpower: typeof isOverpower;
@@ -243,6 +272,15 @@ declare const DfRules: {
     totalEnemyFieldCount: typeof totalEnemyFieldCount;
     gatherEnemyTargets: typeof gatherEnemyTargets;
     gatherAllyTargets: typeof gatherAllyTargets;
+    hasNoHonor: typeof hasNoHonor;
+    resolveOnDestroyAbility: typeof resolveOnDestroyAbility;
+    getFuryStacks: typeof getFuryStacks;
+    grantFuryStacks: typeof grantFuryStacks;
+    consumeFuryStacks: typeof consumeFuryStacks;
+    expireFuryStacks: typeof expireFuryStacks;
+    POWER_REDUCTION_DESTROY_REASONS: readonly string[];
+    isCombatOrPowerReductionDestroy: typeof isCombatOrPowerReductionDestroy;
+    applyOnDestroyBurst: typeof applyOnDestroyBurst;
     gatherImitableAllies: typeof gatherImitableAllies;
     hasNecromanciaTarget: typeof hasNecromanciaTarget;
     hasTrocaInjustaTarget: typeof hasTrocaInjustaTarget;
@@ -265,6 +303,7 @@ declare const DfRules: {
     canAttackerTargetDefender: typeof canAttackerTargetDefender;
     canAttack: typeof canAttack;
     combatOutcome: typeof combatOutcome;
+    combatVictoryPointReward: typeof combatVictoryPointReward;
     listLegalAttacks: typeof listLegalAttacks;
     REACTIVE_TALENTS: Readonly<{
         BLOCK: "bloquearAtaque";

@@ -1,11 +1,16 @@
 /**
  * Versão do jogo alinhada ao deploy web (netlify-dist / df-game-view).
+ * Monorepo: este arquivo vive em server/ → raiz = ..
+ * Pacote Render: arquivos na raiz do repo → raiz = .
  */
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = fs.existsSync(path.join(HERE, "artifacts", "dragonfall"))
+  ? HERE
+  : path.join(HERE, "..");
 
 export function readGameVersion() {
   if (process.env.DF_GAME_VERSION) return process.env.DF_GAME_VERSION;

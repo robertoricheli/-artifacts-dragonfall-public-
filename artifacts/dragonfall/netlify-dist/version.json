@@ -1,0 +1,21 @@
+{
+  "build": "a0b7d3ed2efc",
+  "sourceHash": "a0b7d3ed2efc",
+  "displayVersion": "1.47.72",
+  "builtAt": "2026-07-18T19:25:46.666Z",
+  "publishFolder": "artifacts/dragonfall/netlify-dist",
+  "pipeline": "game.html → prepare-netlify-deploy.mjs → netlify-dist",
+  "localServerUrl": "http://127.0.0.1:5173/",
+  "cardPngCount": 91,
+  "artLoader": "img-head-v1",
+  "checks": {
+    "ANTI-MAGOS": true,
+    "BOLT": true,
+    "TOXINA": true,
+    "MANDAGORA": true,
+    "auraAntiMagia": true,
+    "raioDuplo": true,
+    "ai-mode-select": true,
+    "btn-ai-mode-normal": true
+  }
+}

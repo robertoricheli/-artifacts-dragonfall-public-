@@ -16,6 +16,7 @@ import {
   pgAuthPlayerFromToken,
   pgGetDisplayNameOwner,
   pgSetDisplayName,
+  pgPrunePlayerSessions,
 } from "./df-auth-pg.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -64,6 +65,13 @@ function pruneJsonSessions() {
 }
 
 export async function initAuthStore() {
+  if (process.env.DATABASE_URL && !isPostgresEnabled()) {
+    const msg = "DATABASE_URL definida mas Postgres não está ativo — abortando auth JSON";
+    if (process.env.NODE_ENV === "production" || process.env.DF_REQUIRE_POSTGRES === "1") {
+      throw new Error(`AUTH_STORE_POSTGRES_REQUIRED: ${msg}`);
+    }
+    console.warn("[auth-store]", msg);
+  }
   if (isPostgresEnabled()) {
     await initAuthPgSchema();
     mode = "postgres";
@@ -159,8 +167,27 @@ export async function updateDisplayName(playerId, oldName, newName) {
     await pgSetDisplayName(playerId, oldKey, newKey);
     return;
   }
+  if (newKey && store.displayNames[newKey] && store.displayNames[newKey] !== playerId) {
+    throw new Error("NAME_TAKEN");
+  }
   if (oldKey) delete store.displayNames[oldKey];
   if (newKey) store.displayNames[newKey] = playerId;
+  saveJsonStore();
+}
+
+/** Mantém no máximo `keep` sessões do jogador (login cria +1 depois). */
+export async function prunePlayerSessions(playerId, keep = 7) {
+  if (mode === "postgres") {
+    await pgPrunePlayerSessions(playerId, keep);
+    return;
+  }
+  pruneJsonSessions();
+  const entries = Object.entries(store.sessions)
+    .filter(([, s]) => s?.playerId === playerId)
+    .sort((a, b) => (b[1].expiresAt || 0) - (a[1].expiresAt || 0));
+  for (let i = Math.max(0, keep | 0); i < entries.length; i++) {
+    delete store.sessions[entries[i][0]];
+  }
   saveJsonStore();
 }
 

@@ -221,18 +221,47 @@ export async function pgSetDisplayName(playerId, oldKey, newKey) {
       ]);
     }
     if (newKey) {
-      await client.query(
-        "INSERT INTO df_display_names (name_key, player_id) VALUES ($1, $2) ON CONFLICT (name_key) DO NOTHING",
+      const ins = await client.query(
+        `INSERT INTO df_display_names (name_key, player_id) VALUES ($1, $2)
+         ON CONFLICT (name_key) DO NOTHING
+         RETURNING player_id`,
         [newKey, playerId],
       );
+      if (!ins.rows[0]) {
+        const owner = await client.query(
+          "SELECT player_id FROM df_display_names WHERE name_key = $1 LIMIT 1",
+          [newKey],
+        );
+        if (owner.rows[0]?.player_id && owner.rows[0].player_id !== playerId) {
+          await client.query("ROLLBACK");
+          throw new Error("NAME_TAKEN");
+        }
+      }
     }
     await client.query("COMMIT");
   } catch (e) {
-    await client.query("ROLLBACK");
+    try { await client.query("ROLLBACK"); } catch (_) { /* */ }
     throw e;
   } finally {
     client.release();
   }
+}
+
+/** Mantém no máximo `keep` sessões mais recentes do jogador. */
+export async function pgPrunePlayerSessions(playerId, keep = 7) {
+  const pool = getPgPool();
+  if (!pool || !playerId) return;
+  await pool.query(
+    `DELETE FROM df_sessions
+     WHERE player_id = $1
+       AND token NOT IN (
+         SELECT token FROM df_sessions
+         WHERE player_id = $1
+         ORDER BY expires_at DESC
+         LIMIT $2
+       )`,
+    [playerId, Math.max(0, keep | 0)],
+  );
 }
 
 /** Upsert player + optional display name (migration). */

@@ -78,21 +78,31 @@ export function isMailConfigured() {
 
 function buildMessage(password, kind = "reminder") {
   const subject = kind === "changed"
-    ? "Dragonfall — sua nova senha"
-    : "Dragonfall — sua senha";
+    ? "Dragonfall — senha alterada no perfil"
+    : kind === "setup-test"
+      ? "[TESTE] Dragonfall — configuração de e-mail"
+      : "Dragonfall — senha temporária de recuperação";
   const intro = kind === "changed"
-    ? "Sua senha no Dragonfall foi alterada."
-    : "Você solicitou lembrar sua senha no Dragonfall.";
+    ? "Você alterou sua senha no perfil do Dragonfall. Abaixo está a nova senha que você escolheu:"
+    : kind === "setup-test"
+      ? "Este é um e-mail de TESTE de configuração SMTP. Não é recuperação de senha e sua senha do jogo NÃO mudou."
+      : "Você pediu recuperação de senha no Dragonfall. Geramos uma senha TEMPORÁRIA nova (a antiga foi invalidada).";
   const text = [
     "Olá,",
     "",
     intro,
     "",
-    `Sua senha é: ${password}`,
+    kind === "setup-test"
+      ? "Se você recebeu este e-mail, o envio está funcionando."
+      : `Sua senha ${kind === "changed" ? "cadastrada" : "temporária"} é: ${password}`,
     "",
-    "Use-a na tela de LOGIN para entrar no jogo.",
+    kind === "setup-test"
+      ? "Feche este e-mail. Para recuperar sua senha de verdade, use Esqueci a senha no jogo."
+      : kind === "changed"
+        ? "Use-a na tela de LOGIN para entrar no jogo."
+        : "Use-a na tela de LOGIN e depois altere a senha no perfil.",
     "",
-    "Se você não pediu isso, ignore este e-mail.",
+    "Se você não pediu isso, ignore este e-mail e altere a senha no perfil se conseguir entrar.",
     "",
     "— Dragonfall",
   ].join("\n");
@@ -100,9 +110,13 @@ function buildMessage(password, kind = "reminder") {
     <div style="font-family:Segoe UI,Arial,sans-serif;line-height:1.55;color:#1a1428;max-width:480px">
       <p>Olá,</p>
       <p>${intro}</p>
-      <p>Sua senha é:</p>
+      ${kind === "setup-test"
+        ? "<p>Se você recebeu este e-mail, o envio está funcionando.</p><p><strong>Sua senha do jogo não mudou.</strong> Para recuperar a senha real, use <em>Esqueci a senha</em> no jogo.</p>"
+        : `<p>Sua senha <strong>${kind === "changed" ? "cadastrada" : "temporária"}</strong> é:</p>
       <p style="font-size:1.35rem;font-weight:700;letter-spacing:0.05em;color:#5a3a8a;margin:16px 0">${password}</p>
-      <p>Use-a na tela de <strong>LOGIN</strong> para entrar no jogo.</p>
+      <p>${kind === "changed"
+        ? "Use-a na tela de <strong>LOGIN</strong> para entrar no jogo."
+        : "Use-a na tela de <strong>LOGIN</strong> e depois altere a senha no perfil."}</p>`}
       <p style="color:#666;font-size:0.88rem;margin-top:24px">Se você não pediu isso, ignore este e-mail.</p>
     </div>`;
   return { subject, text, html };
@@ -179,6 +193,11 @@ async function deliverPasswordEmail(to, password, kind) {
 
 export async function sendPasswordResetEmail(to, password) {
   await deliverPasswordEmail(to, password, "reminder");
+}
+
+/** E-mail de teste ao rodar CONFIGURAR-EMAIL.bat — NÃO é recuperação de senha. */
+export async function sendMailConfigTestEmail(to) {
+  await deliverPasswordEmail(to, "", "setup-test");
 }
 
 export async function sendPasswordChangedEmail(to, password) {

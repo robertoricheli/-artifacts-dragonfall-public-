@@ -19,6 +19,11 @@ services:
         fromDatabase:
           name: dragonfall-postgres
           property: connectionString
+      # Obrigatório em produção: chave estável para passwordEnc (não regenerar a cada deploy).
+      # Dashboard → Environment → DF_AUTH_ENC_KEY = string secreta longa (32+ chars).
+      # Sem isso, após redeploy "Esqueci a senha" / recover pode falhar.
+      - key: DF_AUTH_ENC_KEY
+        sync: false
       # E-mail (Esqueci a senha) — ver server/MAIL-SETUP.md
       # - key: DF_SMTP_HOST
       #   value: smtp.gmail.com

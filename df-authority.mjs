@@ -13,7 +13,6 @@ import {
 
 /** Tipos aplicados no servidor — espelha DfEngine.applyAction (motor TS). */
 export const AUTHORITATIVE_TYPES = new Set([
-  "DRAW_CARD",
   "SUMMON",
   "ATTACK_RESOLVE",
   "END_TURN",

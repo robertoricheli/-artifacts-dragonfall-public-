@@ -51,7 +51,7 @@ function validateCommonBounds(prev, next, seat, actionType) {
   for (let p = 0; p < next.players.length; p++) {
     const pl = next.players[p];
     if ((pl.hand?.length ?? 0) > 8) return { ok: false, error: "HAND_OVERFLOW" };
-    if ((pl.field?.length ?? 0) > 7) return { ok: false, error: "FIELD_OVERFLOW" };
+    if ((pl.field?.length ?? 0) > 6) return { ok: false, error: "FIELD_OVERFLOW" };
     if (pl.actions != null && (pl.actions < 0 || pl.actions > 3)) return { ok: false, error: "BAD_ACTIONS" };
     if (pl.vp != null && (pl.vp < 0 || pl.vp > 20)) return { ok: false, error: "BAD_VP" };
   }

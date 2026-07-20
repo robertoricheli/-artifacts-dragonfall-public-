@@ -26,8 +26,10 @@ function swapFieldChamps(state, casterIdx, casterFieldIdx, enemyP, enemyI) {
         return false;
     for (const ch of [a, e]) {
         ch.freeAttack = false;
-        ch.shielded = false;
-        ch.shieldedTurns = 0;
+        if (!ch.shieldedPermanent) {
+            ch.shielded = false;
+            ch.shieldedTurns = 0;
+        }
         ch.guerraBuff = false;
         ch.guerraBuffTurns = 0;
     }
@@ -51,7 +53,17 @@ function destroyAtField(state, p, i, events, reason) {
     state.players[p].field.splice(i, 1);
     state.players[p].discard = state.players[p].discard || [];
     state.players[p].discard.push(champ);
-    events.push({ type: "DESTROY", p, i, reason, name: champ.name });
+    events.push({ type: "DESTROY", p, i, reason, name: champ.name, uid: champ.uid });
+    const burst = R()?.applyOnDestroyBurst?.(state, p, champ, reason);
+    if (burst?.ability) {
+        events.push({
+            type: "ON_DESTROY_BURST",
+            ownerIdx: p,
+            source: champ.name,
+            reason,
+            ...burst,
+        });
+    }
 }
 function findCardDef(name) {
     return D()?.cardDefs?.find((c) => c.name === name) || null;
@@ -63,6 +75,7 @@ function clearChampionFieldStatuses(c) {
     c.frozenTurns = 0;
     c.shielded = false;
     c.shieldedTurns = 0;
+    c.shieldedPermanent = false;
     c.freeAttack = false;
     c.silenced = false;
     c.poisoned = false;
@@ -84,10 +97,15 @@ function clearChampionFieldStatuses(c) {
     c.fireAuraTurns = 0;
     c.fury = false;
     c.furyTurns = 0;
+    c.furyStacks = 0;
     c.furyBonusActive = false;
     c.vulnerable = false;
+    c.corruptedNoHonor = false;
 }
 function inferConstantOnDestroy(card) {
+    const rules = R();
+    if (rules?.resolveOnDestroyAbility)
+        return rules.resolveOnDestroyAbility(card);
     if (!card || card.onDestroy)
         return card?.onDestroy || null;
     const norm = (s) => String(s || "").toLowerCase()
@@ -101,6 +119,10 @@ function inferConstantOnDestroy(card) {
         return "vinganca";
     if (n.includes("sem honra"))
         return "noHonor";
+    if (n === "explosao de gelo")
+        return "explosaoGelo";
+    if (n === "explosao venenosa")
+        return "explosaoVenenosa";
     return null;
 }
 function inferConstantEffect(card) {
@@ -168,11 +190,13 @@ function planOnEnterImpl(state, casterIdx, fieldIdx) {
         return { ok: false, code: leg.code, mode: "blocked" };
     const instantAuto = new Set([
         "fumacaToxica", "raioDuplo", "pesadelo", "roubar", "desacelerar",
+        "armaduraDeVidro", "gritoDeGuerra",
     ]);
     const targetEnemy = new Set([
-        "bolaDeFogo", "assassinar", "transformarBichinho",
+        "bolaDeFogo", "assassinar", "transformarBichinho", "rajadaCongelante",
+        "mordidaVenenosa",
     ]);
-    const targetAlly = new Set(["fortalecer", "devorar", "imitar", "ursificacao"]);
+    const targetAlly = new Set(["fortalecer", "devorar", "imitar", "ursificacao", "corromper"]);
     /* pesadelo/roubar/desacelerar migraram pra instantAuto — set vazio
        evita ReferenceError se algum onEnter novo usar targetKind player. */
     const targetPlayer = new Set([]);
@@ -200,6 +224,8 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
     const caster = state.players[casterIdx]?.field?.[fieldIdx];
     if (!caster?.onEnter)
         return { ok: true, state, events };
+    if (caster.silenced)
+        return { ok: true, state, events };
     const key = caster.onEnter;
     const rng = resolution.rng || Math.random;
     switch (key) {
@@ -207,6 +233,20 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             state.players[casterIdx].actions = (state.players[casterIdx].actions ?? 0) + 1;
             markOnEnterUsed(state, casterIdx, key);
             events.push({ type: "RAPIDEZ", casterIdx, visual: "wings" });
+            break;
+        }
+        case "armaduraDeVidro": {
+            caster.shielded = true;
+            caster.shieldedTurns = 0;
+            caster.shieldedPermanent = true;
+            caster.vulnerable = true;
+            markOnEnterUsed(state, casterIdx, key);
+            events.push({
+                type: "ARMADURA_DE_VIDRO",
+                casterIdx,
+                fieldIdx,
+                visual: "glass_armor",
+            });
             break;
         }
         case "pesadelo": {
@@ -306,6 +346,57 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             }
             break;
         }
+        case "corromper": {
+            const ti = resolution.targetI;
+            const ally = state.players[casterIdx]?.field?.[ti];
+            if (!ally)
+                break;
+            const abilityName = String(ally.mimicAbilityName || ally.abilityName || "");
+            const nativeNoHonor = ally.onDestroy === "noHonor"
+                || ally.mimicOnDestroy === "noHonor"
+                || abilityName.toLowerCase().normalize("NFD")
+                    .replace(/[\u0300-\u036f]/g, "").includes("sem honra");
+            const alreadyNoHonor = nativeNoHonor || !!ally.corruptedNoHonor;
+            if (!alreadyNoHonor)
+                ally.corruptedNoHonor = true;
+            markOnEnterUsed(state, casterIdx, key);
+            events.push({
+                type: "CORROMPER",
+                casterIdx,
+                fieldIdx,
+                targetP: casterIdx,
+                targetI: ti,
+                targetName: ally.name,
+                alreadyNoHonor,
+                visual: "corrupt",
+            });
+            break;
+        }
+        case "mordidaVenenosa": {
+            const tp = resolution.targetP;
+            const ti = resolution.targetI;
+            const target = state.players[tp]?.field?.[ti];
+            if (!target || tp === casterIdx)
+                break;
+            const alreadyPoisoned = !!target.poisoned;
+            if (!alreadyPoisoned) {
+                target.poisoned = true;
+                target.poisonTurns = 2;
+                target.poisonedByP = casterIdx;
+            }
+            markOnEnterUsed(state, casterIdx, key);
+            events.push({
+                type: "MORDIDA_VENENOSA",
+                casterIdx,
+                fieldIdx,
+                targetP: tp,
+                targetI: ti,
+                targetName: target.name,
+                applied: !alreadyPoisoned,
+                visual: "poison",
+            });
+            break;
+        }
         case "devorar": {
             const ti = resolution.targetI;
             const ally = state.players[casterIdx]?.field?.[ti];
@@ -327,8 +418,22 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             const t = state.players[tp]?.field?.[ti];
             if (!t)
                 break;
-            reduceChampionPower(t, 1);
             markOnEnterUsed(state, casterIdx, key);
+            // Barreira bloqueia a 1ª redução — Fúria e Poder permanecem.
+            if (t.barrier) {
+                t.barrier = false;
+                t.barrierTurns = 0;
+                events.push({
+                    type: "BARRIER_BLOCKED",
+                    casterIdx,
+                    targetP: tp,
+                    targetI: ti,
+                    source: "bolaDeFogo",
+                    visual: "barrier_block",
+                });
+                break;
+            }
+            reduceChampionPower(t, 1);
             events.push({ type: "BOLA_DE_FOGO", casterIdx, targetP: tp, targetI: ti, visual: "bola_de_fogo" });
             if (t.currentPower <= 0)
                 destroyAtField(state, tp, ti, events, "bolaDeFogo");
@@ -338,11 +443,49 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             const tp = resolution.targetP;
             const ti = resolution.targetI;
             const t = state.players[tp]?.field?.[ti];
-            if (!t || t.currentPower !== 1 || t.shielded)
+            if (!t || t.currentPower !== 1)
                 break;
             destroyAtField(state, tp, ti, events, "assassinar");
             markOnEnterUsed(state, casterIdx, key);
             events.push({ type: "ASSASSINAR", casterIdx, targetP: tp, targetI: ti, visual: "assassinar" });
+            break;
+        }
+        case "rajadaCongelante": {
+            const tp = resolution.targetP;
+            const ti = resolution.targetI;
+            const target = state.players[tp]?.field?.[ti];
+            if (!target || tp === casterIdx)
+                break;
+            markOnEnterUsed(state, casterIdx, key);
+            if (target.frozen) {
+                const targetName = target.name;
+                const noHonor = !!R()?.hasNoHonor?.(target);
+                destroyAtField(state, tp, ti, events, "rajadaCongelante");
+                if (!noHonor) {
+                    state.players[casterIdx].vp = (state.players[casterIdx].vp ?? 0) + 1;
+                }
+                events.push({
+                    type: "RAJADA_CONGELANTE_DESTROY",
+                    casterIdx,
+                    targetP: tp,
+                    targetI: ti,
+                    targetName,
+                    vpGain: noHonor ? 0 : 1,
+                    visual: "freeze_shatter",
+                });
+            }
+            else {
+                target.frozen = true;
+                target.frozenTurns = 2;
+                events.push({
+                    type: "RAJADA_CONGELANTE_FREEZE",
+                    casterIdx,
+                    targetP: tp,
+                    targetI: ti,
+                    targetName: target.name,
+                    visual: "freeze",
+                });
+            }
             break;
         }
         case "necromancia": {
@@ -441,25 +584,48 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
         case "furia": {
             if (caster.silenced)
                 break;
-            caster.fury = true;
-            caster.furyTurns = 1;
-            caster.furyBonusActive = true;
-            caster.currentPower = (caster.currentPower ?? 0) + 1;
+            R()?.grantFuryStacks?.(caster, 1);
             markOnEnterUsed(state, casterIdx, key);
-            events.push({ type: "FURIA", casterIdx, fieldIdx, visual: "fury" });
+            events.push({
+                type: "FURIA",
+                casterIdx,
+                fieldIdx,
+                furyStacks: R()?.getFuryStacks?.(caster) || 1,
+                visual: "fury",
+            });
+            break;
+        }
+        case "gritoDeGuerra": {
+            const applied = [];
+            state.players[casterIdx].field.forEach((ally, i) => {
+                if (!ally || i === fieldIdx)
+                    return;
+                R()?.grantFuryStacks?.(ally, 1);
+                applied.push({
+                    p: casterIdx,
+                    i,
+                    name: ally.name,
+                    furyStacks: R()?.getFuryStacks?.(ally) || 1,
+                });
+            });
+            if (!applied.length)
+                break;
+            markOnEnterUsed(state, casterIdx, key);
+            events.push({
+                type: "GRITO_DE_GUERRA",
+                casterIdx,
+                fieldIdx,
+                applied,
+                visual: "fury",
+            });
             break;
         }
         case "guardiao": {
-            const allies = [];
+            const picks = [];
             state.players[casterIdx].field.forEach((c, i) => {
                 if (i !== fieldIdx && c && !c.shielded)
-                    allies.push(i);
+                    picks.push(i);
             });
-            for (let i = allies.length - 1; i > 0; i--) {
-                const j = Math.floor(rng() * (i + 1));
-                [allies[i], allies[j]] = [allies[j], allies[i]];
-            }
-            const picks = allies.slice(0, Math.min(2, allies.length));
             const names = [];
             for (const idx of picks) {
                 const t = state.players[casterIdx].field[idx];
@@ -619,7 +785,8 @@ const ON_ENTER_RESOLVE_KEYS = [
     "rapidez", "pesadelo", "desacelerar", "roubar", "maldicaoSeteMares", "trocaInjusta",
     "fortalecer", "devorar", "bolaDeFogo", "assassinar", "necromancia", "imitar",
     "ursificacao", "transformarBichinho", "furia", "guardiao", "auraAntiMagia",
-    "auraDeFogo", "fumacaToxica", "raioDuplo",
+    "auraDeFogo", "fumacaToxica", "raioDuplo", "armaduraDeVidro",
+    "rajadaCongelante", "corromper", "mordidaVenenosa", "gritoDeGuerra",
 ];
 /** Registra plan + resolve por string no DfEffects (registry unificado). */
 function bootstrapResolveRegistry(E) {
@@ -655,6 +822,7 @@ const DfEffectsResolve = {
     applyReactiveUse,
     applyTalentFromHand,
     swapFieldChamps,
+    inferConstantOnDestroy,
     bootstrapResolveRegistry,
 };
 export function wireEffectsResolveRegistry(effects) {

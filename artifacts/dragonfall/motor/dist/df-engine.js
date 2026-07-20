@@ -177,14 +177,47 @@ export function applyAction(state, action, ctx = {}) {
             if (out.killD) {
                 defField.splice(a.defenderIdx, 1);
                 events.push({ type: "DESTROY", p: a.defenderPlayerId, i: a.defenderIdx, reason: "combat" });
-                if (out.pvTo === "attacker")
-                    events.push({ type: "VP_GAIN", playerId: pid, amount: 1 });
+                const noHonor = R.hasNoHonor(def);
+                if (out.pvTo === "attacker" && !noHonor) {
+                    const amount = R.combatVictoryPointReward(att);
+                    p.vp = (p.vp ?? 0) + amount;
+                    events.push({ type: "VP_GAIN", playerId: pid, amount, reason: "combat" });
+                }
+                const burst = R.applyOnDestroyBurst(next, a.defenderPlayerId, def, "combat", ctx.rng);
+                if (burst?.ability) {
+                    events.push({
+                        type: "ON_DESTROY_BURST",
+                        ownerIdx: a.defenderPlayerId,
+                        source: def.name,
+                        reason: "combat",
+                        ...burst,
+                    });
+                }
             }
             if (out.killA) {
                 field.splice(a.attackerIdx, 1);
                 events.push({ type: "DESTROY", p: pid, i: a.attackerIdx, reason: "combat" });
-                if (out.pvTo === "defender")
-                    events.push({ type: "VP_GAIN", playerId: a.defenderPlayerId, amount: 1 });
+                const noHonor = R.hasNoHonor(att);
+                if (out.pvTo === "defender" && !noHonor) {
+                    const amount = R.combatVictoryPointReward(def);
+                    defP.vp = (defP.vp ?? 0) + amount;
+                    events.push({
+                        type: "VP_GAIN",
+                        playerId: a.defenderPlayerId,
+                        amount,
+                        reason: "combat",
+                    });
+                }
+                const burst = R.applyOnDestroyBurst(next, pid, att, "combat", ctx.rng);
+                if (burst?.ability) {
+                    events.push({
+                        type: "ON_DESTROY_BURST",
+                        ownerIdx: pid,
+                        source: att.name,
+                        reason: "combat",
+                        ...burst,
+                    });
+                }
             }
             break;
         }
@@ -343,7 +376,9 @@ export function autoOnEnterResolution(state, casterIdx, fieldIdx, plan, rng = Ma
         }
     }
     if (plan.targetKind === "ally") {
-        const allies = R.gatherAllyTargets(state, casterIdx, fieldIdx);
+        const allies = ability === "corromper"
+            ? R.gatherAllyTargets(state, casterIdx, -1)
+            : R.gatherAllyTargets(state, casterIdx, fieldIdx);
         if (allies.length) {
             resolution.targetP = allies[0].p;
             resolution.targetI = allies[0].i;

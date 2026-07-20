@@ -2,6 +2,7 @@ import type { DfEffectsApi } from "./df-effects.js";
 export declare function bindEffectsRef(e: DfEffectsApi): void;
 declare function cloneState(state: any): any;
 declare function swapFieldChamps(state: any, casterIdx: any, casterFieldIdx: any, enemyP: any, enemyI: any): boolean;
+declare function inferConstantOnDestroy(card: any): any;
 /** @returns {{ ok: boolean, mode: string, targetKind?: string, ability?: string, events?: object[], code?: string }} */
 declare function planOnEnterImpl(state: any, casterIdx: any, fieldIdx: any): {
     ok: boolean;
@@ -90,6 +91,7 @@ declare const DfEffectsResolve: {
     applyReactiveUse: typeof applyReactiveUse;
     applyTalentFromHand: typeof applyTalentFromHand;
     swapFieldChamps: typeof swapFieldChamps;
+    inferConstantOnDestroy: typeof inferConstantOnDestroy;
     bootstrapResolveRegistry: typeof bootstrapResolveRegistry;
 };
 export type DfEffectsResolveApi = typeof DfEffectsResolve;

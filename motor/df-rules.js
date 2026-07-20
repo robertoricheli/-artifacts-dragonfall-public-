@@ -6,23 +6,20 @@ const LIMITS = Object.freeze({
     MAX_FIELD: 6,
     MAX_HAND: 8,
     PASSIVE_VP_PER_TURN_CAP: 2,
-    /** @deprecated Use MAX_FIELD — mantido só por compat de tipos. */
+    /** Manual §3: invocar dragão bloqueado com 4+ aliados em campo. */
     INVOKE_DRAGON_MAX_FIELD: 4,
 });
-/** Invocar dragão/filhote exige slot livre (até MAX_FIELD campeões). */
+/** Invocar dragão/filhote bloqueado com 4+ aliados (manual), independente do teto de campo. */
 function invokeDragonBlocked(state, pIdx, card, limits = LIMITS) {
     const p = state.players[pIdx];
     const fcSelf = p?.field?.length ?? 0;
-    const max = limits.MAX_FIELD ?? LIMITS.MAX_FIELD;
-    const onField = (p?.field || []).some((c) => c === card);
-    if (onField)
-        return fcSelf >= max;
-    return (fcSelf + 1) >= max;
+    const maxAllies = limits.INVOKE_DRAGON_MAX_FIELD ?? 4;
+    return fcSelf >= maxAllies;
 }
 /** Exige campeão adversário no campo — NÃO inclui Pesadelo/Roubar/Desacelerar (alvo = jogador). */
 const ON_ENTER_NEEDS_ENEMY = Object.freeze([
     "bolaDeFogo", "fumacaToxica", "raioDuplo", "transformarBichinho",
-    "assassinar", "trocaInjusta",
+    "assassinar", "trocaInjusta", "rajadaCongelante", "mordidaVenenosa",
 ]);
 const IMITATOR_NAMES = new Set(["WU-KONG", "ENIGMA"]);
 function championPrintedPower(c) {
@@ -86,6 +83,143 @@ function gatherAllyTargets(state, casterIdx, exclude, filter) {
     });
     return arr;
 }
+function normalizeAbilityName(value) {
+    return String(value || "").toLowerCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+/** Sem Honra nativo, copiado ou concedido por Corromper; Silêncio desativa todos. */
+function hasNoHonor(champ) {
+    if (!champ || champ.silenced)
+        return false;
+    if (champ.corruptedNoHonor || champ.onDestroy === "noHonor" || champ.mimicOnDestroy === "noHonor")
+        return true;
+    return normalizeAbilityName(champ.mimicAbilityName || champ.abilityName).includes("sem honra");
+}
+/** Habilidade passiva efetiva disparada após a destruição. */
+function resolveOnDestroyAbility(champ) {
+    if (!champ || champ.silenced)
+        return null;
+    if (champ.onDestroy)
+        return champ.onDestroy;
+    if (champ.mimicOnDestroy)
+        return champ.mimicOnDestroy;
+    const name = normalizeAbilityName(champ.mimicAbilityName || champ.abilityName);
+    if (name === "legado")
+        return "legado";
+    if (name === "vinganca" || name.includes("furia vermelha"))
+        return "vinganca";
+    if (name === "explosao de gelo")
+        return "explosaoGelo";
+    if (name === "explosao venenosa")
+        return "explosaoVenenosa";
+    if (name === "retaliacao")
+        return "furiaLegado";
+    if (name.includes("sem honra"))
+        return "noHonor";
+    return null;
+}
+function getFuryStacks(champ) {
+    if (!champ?.fury)
+        return 0;
+    const stacks = Number(champ.furyStacks);
+    if (Number.isFinite(stacks) && stacks > 0)
+        return Math.floor(stacks);
+    return champ.furyBonusActive ? 1 : 0;
+}
+/** Concede cargas acumuláveis de Fúria com uma única duração renovada. */
+function grantFuryStacks(champ, amount = 1) {
+    if (!champ || amount <= 0)
+        return 0;
+    const add = Math.max(0, Math.floor(amount));
+    champ.furyStacks = getFuryStacks(champ) + add;
+    champ.fury = champ.furyStacks > 0;
+    champ.furyTurns = champ.fury ? 1 : 0;
+    champ.furyBonusActive = champ.fury;
+    champ.currentPower = (champ.currentPower ?? champ.basePower ?? champ.power ?? 0) + add;
+    return add;
+}
+/** Remove cargas porque houve redução real; o Poder já foi reduzido pelo chamador. */
+function consumeFuryStacks(champ, amount) {
+    const before = getFuryStacks(champ);
+    const removed = Math.min(before, Math.max(0, Math.floor(amount || 0)));
+    const remaining = before - removed;
+    champ.furyStacks = remaining;
+    champ.fury = remaining > 0;
+    champ.furyTurns = champ.fury ? Math.max(1, champ.furyTurns || 1) : 0;
+    champ.furyBonusActive = champ.fury;
+    return removed;
+}
+/** Expira todas as cargas sem tratar a retirada do bônus como dano real. */
+function expireFuryStacks(champ) {
+    const stacks = getFuryStacks(champ);
+    if (!champ || stacks <= 0)
+        return 0;
+    champ.currentPower = Math.max(0, (champ.currentPower ?? 0) - stacks);
+    champ.furyStacks = 0;
+    champ.fury = false;
+    champ.furyTurns = 0;
+    champ.furyBonusActive = false;
+    return stacks;
+}
+const POWER_REDUCTION_DESTROY_REASONS = Object.freeze([
+    "assassinar", "bolaDeFogo", "cometStarfall", "explosao", "fireAura",
+    "fireAndIce", "missemagicos", "potion", "raioDuplo", "ultimate",
+    "vampirism", "vinganca",
+]);
+function isCombatOrPowerReductionDestroy(reason) {
+    return reason === "combat" || POWER_REDUCTION_DESTROY_REASONS.includes(reason);
+}
+/**
+ * Resolve Explosão de Gelo/Venenosa e Retaliação após retirar o portador.
+ * Retorna alvos escolhidos sem repetição; não concede PV imediato.
+ */
+function applyOnDestroyBurst(state, ownerIdx, champ, reason, rng = Math.random) {
+    const ability = resolveOnDestroyAbility(champ);
+    if (ability !== "explosaoGelo" && ability !== "explosaoVenenosa" && ability !== "furiaLegado")
+        return { ability: null, targets: [], applied: [] };
+    if (ability === "explosaoVenenosa" && !isCombatOrPowerReductionDestroy(reason))
+        return { ability, targets: [], applied: [] };
+    if (ability === "furiaLegado") {
+        const targets = gatherAllyTargets(state, ownerIdx, -1, () => true);
+        const applied = [];
+        for (const target of targets) {
+            const ally = state.players[target.p]?.field?.[target.i];
+            if (!ally)
+                continue;
+            grantFuryStacks(ally, 1);
+            applied.push({
+                ...target,
+                name: ally.name,
+                furyStacks: getFuryStacks(ally),
+            });
+        }
+        return { ability, targets, applied };
+    }
+    const pool = gatherEnemyTargets(state, ownerIdx, () => true);
+    for (let i = pool.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [pool[i], pool[j]] = [pool[j], pool[i]];
+    }
+    const targets = pool.slice(0, Math.min(2, pool.length));
+    const applied = [];
+    for (const target of targets) {
+        const victim = state.players[target.p]?.field?.[target.i];
+        if (!victim)
+            continue;
+        if (ability === "explosaoGelo") {
+            victim.frozen = true;
+            victim.frozenTurns = 2;
+            applied.push({ ...target, name: victim.name });
+        }
+        else if (!victim.poisoned) {
+            victim.poisoned = true;
+            victim.poisonTurns = 2;
+            victim.poisonedByP = ownerIdx;
+            applied.push({ ...target, name: victim.name });
+        }
+    }
+    return { ability, targets, applied };
+}
 function hasNecromanciaTarget(state, pIdx) {
     return (state.players[pIdx]?.discard?.length ?? 0) > 0;
 }
@@ -129,7 +263,7 @@ function hasDesacelerarTarget(state, casterIdx) {
     return false;
 }
 function hasAssassinarTarget(state, casterIdx) {
-    return gatherEnemyTargets(state, casterIdx, (c) => !c.shielded && c.currentPower === 1).length > 0;
+    return gatherEnemyTargets(state, casterIdx, (c) => c.currentPower === 1).length > 0;
 }
 function hasTransformarBichinhoTarget(state, casterIdx) {
     const count = state.playersCount ?? state.players?.length ?? 0;
@@ -194,6 +328,8 @@ function canOnEnterResolve(state, pIdx, card, ctx) {
         return { ok: false, code: "SILENCED" };
     const p = state.players[pIdx];
     const fcSelf = p?.field?.length ?? 0;
+    const cardOnField = (p?.field || []).includes(card);
+    const otherAllies = Math.max(0, fcSelf - (cardOnField ? 1 : 0));
     const enemyFc = totalEnemyFieldCount(state, pIdx);
     const passiveBoardFill = !!ctx.passiveBoardFill;
     if (passiveBoardFill) {
@@ -206,6 +342,8 @@ function canOnEnterResolve(state, pIdx, card, ctx) {
         }
         if (onEnter === "auraDeFogo" && fcSelf < 1)
             return { ok: false, code: "NO_ALLY_AURA_FOGO" };
+        if (onEnter === "gritoDeGuerra" && otherAllies === 0)
+            return { ok: false, code: "NO_ALLY_GRITO_GUERRA" };
         if (onEnter === "imitar") {
             const ex = (ctx && ctx.fieldIdx != null) ? (ctx.fieldIdx | 0) : -1;
             if (gatherImitableAllies(state, pIdx, ex).length === 0) {
@@ -255,8 +393,14 @@ function canOnEnterResolve(state, pIdx, card, ctx) {
     }
     if (onEnter === "raioDuplo" && enemyFc === 0)
         return { ok: false, code: "NO_ENEMY" };
+    if (onEnter === "rajadaCongelante" && enemyFc === 0)
+        return { ok: false, code: "NO_ENEMY" };
+    if (onEnter === "mordidaVenenosa" && enemyFc === 0)
+        return { ok: false, code: "NO_ENEMY" };
     if (onEnter === "auraDeFogo" && fcSelf < 1)
         return { ok: false, code: "NO_ALLY_AURA_FOGO" };
+    if (onEnter === "gritoDeGuerra" && otherAllies === 0)
+        return { ok: false, code: "NO_ALLY_GRITO_GUERRA" };
     if (onEnter === "transformarBichinho" && !hasTransformarBichinhoTarget(state, pIdx)) {
         return { ok: false, code: "NO_TRANSFORM_TARGET" };
     }
@@ -487,6 +631,13 @@ function combatOutcome(a, d) {
         return { killA: false, killD: false, pvTo: null, swords: ["a", "d"] };
     return { killA: true, killD: true, pvTo: null, swords: ["a", "d"] };
 }
+/** Recompensa de uma destruição válida em combate; Sem Honra é avaliado no alvo. */
+function combatVictoryPointReward(winner) {
+    return winner && !winner.silenced &&
+        (winner.constantEffect === "recompensaDupla" || winner.abilityName === "Recompensa Dupla")
+        ? 2
+        : 1;
+}
 /** Lista pares de ataque legais para um jogador. */
 function listLegalAttacks(state, attOwner) {
     const moves = [];
@@ -604,12 +755,13 @@ function computeMaintenancePlan(state, pIdx) {
     };
 }
 /**
- * Reduz Poder do campeão. Qualquer redução real dissolve Muralha (`wallBuff`).
- * @returns {{ dissolvedWall: boolean }}
+ * Reduz Poder do campeão. Redução real dissolve Muralha e consome primeiro
+ * a mesma quantidade de cargas de Fúria, preservando o Poder permanente.
+ * @returns {{ dissolvedWall: boolean, clearedFury: boolean, furyStacksRemoved: number }}
  */
 function reduceChampionPower(champ, amount, opts = {}) {
     if (!champ || amount <= 0)
-        return { dissolvedWall: false };
+        return { dissolvedWall: false, clearedFury: false, furyStacksRemoved: 0 };
     const prev = champ.currentPower ?? 0;
     if (champ.vulnerable) {
         champ.currentPower = 0;
@@ -617,14 +769,23 @@ function reduceChampionPower(champ, amount, opts = {}) {
     else {
         champ.currentPower = Math.max(0, prev - amount);
     }
+    const powerLost = champ.currentPower < prev;
     let dissolvedWall = false;
-    if (!opts.preserveWallBuff && champ.wallBuff && champ.currentPower < prev) {
+    if (!opts.preserveWallBuff && champ.wallBuff && powerLost) {
         champ.wallBuff = false;
         champ.wallBuffApplied = false;
         champ.wallBuffSnapshot = null;
         dissolvedWall = true;
     }
-    return { dissolvedWall };
+    const actualLoss = Math.max(0, prev - (champ.currentPower ?? 0));
+    const furyStacksRemoved = powerLost
+        ? consumeFuryStacks(champ, champ.vulnerable ? getFuryStacks(champ) : actualLoss)
+        : 0;
+    return {
+        dissolvedWall,
+        clearedFury: furyStacksRemoved > 0 && getFuryStacks(champ) === 0,
+        furyStacksRemoved,
+    };
 }
 /** Início do turno do dono da Muralha: remove o +1 temporário (só quem tem wallBuff). */
 function expireWallBonusOnTurnStart(state, pIdx) {
@@ -794,13 +955,9 @@ function applyTurnStartStatusTicks(state, pIdx) {
         if (c.fury && c.furyTurns > 0) {
             c.furyTurns -= 1;
             if (c.furyTurns <= 0) {
-                c.fury = false;
-                c.furyTurns = 0;
-                if (c.furyBonusActive) {
-                    reduceChampionPower(c, 1);
-                    c.furyBonusActive = false;
-                    logs.push(`${c.name}: Fúria expirou (-1 Poder).`);
-                }
+                const expired = expireFuryStacks(c);
+                if (expired > 0)
+                    logs.push(`${c.name}: Fúria expirou (-${expired} Poder).`);
                 changed = true;
             }
         }
@@ -855,7 +1012,8 @@ function runTurnMaintenance(state, pIdx, limits = LIMITS) {
     for (const k of kills) {
         const ch = discardChampionAt(state, k.p, k.i);
         if (ch) {
-            poisonDestroyed.push({ ...k, name: ch.name });
+            const burst = applyOnDestroyBurst(state, k.p, ch, "poison");
+            poisonDestroyed.push({ ...k, name: ch.name, burst });
             poisonVpGain += 1;
         }
     }
@@ -929,6 +1087,7 @@ function listLegalActions(state, pIdx, opts = {}) {
 const DfRules = {
     LIMITS,
     ON_ENTER_NEEDS_ENEMY,
+    invokeDragonBlocked,
     championPrintedPower,
     championSummonCost,
     isOverpower,
@@ -939,6 +1098,15 @@ const DfRules = {
     totalEnemyFieldCount,
     gatherEnemyTargets,
     gatherAllyTargets,
+    hasNoHonor,
+    resolveOnDestroyAbility,
+    getFuryStacks,
+    grantFuryStacks,
+    consumeFuryStacks,
+    expireFuryStacks,
+    POWER_REDUCTION_DESTROY_REASONS,
+    isCombatOrPowerReductionDestroy,
+    applyOnDestroyBurst,
     gatherImitableAllies,
     hasNecromanciaTarget,
     hasTrocaInjustaTarget,
@@ -961,6 +1129,7 @@ const DfRules = {
     canAttackerTargetDefender,
     canAttack,
     combatOutcome,
+    combatVictoryPointReward,
     listLegalAttacks,
     REACTIVE_TALENTS,
     findReactiveTalentHandIndex,
