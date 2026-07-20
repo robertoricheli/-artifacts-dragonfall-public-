@@ -77,12 +77,14 @@ export function isMailConfigured() {
 }
 
 function buildMessage(password, kind = "reminder") {
-  const subject = kind === "changed"
+  const subject = kind === "changed" || kind === "changed-notice"
     ? "Dragonfall — senha alterada no perfil"
     : kind === "setup-test"
       ? "[TESTE] Dragonfall — configuração de e-mail"
       : "Dragonfall — senha temporária de recuperação";
-  const intro = kind === "changed"
+  const intro = kind === "changed-notice"
+    ? "Você alterou sua senha no perfil do Dragonfall. Se não foi você, use Esqueci a senha imediatamente."
+    : kind === "changed"
     ? "Você alterou sua senha no perfil do Dragonfall. Abaixo está a nova senha que você escolheu:"
     : kind === "setup-test"
       ? "Este é um e-mail de TESTE de configuração SMTP. Não é recuperação de senha e sua senha do jogo NÃO mudou."
@@ -94,10 +96,14 @@ function buildMessage(password, kind = "reminder") {
     "",
     kind === "setup-test"
       ? "Se você recebeu este e-mail, o envio está funcionando."
+      : kind === "changed-notice"
+        ? "Sua senha antiga não funciona mais. Use a nova senha que você definiu no perfil."
       : `Sua senha ${kind === "changed" ? "cadastrada" : "temporária"} é: ${password}`,
     "",
     kind === "setup-test"
       ? "Feche este e-mail. Para recuperar sua senha de verdade, use Esqueci a senha no jogo."
+      : kind === "changed-notice"
+        ? "Se você não pediu isso, recupere a conta com Esqueci a senha."
       : kind === "changed"
         ? "Use-a na tela de LOGIN para entrar no jogo."
         : "Use-a na tela de LOGIN e depois altere a senha no perfil.",
@@ -112,6 +118,8 @@ function buildMessage(password, kind = "reminder") {
       <p>${intro}</p>
       ${kind === "setup-test"
         ? "<p>Se você recebeu este e-mail, o envio está funcionando.</p><p><strong>Sua senha do jogo não mudou.</strong> Para recuperar a senha real, use <em>Esqueci a senha</em> no jogo.</p>"
+        : kind === "changed-notice"
+          ? "<p>Sua senha antiga <strong>não funciona mais</strong>. Use a nova senha que você definiu no perfil.</p>"
         : `<p>Sua senha <strong>${kind === "changed" ? "cadastrada" : "temporária"}</strong> é:</p>
       <p style="font-size:1.35rem;font-weight:700;letter-spacing:0.05em;color:#5a3a8a;margin:16px 0">${password}</p>
       <p>${kind === "changed"
@@ -202,6 +210,11 @@ export async function sendMailConfigTestEmail(to) {
 
 export async function sendPasswordChangedEmail(to, password) {
   await deliverPasswordEmail(to, password, "changed");
+}
+
+/** Aviso de troca de senha sem enviar a senha em texto. */
+export async function sendPasswordChangedNoticeEmail(to) {
+  await deliverPasswordEmail(to, "", "changed-notice");
 }
 
 export function classifyMailError(e) {

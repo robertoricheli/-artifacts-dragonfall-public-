@@ -1,8 +1,8 @@
 {
-  "build": "a0b7d3ed2efc",
-  "sourceHash": "a0b7d3ed2efc",
-  "displayVersion": "1.47.72",
-  "builtAt": "2026-07-18T19:25:46.666Z",
+  "build": "833ead4698d3",
+  "sourceHash": "833ead4698d3",
+  "displayVersion": "1.47.73",
+  "builtAt": "2026-07-20T18:57:41.866Z",
   "publishFolder": "artifacts/dragonfall/netlify-dist",
   "pipeline": "game.html → prepare-netlify-deploy.mjs → netlify-dist",
   "localServerUrl": "http://127.0.0.1:5173/",

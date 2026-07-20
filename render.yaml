@@ -14,14 +14,12 @@ services:
       - key: NODE_ENV
         value: production
       - key: CORS_ORIGIN
-        value: "*"
+        value: "https://dragonfall.netlify.app,http://127.0.0.1:5173,http://localhost:5173"
       - key: DATABASE_URL
         fromDatabase:
           name: dragonfall-postgres
           property: connectionString
-      # Obrigatório em produção: chave estável para passwordEnc (não regenerar a cada deploy).
-      # Dashboard → Environment → DF_AUTH_ENC_KEY = string secreta longa (32+ chars).
-      # Sem isso, após redeploy "Esqueci a senha" / recover pode falhar.
+      # Opcional legado. passwordEnc não é mais gravado; forgot usa senha temporária + hash.
       - key: DF_AUTH_ENC_KEY
         sync: false
       # E-mail (Esqueci a senha) — ver server/MAIL-SETUP.md

@@ -41,7 +41,7 @@ import {
 import { getMmr, getRankedProfile, recordRankedMatch } from "./df-ranked-store.mjs";
 import { initPostgres, isPostgresEnabled, getReplayByRoomCode, shutdownPostgres } from "./df-postgres.mjs";
 import { initAuthStore, getAuthStoreMode } from "./df-auth.mjs";
-import { authPlayerFromToken } from "./df-auth-store.mjs";
+import { authPlayerFromToken, startSessionPruneScheduler } from "./df-auth-store.mjs";
 import { recordMatchEnd } from "./df-match-history.mjs";
 import { applyAuthoritativeAction, seedRoomFromSnapshot, buildReplayPayload } from "./df-authority.mjs";
 import { loadPersistedRooms, schedulePersistRooms, flushPersistRooms } from "./room-persist.mjs";
@@ -61,11 +61,18 @@ import {
 } from "./df-schema.mjs";
 
 const PORT = Number(process.env.PORT) || 8787;
-const corsOrigin = process.env.CORS_ORIGIN || "*";
+const corsOriginRaw = process.env.CORS_ORIGIN || "*";
+const corsAllowList = corsOriginRaw.split(",").map((s) => s.trim()).filter(Boolean);
 const GAME_VERSION = readGameVersion();
 const TURN_TIMEOUT_MS = Number(process.env.DF_TURN_TIMEOUT_MS) || 70000;
 
 const actionRateLimit = createRateLimiter({ maxPerWindow: 28, windowMs: 1000 });
+
+function resolveCorsOrigin(reqOrigin) {
+  if (corsAllowList.includes("*")) return "*";
+  if (reqOrigin && corsAllowList.includes(reqOrigin)) return reqOrigin;
+  return corsAllowList[0] || "null";
+}
 
 const restoredRooms = loadPersistedRooms();
 for (const saved of restoredRooms) {
@@ -81,8 +88,9 @@ function touchPersist() {
 
 const app = express();
 app.use((req, res, next) => {
-  const origin = corsOrigin === "*" ? "*" : corsOrigin;
+  const origin = resolveCorsOrigin(req.headers.origin);
   res.header("Access-Control-Allow-Origin", origin);
+  if (origin !== "*") res.header("Vary", "Origin");
   res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
   if (req.method === "OPTIONS") return res.sendStatus(204);
@@ -136,7 +144,10 @@ app.get("/history/replay/:code", async (req, res) => {
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: corsOrigin, methods: ["GET", "POST"] },
+  cors: {
+    origin: corsAllowList.includes("*") ? true : corsAllowList,
+    methods: ["GET", "POST"],
+  },
   maxHttpBufferSize: 2e6,
 });
 
@@ -629,6 +640,7 @@ process.on("SIGTERM", () => {
 
 await initPostgres();
 await initAuthStore();
+startSessionPruneScheduler();
 await initRankedMatchmaking(async (entry0, entry1) => {
   pairRankedSockets(io, entry0, entry1);
 });

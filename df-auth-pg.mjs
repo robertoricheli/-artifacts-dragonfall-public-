@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS df_sessions (
   expires_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS df_sessions_player ON df_sessions (player_id);
+CREATE INDEX IF NOT EXISTS df_sessions_expires ON df_sessions (expires_at);
 CREATE TABLE IF NOT EXISTS df_display_names (
   name_key VARCHAR(32) PRIMARY KEY,
   player_id UUID NOT NULL UNIQUE REFERENCES df_players(id) ON DELETE CASCADE
@@ -184,16 +185,15 @@ export async function pgPruneSessions() {
   await pool.query("DELETE FROM df_sessions WHERE expires_at < $1", [Date.now()]);
 }
 
-export async function pgAuthPlayerFromToken(token) {
+export async function pgAuthPlayerFromToken(tokenHash) {
   const pool = getPgPool();
-  if (!pool || !token) return null;
-  await pgPruneSessions();
+  if (!pool || !tokenHash) return null;
   const res = await pool.query(
     `SELECT p.* FROM df_sessions s
      JOIN df_players p ON p.id = s.player_id
      WHERE s.token = $1 AND s.expires_at >= $2
      LIMIT 1`,
-    [token, Date.now()],
+    [tokenHash, Date.now()],
   );
   return rowToPlayer(res.rows[0]);
 }

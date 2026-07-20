@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS df_matches (
   game_version VARCHAR(24)
 );
 CREATE INDEX IF NOT EXISTS df_matches_ended_at ON df_matches (ended_at DESC);
+CREATE INDEX IF NOT EXISTS df_matches_room_ended ON df_matches (room_code, ended_at DESC);
 CREATE TABLE IF NOT EXISTS df_replays (
   match_id BIGINT PRIMARY KEY REFERENCES df_matches(id) ON DELETE CASCADE,
   event_log JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -39,6 +40,8 @@ export async function initPostgres() {
       connectionString: url,
       ssl: process.env.PGSSL === "false" ? false : { rejectUnauthorized: false },
       max: 4,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 15_000,
     });
     await pool.query(SCHEMA);
     enabled = true;

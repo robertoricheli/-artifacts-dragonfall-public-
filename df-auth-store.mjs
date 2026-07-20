@@ -1,6 +1,7 @@
 /**
  * Dragonfall — fachada de persistência de contas (Postgres ou JSON local).
  */
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -17,6 +18,7 @@ import {
   pgGetDisplayNameOwner,
   pgSetDisplayName,
   pgPrunePlayerSessions,
+  pgPruneSessions,
 } from "./df-auth-pg.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -24,6 +26,12 @@ const DATA_PATH = path.join(__dirname, "data", "accounts.json");
 
 let mode = "json";
 let store = null;
+let pruneTimer = null;
+
+/** Token cru no Bearer → SHA-256 para armazenar / buscar na DB. */
+export function hashSessionToken(token) {
+  return crypto.createHash("sha256").update(String(token || "")).digest("hex");
+}
 
 function defaultStore() {
   return { players: {}, sessions: {}, displayNames: {} };
@@ -128,28 +136,32 @@ export async function persistPlayer(player, { expectedRevision } = {}) {
 }
 
 export async function createSessionRecord(token, playerId, expiresAt) {
+  const tokenKey = hashSessionToken(token);
   if (mode === "postgres") {
-    await pgCreateSession(playerId, token, expiresAt);
+    await pgCreateSession(playerId, tokenKey, expiresAt);
     return;
   }
   pruneJsonSessions();
-  store.sessions[token] = { playerId, expiresAt };
+  store.sessions[tokenKey] = { playerId, expiresAt };
   saveJsonStore();
 }
 
 export async function deleteSessionRecord(token) {
+  const tokenKey = hashSessionToken(token);
   if (mode === "postgres") {
-    await pgDeleteSession(token);
+    await pgDeleteSession(tokenKey);
     return;
   }
-  delete store.sessions[token];
+  delete store.sessions[tokenKey];
   saveJsonStore();
 }
 
 export async function authPlayerFromToken(token) {
-  if (mode === "postgres") return pgAuthPlayerFromToken(token);
+  if (!token) return null;
+  const tokenKey = hashSessionToken(token);
+  if (mode === "postgres") return pgAuthPlayerFromToken(tokenKey);
   pruneJsonSessions();
-  const sess = store.sessions[token];
+  const sess = store.sessions[tokenKey];
   if (!sess || sess.expiresAt < Date.now()) return null;
   const p = store.players[sess.playerId];
   return p ? ensureJsonPlayerFields(p) : null;
@@ -198,4 +210,29 @@ export function loadJsonAccountsFile() {
 
 export function getJsonDataPath() {
   return DATA_PATH;
+}
+
+/** Prune periódico de sessões expiradas (Postgres). */
+export function startSessionPruneScheduler(intervalMs = 15 * 60_000) {
+  if (pruneTimer) return;
+  const run = () => {
+    if (mode === "postgres") {
+      void pgPruneSessions().catch((e) => {
+        console.warn("[auth-store] prune sessions:", e?.message || e);
+      });
+    } else if (store) {
+      pruneJsonSessions();
+      try { saveJsonStore(); } catch (_) { /* */ }
+    }
+  };
+  run();
+  pruneTimer = setInterval(run, intervalMs);
+  if (typeof pruneTimer.unref === "function") pruneTimer.unref();
+}
+
+export function stopSessionPruneScheduler() {
+  if (pruneTimer) {
+    clearInterval(pruneTimer);
+    pruneTimer = null;
+  }
 }

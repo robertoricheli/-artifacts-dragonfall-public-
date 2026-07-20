@@ -35,7 +35,8 @@ No [Dashboard Render](https://dashboard.render.com) → serviço `dragonfall-mul
 | Variável | Exemplo |
 |----------|---------|
 | `DATABASE_URL` | (do Postgres do Render) |
-| `DF_AUTH_ENC_KEY` | string secreta longa (≥32 chars) — **obrigatória** para `passwordEnc` estável entre deploys |
+| `CORS_ORIGIN` | `https://dragonfall.netlify.app,http://127.0.0.1:5173,http://localhost:5173` |
+| `DF_AUTH_ENC_KEY` | opcional legado (passwordEnc **não** é mais gravado; forgot usa senha temporária) |
 | `DF_SMTP_HOST` | `smtp.gmail.com` |
 | `DF_SMTP_PORT` | `587` |
 | `DF_SMTP_USER` | seu Gmail de envio |

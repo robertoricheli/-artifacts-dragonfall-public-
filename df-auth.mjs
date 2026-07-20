@@ -3,8 +3,7 @@
  * Persistência via df-auth-store (Postgres quando DATABASE_URL; senão accounts.json).
  */
 import crypto from "crypto";
-import { sendPasswordResetEmail, sendPasswordChangedEmail } from "./df-auth-mail.mjs";
-import { encryptPassword } from "./df-auth-secret.mjs";
+import { sendPasswordResetEmail, sendPasswordChangedNoticeEmail } from "./df-auth-mail.mjs";
 import {
   initAuthStore,
   getAuthStoreMode,
@@ -29,6 +28,8 @@ const FORGOT_COOLDOWN_MS = 90_000;
 const forgotLastSent = new Map();
 const authIpLimit = createRateLimiter({ maxPerWindow: 20, windowMs: 60_000 });
 const authEmailLimit = createRateLimiter({ maxPerWindow: 8, windowMs: 60_000 });
+/** Rotas autenticadas (perfil / XP / troca de senha). */
+const authAuthedLimit = createRateLimiter({ maxPerWindow: 60, windowMs: 60_000 });
 
 const HERO_IDS = new Set([
   "vaughan", "iceWitch", "linguarudo", "pirate", "euravia", "ironGuard",
@@ -155,7 +156,16 @@ function setPlayerPassword(player, password) {
   const { salt, hash } = hashPassword(password);
   player.passwordSalt = salt;
   player.passwordHash = hash;
-  player.passwordEnc = encryptPassword(password);
+  // Nunca armazenar senha reversível (passwordEnc legado).
+  player.passwordEnc = null;
+}
+
+function allowAuthedAttempt(req) {
+  const ip = clientIp(req);
+  if (!authAuthedLimit(`authed:${ip}`)) {
+    return { status: 429, data: { ok: false, error: "RATE_LIMIT", retryAfterSec: 60 } };
+  }
+  return null;
 }
 
 /** Senha temporária aleatória (não reutiliza passwordEnc reversível). */
@@ -230,15 +240,14 @@ async function authLogin(req, body) {
   if (!player || !verifyPassword(password, player.passwordSalt, player.passwordHash)) {
     return { status: 401, data: { ok: false, error: "INVALID_CREDENTIALS" } };
   }
-  if (!player.passwordEnc) {
-    player.passwordEnc = encryptPassword(password);
-    await persistPlayer(player);
-    const refreshed = await getPlayerById(player.id);
-    const token = await createSession(player.id);
-    return { status: 200, data: { ok: true, token, player: playerPublic(refreshed) } };
+  // Limpa passwordEnc legado se ainda existir na linha.
+  if (player.passwordEnc) {
+    player.passwordEnc = null;
+    await persistPlayer(player).catch(() => {});
   }
   const token = await createSession(player.id);
-  return { status: 200, data: { ok: true, token, player: playerPublic(player) } };
+  const fresh = await getPlayerById(player.id);
+  return { status: 200, data: { ok: true, token, player: playerPublic(fresh || player) } };
 }
 
 async function authForgotPassword(req, body) {
@@ -261,11 +270,7 @@ async function authForgotPassword(req, body) {
     };
   }
   const tempPassword = newTemporaryPassword();
-  setPlayerPassword(player, tempPassword);
-  const save = await persistPlayer(player);
-  if (!save.ok) {
-    return { status: 500, data: { ok: false, error: save.error || "SAVE_FAILED" } };
-  }
+  // Envia e-mail ANTES de invalidar a senha — evita lockout se SMTP falhar.
   try {
     await sendPasswordResetEmail(email, tempPassword);
   } catch (e) {
@@ -277,12 +282,20 @@ async function authForgotPassword(req, body) {
     console.error("[auth] forgot-password:", e?.cause?.message || e?.message || e);
     return { status: 503, data: { ok: false, error: code } };
   }
+  setPlayerPassword(player, tempPassword);
+  const save = await persistPlayer(player);
+  if (!save.ok) {
+    console.error("[auth] forgot-password: e-mail enviado mas SAVE_FAILED —", save.error);
+    return { status: 500, data: { ok: false, error: save.error || "SAVE_FAILED" } };
+  }
   forgotLastSent.set(email, Date.now());
   console.log(`[auth] senha temporária enviada por e-mail → ${email}`);
   return { status: 200, data: { ok: true, sent: true } };
 }
 
 async function authChangePassword(req, body) {
+  const limited = allowAuthedAttempt(req);
+  if (limited) return limited;
   const player = await authFromHeader(req);
   if (!player) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
 
@@ -309,7 +322,7 @@ async function authChangePassword(req, body) {
 
   let mailSent = true;
   try {
-    await sendPasswordChangedEmail(player.email, next);
+    await sendPasswordChangedNoticeEmail(player.email);
   } catch (e) {
     mailSent = false;
     console.error("[auth] change-password mail:", e?.cause?.message || e?.message || e);
@@ -346,6 +359,8 @@ function normalizeCustomDecks(raw) {
 }
 
 async function authProfile(req, body) {
+  const limited = allowAuthedAttempt(req);
+  if (limited) return limited;
   const player = await authFromHeader(req);
   if (!player) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
 
@@ -451,6 +466,8 @@ function resolveMatchXpKey(matchType, aiDifficulty) {
 }
 
 async function authAwardMatchXp(req, body) {
+  const limited = allowAuthedAttempt(req);
+  if (limited) return limited;
   const player = await authFromHeader(req);
   if (!player) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
 

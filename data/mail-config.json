@@ -1,8 +1,0 @@
-{
-  "host": "smtp.gmail.com",
-  "port": 587,
-  "secure": false,
-  "user": "dragonfall.cardgame@gmail.com",
-  "pass": "geljvycpramzvkck",
-  "from": "Dragonfall <dragonfall.cardgame@gmail.com>"
-}
