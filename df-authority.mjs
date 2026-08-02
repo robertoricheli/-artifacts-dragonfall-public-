@@ -1,11 +1,11 @@
 /**
  * Servidor autoritativo — valida + aplica ações via DfEngine + event log.
  */
-import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
+import { bootDragonfallEngine } from "../scripts/lib/df-node-boot.mjs";
 import {
   appendEventLogEntry,
   exportEventLog,
-} from "./motor/df-event-log.js";
+} from "../artifacts/dragonfall/motor/dist/df-event-log.js";
 import {
   unwrapGameState,
   validateSnapshotUpdate,
@@ -14,6 +14,7 @@ import {
 /** Tipos aplicados no servidor — espelha DfEngine.applyAction (motor TS). */
 export const AUTHORITATIVE_TYPES = new Set([
   "SUMMON",
+  "DRAW_CARD",
   "ATTACK_RESOLVE",
   "END_TURN",
   "ON_ENTER_RESOLVE",

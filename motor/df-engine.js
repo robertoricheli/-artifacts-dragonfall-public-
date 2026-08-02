@@ -261,32 +261,37 @@ export function applyAction(state, action, ctx = {}) {
         case T.END_TURN: {
             if (!R.canEndTurn(next, pid).ok)
                 return { ok: false, state, events: [], error: "NOT_YOUR_TURN" };
-            const maint = R.runTurnMaintenance(next, pid, R.LIMITS);
-            maint.poisonDestroyed.forEach((k) => {
-                events.push({ type: "POISON_KILL", ...k, by: pid });
-            });
-            if (maint.passiveVpGain > 0) {
-                events.push({ type: "VP_GAIN", playerId: pid, amount: maint.passiveVpGain, reason: "maintenance" });
+            // Paridade com endTurn() do cliente: bônus de muralha no fim → avança →
+            // manutenção/saque do PRÓXIMO jogador (não do que passou a vez).
+            if (typeof R.applyWallBonusOnTurnEnd === "function") {
+                R.applyWallBonusOnTurnEnd(next, pid);
             }
-            if (maint.poisonVpGain > 0) {
-                events.push({ type: "VP_GAIN", playerId: pid, amount: maint.poisonVpGain, reason: "poison" });
-            }
-            maint.returned.forEach((r) => {
-                events.push({ type: "PULLED_RETURN", ...r, toPlayer: pid });
-            });
             const count = next.playersCount ?? next.players.length;
             next.currentPlayer = (pid + 1) % count;
-            // Paridade com endTurn() do cliente: turnNumber sobe a cada volta ao assento 0.
             if (next.currentPlayer === 0) {
                 next.turnNumber = (next.turnNumber ?? 1) + 1;
             }
-            const np = next.players[next.currentPlayer];
+            const nextPid = next.currentPlayer;
+            const maint = R.runTurnMaintenance(next, nextPid, R.LIMITS);
+            maint.poisonDestroyed.forEach((k) => {
+                events.push({ type: "POISON_KILL", ...k, by: nextPid });
+            });
+            if (maint.passiveVpGain > 0) {
+                events.push({ type: "VP_GAIN", playerId: nextPid, amount: maint.passiveVpGain, reason: "maintenance" });
+            }
+            if (maint.poisonVpGain > 0) {
+                events.push({ type: "VP_GAIN", playerId: nextPid, amount: maint.poisonVpGain, reason: "poison" });
+            }
+            maint.returned.forEach((r) => {
+                events.push({ type: "PULLED_RETURN", ...r, toPlayer: nextPid });
+            });
+            const np = next.players[nextPid];
             const maxHand = R.LIMITS?.MAX_HAND ?? 8;
             if (!maint.skipDraw && np.hand.length < maxHand && np.deck.length > 0) {
                 np.hand.push(np.deck.pop());
-                events.push({ type: "DRAW", playerId: next.currentPlayer, reason: "upkeep" });
+                events.push({ type: "DRAW", playerId: nextPid, reason: "upkeep" });
             }
-            events.push({ type: "TURN_START", playerId: next.currentPlayer });
+            events.push({ type: "TURN_START", playerId: nextPid });
             break;
         }
         case T.ON_ENTER_RESOLVE: {
