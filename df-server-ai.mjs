@@ -3,7 +3,7 @@
  * Usa DfEngine.listLegalActions + política simples (Difícil-lite).
  */
 import { applyAuthoritativeAction } from "./df-authority.mjs";
-import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
+import { bootDragonfallEngine } from "../scripts/lib/df-node-boot.mjs";
 
 const AI_GRACE_MS = 8000;
 const AI_STEP_MS = 900;
