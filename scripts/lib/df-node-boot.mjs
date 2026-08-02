@@ -1,5 +1,4 @@
 /**
  * Carrega DfRules / DfData / DfEffects / DfEngine via motor TypeScript (Node).
- * No pacote Render: scripts/lib → ../../motor (raiz do repo).
  */
-export { bootDragonfallEngine, clearEngineCache } from "../../motor/boot-engine.js";
+export { bootDragonfallEngine, clearEngineCache } from "../../artifacts/dragonfall/motor/dist/boot-engine.js";

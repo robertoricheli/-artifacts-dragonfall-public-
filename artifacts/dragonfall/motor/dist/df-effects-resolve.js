@@ -95,6 +95,9 @@ function clearChampionFieldStatuses(c) {
     c.barrierPermanent = false;
     c.fireAura = false;
     c.fireAuraTurns = 0;
+    c.burning = false;
+    c.burningTurns = 0;
+    c.burningByP = undefined;
     c.fury = false;
     c.furyTurns = 0;
     c.furyStacks = 0;
@@ -190,11 +193,11 @@ function planOnEnterImpl(state, casterIdx, fieldIdx) {
         return { ok: false, code: leg.code, mode: "blocked" };
     const instantAuto = new Set([
         "fumacaToxica", "raioDuplo", "pesadelo", "roubar", "desacelerar",
-        "armaduraDeVidro", "gritoDeGuerra",
+        "defensor", "gritoDeGuerra",
     ]);
     const targetEnemy = new Set([
         "bolaDeFogo", "assassinar", "transformarBichinho", "rajadaCongelante",
-        "mordidaVenenosa",
+        "mordidaVenenosa", "incendiar",
     ]);
     const targetAlly = new Set(["fortalecer", "devorar", "imitar", "ursificacao", "corromper"]);
     /* pesadelo/roubar/desacelerar migraram pra instantAuto — set vazio
@@ -235,17 +238,16 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             events.push({ type: "RAPIDEZ", casterIdx, visual: "wings" });
             break;
         }
-        case "armaduraDeVidro": {
+        case "defensor": {
             caster.shielded = true;
             caster.shieldedTurns = 0;
             caster.shieldedPermanent = true;
-            caster.vulnerable = true;
             markOnEnterUsed(state, casterIdx, key);
             events.push({
-                type: "ARMADURA_DE_VIDRO",
+                type: "DEFENSOR",
                 casterIdx,
                 fieldIdx,
-                visual: "glass_armor",
+                visual: "shield",
             });
             break;
         }
@@ -348,6 +350,8 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
         }
         case "corromper": {
             const ti = resolution.targetI;
+            if (ti === fieldIdx)
+                break;
             const ally = state.players[casterIdx]?.field?.[ti];
             if (!ally)
                 break;
@@ -394,6 +398,28 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
                 targetName: target.name,
                 applied: !alreadyPoisoned,
                 visual: "poison",
+            });
+            break;
+        }
+        case "incendiar": {
+            const tp = resolution.targetP;
+            const ti = resolution.targetI;
+            const target = state.players[tp]?.field?.[ti];
+            if (!target || tp === casterIdx)
+                break;
+            target.burning = true;
+            target.burningTurns = 4;
+            target.burningByP = casterIdx;
+            markOnEnterUsed(state, casterIdx, key);
+            events.push({
+                type: "INCENDIAR",
+                casterIdx,
+                fieldIdx,
+                targetP: tp,
+                targetI: ti,
+                targetName: target.name,
+                turns: 4,
+                visual: "em_chamas",
             });
             break;
         }
@@ -569,7 +595,7 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
                 });
                 break;
             }
-            const tokenDef = findCardDef(success ? "BICHINHO FOFINHO" : "TERRÍVEL MONSTRO");
+            const tokenDef = findCardDef(success ? "BICHINHO FOFINHO" : "O CHEFÃO");
             if (!tokenDef)
                 break;
             const newPower = success ? Math.floor(origPower / 2) : (origPower + 1);
@@ -771,9 +797,11 @@ function applyTalentFromHand(state, pIdx, handIdx) {
     if (!card || card.category !== "talent") {
         return { ok: false, state, events: [], error: "NOT_TALENT" };
     }
-    if ((p.actions ?? 0) < 1)
+    // Custo por carta (manual §9.1): talento Custo 0 é jogável com 0 ações.
+    const cost = R()?.talentPlayCost?.(card) ?? card.currentPower ?? card.power ?? 0;
+    if ((p.actions ?? 0) < cost)
         return { ok: false, state, events: [], error: "INSUFFICIENT_ACTIONS" };
-    p.actions -= 1;
+    p.actions = Math.max(0, (p.actions ?? 0) - cost);
     return {
         ok: true,
         state,
@@ -785,8 +813,8 @@ const ON_ENTER_RESOLVE_KEYS = [
     "rapidez", "pesadelo", "desacelerar", "roubar", "maldicaoSeteMares", "trocaInjusta",
     "fortalecer", "devorar", "bolaDeFogo", "assassinar", "necromancia", "imitar",
     "ursificacao", "transformarBichinho", "furia", "guardiao", "auraAntiMagia",
-    "auraDeFogo", "fumacaToxica", "raioDuplo", "armaduraDeVidro",
-    "rajadaCongelante", "corromper", "mordidaVenenosa", "gritoDeGuerra",
+    "auraDeFogo", "fumacaToxica", "raioDuplo", "defensor",
+    "rajadaCongelante", "corromper", "mordidaVenenosa", "incendiar", "gritoDeGuerra",
 ];
 /** Registra plan + resolve por string no DfEffects (registry unificado). */
 function bootstrapResolveRegistry(E) {

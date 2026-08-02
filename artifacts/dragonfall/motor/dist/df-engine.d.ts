@@ -38,6 +38,8 @@ export interface RulesApi {
     summonContextForPlayer(state: GameState, pid: number): Record<string, unknown>;
     defaultSummonInsertIndex(fieldLen: number): number;
     championSummonCost(card: Record<string, unknown>): number;
+    /** Custo em ações de um Talento (manual §9.1 — vários são Custo 0). */
+    talentPlayCost?(card: Record<string, unknown>): number;
     combatOutcome(att: Record<string, unknown>, def: Record<string, unknown>): Record<string, unknown>;
     combatVictoryPointReward(champ: Record<string, unknown>): number;
     hasNoHonor(champ: Record<string, unknown>): boolean;

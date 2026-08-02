@@ -1,11 +1,11 @@
 /**
  * Servidor autoritativo — valida + aplica ações via DfEngine + event log.
  */
-import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
+import { bootDragonfallEngine } from "../scripts/lib/df-node-boot.mjs";
 import {
   appendEventLogEntry,
   exportEventLog,
-} from "./motor/df-event-log.js";
+} from "../artifacts/dragonfall/motor/dist/df-event-log.js";
 import {
   unwrapGameState,
   validateSnapshotUpdate,
@@ -200,6 +200,8 @@ export function buildReplayPayload(room) {
     snapshot: room.lastSnapshot || null,
     gameState: room.gameState || null,
     heroIds: room.heroes || [null, null],
+    arenaScenarioId: room.arenaScenarioId || null,
+    deckSeed: room.deckSeed != null ? room.deckSeed : null,
     reconnected: true,
   };
 }

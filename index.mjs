@@ -51,6 +51,12 @@ import { createInitialMatchState } from "./df-match-init.mjs";
 import { registerAuthRoutes } from "./df-auth.mjs";
 import { logMailStatusOnBoot, isMailConfigured } from "./df-auth-mail.mjs";
 import {
+  markSeatDisconnectedForAi,
+  onHumanReconnectedClearAi,
+  scheduleServerAi,
+  clearAllAi,
+} from "./df-server-ai.mjs";
+import {
   validateJoinRoom,
   validateSetHero,
   validateSetWinPoints,
@@ -154,13 +160,16 @@ const io = new Server(httpServer, {
 /** socket.id -> room code */
 const socketRoom = new Map();
 
-function leaveSocketRoom(socket) {
+function leaveSocketRoom(socket, peerLeftExtra = null) {
   const code = socketRoom.get(socket.id);
   const room = getRoom(code);
   if (room) {
     const info = leaveRoom(room, socket.id);
     socket.leave(room.code);
-    emitRoom(room, "peer_left", { seat: info?.seat });
+    emitRoom(room, "peer_left", {
+      seat: info?.seat,
+      ...(peerLeftExtra && typeof peerLeftExtra === "object" ? peerLeftExtra : {}),
+    });
     broadcastRoomState(room);
   }
   socketRoom.delete(socket.id);
@@ -170,7 +179,6 @@ function startMatchForRoom(room, io) {
   if (room.status !== "lobby") return null;
   if (!room.sockets[0] || !room.sockets[1]) return null;
   if (!room.heroes[0] || !room.heroes[1]) return null;
-  if (room.heroes[0] === room.heroes[1]) return null;
   room.winPoints = 15;
   room.status = "playing";
   room.actionSeq = 0;
@@ -178,20 +186,32 @@ function startMatchForRoom(room, io) {
   room.ready = [true, true];
   const firstPlayer = Math.random() < 0.5 ? 0 : 1;
   const deckSeed = Math.floor(Math.random() * 2147483646) + 1;
+  const arenaPool = [
+    "floresta-runica",
+    "ceu-e-inferno",
+    "arena-cristal",
+    "deserto-sem-fim",
+    "o-fundo-do-mar",
+    "castelo-da-alianca",
+  ];
+  const arenaScenarioId = arenaPool[Math.floor(Math.random() * arenaPool.length)];
   const gameState = createInitialMatchState({
     heroIds: [room.heroes[0], room.heroes[1]],
     winPoints: room.winPoints,
     firstPlayer,
     deckSeed,
+    deckCardNames: room.deckCardNames || null,
   });
   room.gameState = gameState;
   room.lastSnapshot = { state: gameState, full: true };
   room.deckSeed = deckSeed;
+  room.arenaScenarioId = arenaScenarioId;
   const match = {
     heroIds: [room.heroes[0], room.heroes[1]],
     winPoints: room.winPoints,
     firstPlayer,
     deckSeed,
+    arenaScenarioId,
     gameState,
   };
   for (let seat = 0; seat < 2; seat++) {
@@ -292,6 +312,27 @@ function broadcastRoomState(room) {
   }
 }
 
+function emitActionEnvelope(room, envelope) {
+  for (let s = 0; s < 2; s++) {
+    const sid = room.sockets[s];
+    if (!sid) continue;
+    io.to(sid).emit("remote_action", envelope);
+  }
+}
+
+function afterAuthoritativeAction(room, state) {
+  broadcastRoomState(room);
+  resetTurnTimer(room);
+  touchPersist();
+  maybeFinishMatch(room, state);
+  if (room.status === "playing" && state?.winner == null) {
+    scheduleServerAi(room, io, {
+      emitEnvelope: emitActionEnvelope,
+      onAfterAction: afterAuthoritativeAction,
+    });
+  }
+}
+
 function clearTurnTimer(room) {
   if (room.turnTimer) {
     clearTimeout(room.turnTimer);
@@ -325,6 +366,10 @@ function resetTurnTimer(room) {
     resetTurnTimer(room);
     touchPersist();
     maybeFinishMatch(room, result.state);
+    scheduleServerAi(room, io, {
+      emitEnvelope: emitActionEnvelope,
+      onAfterAction: afterAuthoritativeAction,
+    });
   }, TURN_TIMEOUT_MS);
 }
 
@@ -377,7 +422,16 @@ io.on("connection", (socket) => {
       gameVersion: GAME_VERSION,
     });
     broadcastRoomState(joined.room);
-    if (joined.room.status === "playing") resetTurnTimer(joined.room);
+    if (joined.reconnected) {
+      onHumanReconnectedClearAi(joined.room, joined.seat, io);
+    }
+    if (joined.room.status === "playing") {
+      resetTurnTimer(joined.room);
+      scheduleServerAi(joined.room, io, {
+        emitEnvelope: emitActionEnvelope,
+        onAfterAction: afterAuthoritativeAction,
+      });
+    }
   });
 
   socket.on("set_hero", (payload, ack) => {
@@ -390,12 +444,16 @@ io.on("connection", (socket) => {
     if (room.status !== "lobby") return ack?.({ ok: false, error: "NOT_LOBBY" });
     const heroId = payload?.heroId;
     if (!heroId || typeof heroId !== "string") return ack?.({ ok: false, error: "BAD_HERO" });
-    const otherSeat = seat === 0 ? 1 : 0;
-    if (room.heroes[otherSeat] && room.heroes[otherSeat] === heroId) {
-      return ack?.({ ok: false, error: "HERO_TAKEN", takenBy: otherSeat });
-    }
+    // Rankeado: mesmos heróis permitidos nos dois assentos.
     room.heroes[seat] = heroId;
     room.ready[seat] = false;
+    if (!room.deckCardNames) room.deckCardNames = [null, null];
+    if (Array.isArray(payload?.deckCardNames) && payload.deckCardNames.length >= 10) {
+      room.deckCardNames[seat] = payload.deckCardNames
+        .map((n) => String(n || "").trim())
+        .filter(Boolean)
+        .slice(0, 24);
+    }
     broadcastRoomState(room);
     if (room.heroes[0] && room.heroes[1]) {
       startMatchForRoom(room, io);
@@ -569,6 +627,10 @@ io.on("connection", (socket) => {
     resetTurnTimer(room);
     touchPersist();
     maybeFinishMatch(room, result.state);
+    scheduleServerAi(room, io, {
+      emitEnvelope: emitActionEnvelope,
+      onAfterAction: afterAuthoritativeAction,
+    });
 
     ack?.({
       ok: true,
@@ -604,10 +666,46 @@ io.on("connection", (socket) => {
     if (payload?.snapshot) seedRoomFromSnapshot(room, payload.snapshot);
   });
 
-  socket.on("leave_room", (_payload, ack) => {
+  socket.on("leave_room", (payload, ack) => {
     removeFromQueue(socket.id);
     removeFromRankedQueue(socket.id);
-    leaveSocketRoom(socket);
+    const room = getRoom(socketRoom.get(socket.id));
+    const seat = room ? seatForSocket(room, socket.id) : null;
+    let forfeitPayload = null;
+    // Saída voluntária durante partida = desistência (vitória do oponente).
+    if (room && room.status === "playing" && seat !== null && room.gameState?.winner == null) {
+      const result = applyAuthoritativeAction(room, seat, { type: "SURRENDER", playerId: seat }, null);
+      if (result.ok) {
+        room.actionSeq += 1;
+        const envelope = {
+          seq: room.actionSeq,
+          fromSeat: seat,
+          action: { type: "SURRENDER", playerId: seat },
+          snapshot: null,
+          authoritativeState: result.state || null,
+          events: result.events || [],
+          forfeit: true,
+        };
+        if (result.state) {
+          room.lastSnapshot = { state: result.state, full: true };
+        }
+        for (let s = 0; s < 2; s++) {
+          const sid = room.sockets[s];
+          if (!sid || sid === socket.id) continue;
+          io.to(sid).emit("remote_action", envelope);
+        }
+        maybeFinishMatch(room, result.state);
+        const winner = result.state?.winner ?? ((seat + 1) % 2);
+        forfeitPayload = { forfeit: true, winner, seat };
+      }
+    } else if (room && room.status === "playing" && room.gameState?.winner != null) {
+      forfeitPayload = {
+        forfeit: true,
+        winner: room.gameState.winner,
+        seat,
+      };
+    }
+    leaveSocketRoom(socket, forfeitPayload);
     ack?.({ ok: true });
   });
 
@@ -620,6 +718,12 @@ io.on("connection", (socket) => {
     const info = disconnectSocket(room, socket.id);
     socketRoom.delete(socket.id);
     emitRoom(room, "peer_disconnected", { seat: info?.seat, canReconnect: room.status === "playing" });
+    if (room.status === "playing" && info?.seat != null) {
+      markSeatDisconnectedForAi(room, info.seat, io, {
+        emitEnvelope: emitActionEnvelope,
+        onAfterAction: afterAuthoritativeAction,
+      });
+    }
     broadcastRoomState(room);
     touchPersist();
   });

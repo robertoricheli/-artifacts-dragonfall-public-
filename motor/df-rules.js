@@ -20,6 +20,7 @@ function invokeDragonBlocked(state, pIdx, card, limits = LIMITS) {
 const ON_ENTER_NEEDS_ENEMY = Object.freeze([
     "bolaDeFogo", "fumacaToxica", "raioDuplo", "transformarBichinho",
     "assassinar", "trocaInjusta", "rajadaCongelante", "mordidaVenenosa",
+    "incendiar",
 ]);
 const IMITATOR_NAMES = new Set(["WU-KONG", "ENIGMA"]);
 function championPrintedPower(c) {
@@ -27,7 +28,27 @@ function championPrintedPower(c) {
         return 0;
     return c.basePower ?? c.power ?? 0;
 }
+/** Iniciativa (Pistoleira Neon): invocação custa 1 ação. */
+function hasIniciativa(c) {
+    if (!c || c.silenced)
+        return false;
+    if (c.constantEffect === "iniciativa")
+        return true;
+    return normalizeAbilityName(c.abilityName) === "iniciativa"
+        || normalizeAbilityName(c.mimicAbilityName) === "iniciativa";
+}
 function championSummonCost(c) {
+    if (hasIniciativa(c))
+        return 1;
+    return c?.currentPower ?? c?.power ?? 0;
+}
+/**
+ * Custo em ações de uma carta de Talento (manual §9.1): é o Poder impresso.
+ * Vários talentos são Custo 0 (Fortalecer, Bola de Fogo, Zero Absoluto,
+ * Amedrontar, Barreira, Baforada Venenosa, Aceleração) e portanto podem ser
+ * jogados mesmo sem ações restantes.
+ */
+function talentPlayCost(c) {
     return c?.currentPower ?? c?.power ?? 0;
 }
 function isOverpower(c) {
@@ -41,7 +62,7 @@ function isPesadoDemais(c) {
 }
 function isCrescimentoDragon(c) {
     return !!(c && !c.silenced &&
-        (c.name === "FILHOTE DE DRAGÃO" || c.name === "DRAGÃO CÚBICO"));
+        (c.name === "FILHOTE DE DRAGÃO" || c.name === "DRAGÃO AZUL" || c.name === "DRAGÃO CÚBICO"));
 }
 function isImitatorChamp(c) {
     return !!(c && IMITATOR_NAMES.has(c.name));
@@ -164,7 +185,7 @@ function expireFuryStacks(champ) {
 const POWER_REDUCTION_DESTROY_REASONS = Object.freeze([
     "assassinar", "bolaDeFogo", "cometStarfall", "explosao", "fireAura",
     "fireAndIce", "missemagicos", "potion", "raioDuplo", "ultimate",
-    "vampirism", "vinganca",
+    "vampirism", "vinganca", "emChamas",
 ]);
 function isCombatOrPowerReductionDestroy(reason) {
     return reason === "combat" || POWER_REDUCTION_DESTROY_REASONS.includes(reason);
@@ -826,39 +847,20 @@ function applyMaintenanceCounters(state, pIdx) {
             c.currentPower = (c.currentPower ?? 0) + 1;
         if (c.foreverGrowth && !c.silenced)
             c.currentPower = (c.currentPower ?? 0) + 1;
-        if (c.frozen && c.frozenTurns > 0) {
-            c.frozenTurns -= 1;
-            if (c.frozenTurns <= 0) {
-                c.frozen = false;
-                c.frozenTurns = 0;
-            }
-        }
-        if (c.barrier && !c.barrierPermanent && c.barrierTurns > 0) {
-            c.barrierTurns -= 1;
-            if (c.barrierTurns <= 0) {
-                c.barrier = false;
-                c.barrierTurns = 0;
-            }
-        }
-        if (c.fireAura && c.fireAuraTurns > 0) {
-            c.fireAuraTurns -= 1;
-            if (c.fireAuraTurns <= 0) {
-                c.fireAura = false;
-                c.fireAuraTurns = 0;
-            }
-        }
-        if (c.shielded && c.shieldedTurns > 0) {
-            c.shieldedTurns -= 1;
-            if (c.shieldedTurns <= 0) {
-                c.shielded = false;
-                c.shieldedTurns = 0;
-            }
-        }
-        c.tiroDuploUsedThisTurn = false;
-        if (c.poisoned && c.poisonedByP === pIdx && c.poisonTurns > 0) {
-            c.poisonTurns -= 1;
-        }
+        // Congelado / Barreira / Aura / Proteção / tiroDuplo: só em
+        // applyTurnStartStatusTicks — evita tick duplo na manutenção.
     });
+    // Veneno: conta rodadas do envenenador em QUALQUER campo (alvos são inimigos).
+    {
+        const count = state.playersCount ?? state.players?.length ?? 0;
+        for (let ep = 0; ep < count; ep++) {
+            (state.players[ep]?.field || []).forEach((c) => {
+                if (c.poisoned && c.poisonedByP === pIdx && c.poisonTurns > 0) {
+                    c.poisonTurns -= 1;
+                }
+            });
+        }
+    }
     expireWallBonusOnTurnStart(state, pIdx);
     if (p.guerraActive) {
         const count = state.playersCount ?? state.players?.length ?? 0;
@@ -872,6 +874,58 @@ function applyMaintenanceCounters(state, pIdx) {
         }
         p.guerraActive = false;
     }
+}
+/**
+ * Em Chamas (Incendiar): após a manutenção do dono, -1 Poder por rodada (4 no total).
+ * Oposto do Crescimento. Retorna ticks para VFX / destruições.
+ */
+function applyEmChamasTicks(state, pIdx) {
+    const p = state.players[pIdx];
+    const ticks = [];
+    const destroyed = [];
+    if (!p?.field?.length)
+        return { ticks, destroyed };
+    const toDestroy = [];
+    p.field.forEach((c, i) => {
+        if (!c?.burning || (c.burningTurns ?? 0) <= 0)
+            return;
+        const before = c.currentPower ?? 0;
+        const killerP = c.burningByP;
+        reduceChampionPower(c, 1);
+        c.burningTurns = Math.max(0, (c.burningTurns ?? 0) - 1);
+        if (c.burningTurns <= 0) {
+            c.burning = false;
+            c.burningTurns = 0;
+            c.burningByP = undefined;
+        }
+        const after = c.currentPower ?? 0;
+        ticks.push({
+            p: pIdx, i, name: c.name, before, after,
+            expired: !c.burning,
+            killerP,
+        });
+        if (after <= 0 && before > 0)
+            toDestroy.push({ i, name: c.name, killerP });
+    });
+    toDestroy.sort((a, b) => b.i - a.i);
+    for (const k of toDestroy) {
+        const ch = discardChampionAt(state, pIdx, k.i);
+        if (!ch)
+            continue;
+        const burst = applyOnDestroyBurst(state, pIdx, ch, "emChamas");
+        let vpGain = 0;
+        const killer = (k.killerP != null && k.killerP >= 0) ? state.players[k.killerP] : null;
+        if (killer && !hasNoHonor(ch)) {
+            killer.vp = (killer.vp ?? 0) + 1;
+            vpGain = 1;
+        }
+        destroyed.push({ p: pIdx, i: k.i, name: k.name, burst, vpGain, killerP: k.killerP });
+        ticks.forEach((t) => {
+            if (t.p === pIdx && t.i > k.i)
+                t.i -= 1;
+        });
+    }
+    return { ticks, destroyed };
 }
 /** Início de turno após manutenção (ações, untap, draw flags). */
 function applyTurnRefresh(state, pIdx, limits = LIMITS) {
@@ -1090,6 +1144,8 @@ const DfRules = {
     invokeDragonBlocked,
     championPrintedPower,
     championSummonCost,
+    talentPlayCost,
+    hasIniciativa,
     isOverpower,
     isResistente,
     isPesadoDemais,
@@ -1144,6 +1200,7 @@ const DfRules = {
     expireWallBonusOnTurnStart,
     applyWallBonusOnTurnEnd,
     applyMaintenanceCounters,
+    applyEmChamasTicks,
     applyTurnRefresh,
     discardChampionAt,
     applyTurnStartStatusTicks,

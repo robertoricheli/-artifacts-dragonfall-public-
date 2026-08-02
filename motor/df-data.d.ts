@@ -18,6 +18,7 @@ declare const DfData: {
         abilityDesc: string;
         onDestroy: string;
         onEnter: any;
+        composedFace: boolean;
         constantEffect?: undefined;
         summonRitual?: undefined;
         talentEffect?: undefined;
@@ -32,6 +33,7 @@ declare const DfData: {
         abilityDesc: string;
         onDestroy: any;
         onEnter: string;
+        composedFace: boolean;
         constantEffect?: undefined;
         summonRitual?: undefined;
         talentEffect?: undefined;
@@ -47,6 +49,7 @@ declare const DfData: {
         onDestroy: any;
         onEnter: any;
         constantEffect: string;
+        composedFace: boolean;
         summonRitual?: undefined;
         talentEffect?: undefined;
         subcategory?: undefined;
@@ -61,6 +64,7 @@ declare const DfData: {
         onDestroy: any;
         onEnter: any;
         summonRitual: number;
+        composedFace: boolean;
         constantEffect?: undefined;
         talentEffect?: undefined;
         subcategory?: undefined;
@@ -75,6 +79,7 @@ declare const DfData: {
         onDestroy: any;
         onEnter: any;
         talentEffect: string;
+        composedFace: boolean;
         constantEffect?: undefined;
         summonRitual?: undefined;
         subcategory?: undefined;
@@ -90,6 +95,7 @@ declare const DfData: {
         onDestroy: any;
         onEnter: any;
         talentEffect: string;
+        composedFace: boolean;
         constantEffect?: undefined;
         summonRitual?: undefined;
         hidden?: undefined;
@@ -103,6 +109,7 @@ declare const DfData: {
         onDestroy: any;
         onEnter: any;
         hidden: boolean;
+        composedFace: boolean;
         constantEffect?: undefined;
         summonRitual?: undefined;
         talentEffect?: undefined;
@@ -117,6 +124,7 @@ declare const DfData: {
         abilityDesc: string;
         onDestroy: any;
         onEnter: any;
+        composedFace: boolean;
     };
     cubicDragonDef: {
         name: string;
@@ -127,7 +135,11 @@ declare const DfData: {
         abilityDesc: string;
         onDestroy: any;
         onEnter: any;
+        composedFace: boolean;
     };
+    /** Renomes de carta: baralhos antigos. */
+    cardRenameMap: Readonly<Record<string, string>>;
+    resolveCardName(name: string): string;
     dragonTokenDef(name: any): {
         name: string;
         power: number;
@@ -137,6 +149,7 @@ declare const DfData: {
         abilityDesc: string;
         onDestroy: any;
         onEnter: any;
+        composedFace: boolean;
     };
 };
 export { DfData };

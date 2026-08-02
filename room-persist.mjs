@@ -26,6 +26,8 @@ function serializeRoom(room) {
     eventLog: room.eventLog || [],
     actionSeq: room.actionSeq || 0,
     turnDeadline: room.turnDeadline || null,
+    deckSeed: room.deckSeed != null ? room.deckSeed : null,
+    arenaScenarioId: room.arenaScenarioId || null,
   };
 }
 

@@ -45,12 +45,14 @@ export function createRoom() {
     status: "lobby",
     sockets: [null, null],
     heroes: [null, null],
+    deckCardNames: [null, null],
     winPoints: 15,
     ready: [false, false],
     lastSnapshot: null,
     gameState: null,
     eventLog: [],
     actionSeq: 0,
+    aiControlled: [false, false],
   };
   rooms.set(code, room);
   return room;
@@ -166,6 +168,8 @@ export function roomPublicView(room, yourSeat = null) {
       room.ready[1],
     actionSeq: room.actionSeq || 0,
     turnDeadline: room.turnDeadline || null,
+    arenaScenarioId: room.arenaScenarioId || null,
+    gameState: room.status === "playing" ? room.gameState || null : null,
   };
 }
 
@@ -194,6 +198,8 @@ export function importPersistedRoom(data) {
     actionSeq: data.actionSeq || 0,
     turnDeadline: data.turnDeadline || null,
     turnTimer: null,
+    deckSeed: data.deckSeed != null ? data.deckSeed : null,
+    arenaScenarioId: data.arenaScenarioId || null,
   };
   rooms.set(room.code, room);
   return room;

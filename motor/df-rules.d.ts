@@ -11,7 +11,16 @@ declare const LIMITS: Readonly<{
 /** Invocar dragão/filhote bloqueado com 4+ aliados (manual), independente do teto de campo. */
 declare function invokeDragonBlocked(state: any, pIdx: any, card: any, limits?: typeof LIMITS): boolean;
 declare function championPrintedPower(c: any): any;
+/** Iniciativa (Pistoleira Neon): invocação custa 1 ação. */
+declare function hasIniciativa(c: any): boolean;
 declare function championSummonCost(c: any): any;
+/**
+ * Custo em ações de uma carta de Talento (manual §9.1): é o Poder impresso.
+ * Vários talentos são Custo 0 (Fortalecer, Bola de Fogo, Zero Absoluto,
+ * Amedrontar, Barreira, Baforada Venenosa, Aceleração) e portanto podem ser
+ * jogados mesmo sem ações restantes.
+ */
+declare function talentPlayCost(c: any): any;
 declare function isOverpower(c: any): boolean;
 declare function isResistente(c: any): boolean;
 declare function isPesadoDemais(c: any): boolean;
@@ -209,6 +218,14 @@ declare function applyWallBonusOnTurnEnd(state: any, endingPIdx: any): void;
  * Não remove campeões envenenados — use poisonKills do plano.
  */
 declare function applyMaintenanceCounters(state: any, pIdx: any): void;
+/**
+ * Em Chamas (Incendiar): após a manutenção do dono, -1 Poder por rodada (4 no total).
+ * Oposto do Crescimento. Retorna ticks para VFX / destruições.
+ */
+declare function applyEmChamasTicks(state: any, pIdx: any): {
+    ticks: any[];
+    destroyed: any[];
+};
 /** Início de turno após manutenção (ações, untap, draw flags). */
 declare function applyTurnRefresh(state: any, pIdx: any, limits?: typeof LIMITS): void;
 /** Remove campeão do campo → descarte (sem efeitos colaterais de combate). */
@@ -264,6 +281,8 @@ declare const DfRules: {
     invokeDragonBlocked: typeof invokeDragonBlocked;
     championPrintedPower: typeof championPrintedPower;
     championSummonCost: typeof championSummonCost;
+    talentPlayCost: typeof talentPlayCost;
+    hasIniciativa: typeof hasIniciativa;
     isOverpower: typeof isOverpower;
     isResistente: typeof isResistente;
     isPesadoDemais: typeof isPesadoDemais;
@@ -322,6 +341,7 @@ declare const DfRules: {
     expireWallBonusOnTurnStart: typeof expireWallBonusOnTurnStart;
     applyWallBonusOnTurnEnd: typeof applyWallBonusOnTurnEnd;
     applyMaintenanceCounters: typeof applyMaintenanceCounters;
+    applyEmChamasTicks: typeof applyEmChamasTicks;
     applyTurnRefresh: typeof applyTurnRefresh;
     discardChampionAt: typeof discardChampionAt;
     applyTurnStartStatusTicks: typeof applyTurnStartStatusTicks;

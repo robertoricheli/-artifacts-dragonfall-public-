@@ -34,6 +34,28 @@ function summonCheckOpts(state, pid, ctx) {
         allowWastedOnEnter: ctx.allowWastedOnEnter ?? false,
     };
 }
+/** Resolve handIdx pelo nome/uid quando o índice do cliente divergiu do servidor. */
+function resolveSummonHandIdx(hand, handIdx, cardName, uid) {
+    if (!Array.isArray(hand))
+        return handIdx | 0;
+    let idx = handIdx | 0;
+    const wantUid = uid != null ? String(uid) : "";
+    if (wantUid) {
+        const byUid = hand.findIndex((c) => c && String(c.uid || "") === wantUid);
+        if (byUid >= 0)
+            return byUid;
+    }
+    const want = cardName != null ? String(cardName) : "";
+    const at = hand[idx];
+    if (want && at && String(at.name || "") === want)
+        return idx;
+    if (want) {
+        const byName = hand.findIndex((c) => c && String(c.name || "") === want);
+        if (byName >= 0)
+            return byName;
+    }
+    return idx;
+}
 export function cloneState(state) {
     return JSON.parse(JSON.stringify(state));
 }
@@ -52,12 +74,15 @@ export function validateAction(state, action, ctx = {}) {
             return R.canEndTurn(state, pid);
         case T.DRAW_CARD:
             return R.canBuyCard(state, pid, ctx.limits);
-        case T.SUMMON:
-            return R.canSummon(state, pid, a.handIdx, {
+        case T.SUMMON: {
+            const hand = state.players[pid]?.hand;
+            const idx = resolveSummonHandIdx(hand, a.handIdx, a.cardName, a.uid);
+            return R.canSummon(state, pid, idx, {
                 freeAction: !!a.freeAction,
                 ...R.summonContextForPlayer(state, pid),
                 ...summonCheckOpts(state, pid, ctx),
             });
+        }
         case T.ATTACK_RESOLVE:
             return R.canAttack(state, pid, a.attackerIdx, a.defenderPlayerId, a.defenderIdx, ctx);
         case T.REACTIVE_BLOCK_ANSWER:
@@ -80,7 +105,12 @@ export function validateAction(state, action, ctx = {}) {
             if (!handCard || handCard.category !== "talent")
                 return { ok: false, code: "NOT_TALENT" };
             const pl = state.players[pid];
-            if ((pl.actions ?? 0) < 1)
+            // Custo por carta (manual §9.1): talento Custo 0 vale com 0 ações.
+            const talentCost = R.talentPlayCost?.(handCard)
+                ?? handCard.currentPower
+                ?? handCard.power
+                ?? 0;
+            if ((pl.actions ?? 0) < talentCost)
                 return { ok: false, code: "INSUFFICIENT_ACTIONS" };
             return { ok: true, code: "OK" };
         }
@@ -122,15 +152,22 @@ export function applyAction(state, action, ctx = {}) {
             break;
         }
         case T.SUMMON: {
-            const leg = R.canSummon(next, pid, a.handIdx, {
+            const hand = p.hand;
+            const summonIdx = resolveSummonHandIdx(hand, a.handIdx, a.cardName, a.uid);
+            a.handIdx = summonIdx;
+            const leg = R.canSummon(next, pid, summonIdx, {
                 freeAction: !!a.freeAction,
                 ...R.summonContextForPlayer(next, pid),
                 ...summonCheckOpts(next, pid, ctx),
             });
             if (!leg.ok)
                 return { ok: false, state, events: [], error: leg.code };
-            const hand = p.hand;
-            const card = hand.splice(a.handIdx, 1)[0];
+            const wantName = a.cardName != null ? String(a.cardName) : "";
+            const handCard = hand[summonIdx];
+            if (wantName && (!handCard || String(handCard.name || "") !== wantName)) {
+                return { ok: false, state, events: [], error: "CARD_MISMATCH" };
+            }
+            const card = hand.splice(summonIdx, 1)[0];
             const champ = {
                 ...card,
                 uid: a.uid || `u-${Date.now()}`,
@@ -148,7 +185,7 @@ export function applyAction(state, action, ctx = {}) {
             if (!a.freeAction)
                 p.actions = p.actions - R.championSummonCost(card);
             const fIdx = field.indexOf(champ);
-            events.push({ type: "SUMMON", playerId: pid, fieldIdx: fIdx, card: champ });
+            events.push({ type: "SUMMON", playerId: pid, fieldIdx: fIdx, card: champ, cardName: champ.name });
             if (champ.onEnter) {
                 events.push({ type: "ON_ENTER_PENDING", playerId: pid, fieldIdx: fIdx, onEnter: champ.onEnter });
             }
@@ -239,7 +276,10 @@ export function applyAction(state, action, ctx = {}) {
             });
             const count = next.playersCount ?? next.players.length;
             next.currentPlayer = (pid + 1) % count;
-            next.turnNumber = (next.turnNumber ?? 1) + 1;
+            // Paridade com endTurn() do cliente: turnNumber sobe a cada volta ao assento 0.
+            if (next.currentPlayer === 0) {
+                next.turnNumber = (next.turnNumber ?? 1) + 1;
+            }
             const np = next.players[next.currentPlayer];
             const maxHand = R.LIMITS?.MAX_HAND ?? 8;
             if (!maint.skipDraw && np.hand.length < maxHand && np.deck.length > 0) {
@@ -376,9 +416,7 @@ export function autoOnEnterResolution(state, casterIdx, fieldIdx, plan, rng = Ma
         }
     }
     if (plan.targetKind === "ally") {
-        const allies = ability === "corromper"
-            ? R.gatherAllyTargets(state, casterIdx, -1)
-            : R.gatherAllyTargets(state, casterIdx, fieldIdx);
+        const allies = R.gatherAllyTargets(state, casterIdx, fieldIdx);
         if (allies.length) {
             resolution.targetP = allies[0].p;
             resolution.targetI = allies[0].i;

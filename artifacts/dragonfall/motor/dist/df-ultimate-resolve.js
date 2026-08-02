@@ -332,6 +332,9 @@ function scareReturn(state, pIdx, targetP, targetI, events) {
     champ.barrierPermanent = false;
     champ.fireAura = false;
     champ.fireAuraTurns = 0;
+    champ.burning = false;
+    champ.burningTurns = 0;
+    champ.burningByP = undefined;
     champ.fury = false;
     champ.furyTurns = 0;
     champ.furyStacks = 0;

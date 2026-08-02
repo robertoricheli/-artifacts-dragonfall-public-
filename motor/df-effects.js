@@ -121,8 +121,8 @@ function bootstrapRegistry() {
         "fortalecer", "devorar", "bolaDeFogo", "assassinar", "necromancia",
         "imitar", "ursificacao", "transformarBichinho", "furia", "guardiao",
         "fumacaToxica", "raioDuplo", "auraDeFogo", "auraAntiMagia",
-        "armaduraDeVidro", "rajadaCongelante", "corromper",
-        "mordidaVenenosa", "gritoDeGuerra",
+        "defensor", "rajadaCongelante", "corromper",
+        "mordidaVenenosa", "incendiar", "gritoDeGuerra",
         "invokeDragon", "invokeCubicDragon", "rapidez",
     ].forEach((key) => {
         if (!getOnEnter(key))

@@ -1,7 +1,7 @@
 /**
  * Estado inicial de partida 1v1 no servidor (mesma lógica que resetState + deckSeed).
  */
-import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
+import { bootDragonfallEngine } from "../scripts/lib/df-node-boot.mjs";
 
 function mulberry32(seed) {
   let a = seed >>> 0;
@@ -25,16 +25,36 @@ function cloneCard(c) {
   return JSON.parse(JSON.stringify(c));
 }
 
-function buildDecks(state, cardDefs, deckSeed) {
+function buildDecks(state, cardDefs, deckSeed, deckCardNames) {
   const playable = cardDefs.filter((c) => !c.hidden);
-  const uniqueByName = [];
-  const seen = new Set();
+  const byName = new Map();
   for (const c of playable) {
-    if (seen.has(c.name)) continue;
-    seen.add(c.name);
-    uniqueByName.push(c);
+    if (!byName.has(c.name)) byName.set(c.name, c);
   }
+  const uniqueByName = [...byName.values()];
+
   for (let p = 0; p < state.players.length; p++) {
+    const names = Array.isArray(deckCardNames?.[p]) ? deckCardNames[p] : null;
+    if (names && names.length >= 10) {
+      const deck = [];
+      const seen = new Set();
+      for (const n of names) {
+        const nm = String(n || "").trim();
+        if (!nm || seen.has(nm)) continue;
+        const card = byName.get(nm);
+        if (!card) continue;
+        seen.add(nm);
+        deck.push(cloneCard(card));
+      }
+      if (deck.length >= 10) {
+        state.players[p].deck = deck;
+        state.players[p].discard = [];
+        const seed = deckSeed != null ? (deckSeed + p * 9973) >>> 0 : null;
+        if (seed != null) shuffleInPlace(state.players[p].deck, mulberry32(seed));
+        else shuffleInPlace(state.players[p].deck, Math.random);
+        continue;
+      }
+    }
     state.players[p].deck = uniqueByName.map(cloneCard);
     state.players[p].discard = [];
     const seed = deckSeed != null ? (deckSeed + p * 9973) >>> 0 : null;
@@ -44,7 +64,7 @@ function buildDecks(state, cardDefs, deckSeed) {
 }
 
 /**
- * @param {{ heroIds: string[], winPoints?: number, firstPlayer?: number, deckSeed?: number }} opts
+ * @param {{ heroIds: string[], winPoints?: number, firstPlayer?: number, deckSeed?: number, deckCardNames?: (string[]|null)[] }} opts
  */
 export function createInitialMatchState(opts) {
   const { DfData } = bootDragonfallEngine();
@@ -86,7 +106,7 @@ export function createInitialMatchState(opts) {
     });
   }
 
-  buildDecks(state, DfData.cardDefs, opts.deckSeed);
+  buildDecks(state, DfData.cardDefs, opts.deckSeed, opts.deckCardNames);
 
   for (let p = 0; p < 2; p++) {
     for (let d = 0; d < 4; d++) {
