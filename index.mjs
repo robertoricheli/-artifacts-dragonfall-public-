@@ -599,7 +599,13 @@ io.on("connection", (socket) => {
 
     const result = applyAuthoritativeAction(room, seat, action, payload?.snapshot || null);
     if (!result.ok) {
-      return ack?.({ ok: false, error: result.error || "ILLEGAL_ACTION" });
+      // Devolve o estado atual da sala para o cliente reconciliar (evita “SUA VEZ” fantasma).
+      const auth = room.gameState?.players?.length ? room.gameState : null;
+      return ack?.({
+        ok: false,
+        error: result.error || "ILLEGAL_ACTION",
+        authoritativeState: auth,
+      });
     }
 
     room.actionSeq += 1;
