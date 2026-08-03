@@ -1,6 +1,7 @@
 /**
  * Fila 1v1 — pareia dois jogadores em uma sala nova.
  */
+import { MAX_QUEUE } from "./df-mp-limits.mjs";
 
 /** @type {{ socketId: string, joinedAt: number }[]} */
 const queue = [];
@@ -10,10 +11,16 @@ export function removeFromQueue(socketId) {
   if (i >= 0) queue.splice(i, 1);
 }
 
+/**
+ * @returns {{ ok: true, size: number } | { ok: false, error: string, size: number }}
+ */
 export function addToQueue(socketId) {
   removeFromQueue(socketId);
+  if (queue.length >= MAX_QUEUE) {
+    return { ok: false, error: "SERVER_BUSY", size: queue.length };
+  }
   queue.push({ socketId, joinedAt: Date.now() });
-  return queue.length;
+  return { ok: true, size: queue.length };
 }
 
 export function queueWaitSeconds(socketId) {

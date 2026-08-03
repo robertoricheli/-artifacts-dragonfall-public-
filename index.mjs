@@ -13,6 +13,7 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import {
   createRoom,
+  createRoomOrThrow,
   getRoom,
   joinRoom,
   leaveRoom,
@@ -21,14 +22,17 @@ import {
   seatForSocket,
   canHostStart,
   listRoomsCount,
+  listActiveMatchCount,
   importPersistedRoom,
   listPlayingRooms,
+  touchLastSeen,
 } from "./rooms.mjs";
 import {
   addToQueue,
   removeFromQueue,
   takePair,
   isInQueue,
+  queueSize,
 } from "./matchmaking.mjs";
 import {
   initRankedMatchmaking,
@@ -38,13 +42,37 @@ import {
   isInRankedQueue,
   getMatchmakingMode,
 } from "./bullmq-matchmaking.mjs";
-import { getMmr, getRankedProfile, recordRankedMatch } from "./df-ranked-store.mjs";
+import { rankedQueueSize } from "./matchmaking-ranked.mjs";
+import {
+  getMmr,
+  getRankedProfile,
+  recordRankedMatch,
+  initRankedStoreSchema,
+  rankedStoreMode,
+} from "./df-ranked-store.mjs";
 import { initPostgres, isPostgresEnabled, getReplayByRoomCode, shutdownPostgres } from "./df-postgres.mjs";
 import { initAuthStore, getAuthStoreMode } from "./df-auth.mjs";
 import { authPlayerFromToken, startSessionPruneScheduler } from "./df-auth-store.mjs";
 import { recordMatchEnd } from "./df-match-history.mjs";
 import { applyAuthoritativeAction, seedRoomFromSnapshot, buildReplayPayload } from "./df-authority.mjs";
 import { loadPersistedRooms, schedulePersistRooms, flushPersistRooms } from "./room-persist.mjs";
+import {
+  initLiveRoomsSchema,
+  scheduleLiveRoomPersist,
+  flushAllLiveRooms,
+  loadLiveRoomsFromPg,
+  deleteLiveRoom,
+} from "./df-live-rooms.mjs";
+import {
+  recordActionLatency,
+  recordReject,
+  recordDisconnect,
+  getActionStats,
+  logMp,
+  startSelfKeepAlive,
+} from "./df-mp-metrics.mjs";
+import { allowSync, MAX_ROOMS, MAX_QUEUE } from "./df-mp-limits.mjs";
+import { ensureSeatTokens, seatTokenFor } from "./df-seat-token.mjs";
 import { createRateLimiter } from "./rate-limit.mjs";
 import { readGameVersion } from "./df-game-version.mjs";
 import { createInitialMatchState } from "./df-match-init.mjs";
@@ -65,6 +93,7 @@ import {
   validateGetReplay,
   validateJoinRankedQueue,
 } from "./df-schema.mjs";
+
 
 const PORT = Number(process.env.PORT) || 8787;
 const corsOriginRaw = process.env.CORS_ORIGIN || "*";
@@ -88,8 +117,12 @@ if (restoredRooms.length) {
   console.log(`[persist] ${restoredRooms.length} sala(s) em jogo restaurada(s)`);
 }
 
-function touchPersist() {
+function touchPersist(room = null) {
   schedulePersistRooms(listPlayingRooms);
+  if (room) scheduleLiveRoomPersist(room);
+  else {
+    for (const r of listPlayingRooms()) scheduleLiveRoomPersist(r);
+  }
 }
 
 const app = express();
@@ -113,14 +146,25 @@ app.get("/", (_req, res) => {
   });
 });
 app.get("/health", (_req, res) => {
+  const stats = getActionStats();
   res.json({
     ok: true,
     gameVersion: GAME_VERSION,
     rooms: listRoomsCount(),
+    activeMatches: listActiveMatchCount(),
+    queueCasual: queueSize(),
+    queueRanked: rankedQueueSize(),
+    maxRooms: MAX_ROOMS,
+    maxQueue: MAX_QUEUE,
     matchmaking: getMatchmakingMode(),
+    rankedStore: rankedStoreMode(),
     postgres: isPostgresEnabled(),
     authStore: getAuthStoreMode(),
     mailConfigured: isMailConfigured(),
+    avgActionMs: stats.avgActionMs,
+    p95ActionMs: stats.p95ActionMs,
+    disconnects1m: stats.disconnects1m,
+    actions1m: stats.actions1m,
   });
 });
 
@@ -209,6 +253,7 @@ function startMatchForRoom(room, io) {
   room.lastSnapshot = { state: gameState, full: true };
   room.deckSeed = deckSeed;
   room.arenaScenarioId = arenaScenarioId;
+  ensureSeatTokens(room);
   const match = {
     heroIds: [room.heroes[0], room.heroes[1]],
     winPoints: room.winPoints,
@@ -220,22 +265,35 @@ function startMatchForRoom(room, io) {
   for (let seat = 0; seat < 2; seat++) {
     const sid = room.sockets[seat];
     if (!sid) continue;
-    io.to(sid).emit("match_start", { ...match, yourSeat: seat });
+    io.to(sid).emit("match_start", {
+      ...match,
+      yourSeat: seat,
+      seatToken: seatTokenFor(room, seat),
+      code: room.code,
+    });
   }
   broadcastRoomState(room);
   resetTurnTimer(room);
+  touchPersist(room);
   return match;
 }
 
 function pairRankedSockets(io, entry0, entry1) {
   const sid0 = entry0.socketId;
   const sid1 = entry1.socketId;
-  const room = createRoom();
+  let room;
+  try {
+    room = createRoomOrThrow();
+  } catch (e) {
+    logMp("pair_ranked_busy", { error: e?.message });
+    return;
+  }
   room.ranked = true;
   room.rankedPlayerIds = [entry0.playerId, entry1.playerId];
   room.winPoints = 15;
   room.sockets[0] = sid0;
   room.sockets[1] = sid1;
+  ensureSeatTokens(room);
   socketRoom.set(sid0, room.code);
   socketRoom.set(sid1, room.code);
   const s0 = io.sockets.sockets.get(sid0);
@@ -245,12 +303,14 @@ function pairRankedSockets(io, entry0, entry1) {
   io.to(sid0).emit("ranked_match_found", {
     ...roomPublicView(room, 0),
     seat: 0,
+    seatToken: seatTokenFor(room, 0),
     mmr: entry0.mmr,
     opponentMmr: entry1.mmr,
   });
   io.to(sid1).emit("ranked_match_found", {
     ...roomPublicView(room, 1),
     seat: 1,
+    seatToken: seatTokenFor(room, 1),
     mmr: entry1.mmr,
     opponentMmr: entry0.mmr,
   });
@@ -263,6 +323,7 @@ function maybeFinishMatch(room, state) {
     room.matchHistoryRecorded = true;
     room.status = "ended";
     void recordMatchEnd(room, state, GAME_VERSION);
+    void deleteLiveRoom(room.code);
   }
   return maybeRecordRankedResult(room, state);
 }
@@ -284,18 +345,33 @@ function pairQueueSockets(io) {
   let pair = takePair();
   while (pair) {
     const [sid0, sid1] = pair;
-    const room = createRoom();
+    let room;
+    try {
+      room = createRoomOrThrow();
+    } catch (e) {
+      logMp("pair_casual_busy", { error: e?.message });
+      break;
+    }
     room.winPoints = 15;
     room.sockets[0] = sid0;
     room.sockets[1] = sid1;
+    ensureSeatTokens(room);
     socketRoom.set(sid0, room.code);
     socketRoom.set(sid1, room.code);
     const s0 = io.sockets.sockets.get(sid0);
     const s1 = io.sockets.sockets.get(sid1);
     s0?.join(room.code);
     s1?.join(room.code);
-    io.to(sid0).emit("match_found", { ...roomPublicView(room, 0), seat: 0 });
-    io.to(sid1).emit("match_found", { ...roomPublicView(room, 1), seat: 1 });
+    io.to(sid0).emit("match_found", {
+      ...roomPublicView(room, 0),
+      seat: 0,
+      seatToken: seatTokenFor(room, 0),
+    });
+    io.to(sid1).emit("match_found", {
+      ...roomPublicView(room, 1),
+      seat: 1,
+      seatToken: seatTokenFor(room, 1),
+    });
     broadcastRoomState(room);
     pair = takePair();
   }
@@ -311,6 +387,7 @@ function broadcastRoomState(room) {
   for (let seat = 0; seat < 2; seat++) {
     const sid = room.sockets[seat];
     if (!sid) continue;
+    // Em playing, ainda manda gameState no room_state (reconciliação); lobby é leve.
     io.to(sid).emit("room_state", roomPublicView(room, seat));
   }
 }
@@ -326,7 +403,7 @@ function emitActionEnvelope(room, envelope) {
 function afterAuthoritativeAction(room, state) {
   broadcastRoomState(room);
   resetTurnTimer(room);
-  touchPersist();
+  touchPersist(room);
   maybeFinishMatch(room, state);
   if (room.status === "playing" && state?.winner == null) {
     scheduleServerAi(room, io, {
@@ -367,7 +444,7 @@ function resetTurnTimer(room) {
     emitRoom(room, "remote_action", envelope);
     broadcastRoomState(room);
     resetTurnTimer(room);
-    touchPersist();
+    touchPersist(room);
     maybeFinishMatch(room, result.state);
     scheduleServerAi(room, io, {
       emitEnvelope: emitActionEnvelope,
@@ -390,7 +467,13 @@ io.on("connection", (socket) => {
   });
 
   socket.on("create_room", (_payload, ack) => {
-    const room = createRoom();
+    let room;
+    try {
+      room = createRoomOrThrow();
+    } catch (e) {
+      ack?.({ ok: false, error: e?.code || e?.message || "SERVER_BUSY" });
+      return;
+    }
     const joined = joinRoom(room.code, socket.id, false);
     if (!joined.ok) {
       ack?.({ ok: false, error: joined.error });
@@ -399,7 +482,12 @@ io.on("connection", (socket) => {
     socketRoom.set(socket.id, room.code);
     socket.join(room.code);
     const view = roomPublicView(room, joined.seat);
-    ack?.({ ok: true, ...view, seat: joined.seat });
+    ack?.({
+      ok: true,
+      ...view,
+      seat: joined.seat,
+      seatToken: joined.seatToken || seatTokenFor(room, joined.seat),
+    });
     broadcastRoomState(room);
   });
 
@@ -407,19 +495,22 @@ io.on("connection", (socket) => {
     const schema = validateJoinRoom(payload);
     if (!schema.ok) return ack?.({ ok: false, error: schema.error });
     const code = payload?.code;
-    const joined = joinRoom(code, socket.id, payload?.preferSeat);
+    const seatToken = payload?.seatToken ? String(payload.seatToken) : null;
+    const joined = joinRoom(code, socket.id, payload?.preferSeat, seatToken);
     if (!joined.ok) {
       ack?.({ ok: false, error: joined.error });
       return;
     }
     socketRoom.set(socket.id, joined.room.code);
     socket.join(joined.room.code);
+    touchLastSeen(joined.room, joined.seat);
     const view = roomPublicView(joined.room, joined.seat);
     const replay = replayPayload(joined.room);
     ack?.({
       ok: true,
       ...view,
       seat: joined.seat,
+      seatToken: joined.seatToken || seatTokenFor(joined.room, joined.seat),
       reconnected: !!joined.reconnected,
       replay,
       gameVersion: GAME_VERSION,
@@ -435,6 +526,15 @@ io.on("connection", (socket) => {
         onAfterAction: afterAuthoritativeAction,
       });
     }
+  });
+
+  socket.on("match_ping", (_payload, ack) => {
+    const room = getRoom(socketRoom.get(socket.id));
+    if (!room) return ack?.({ ok: false, error: "NOT_IN_ROOM" });
+    const seat = seatForSocket(room, socket.id);
+    if (seat === null) return ack?.({ ok: false, error: "NO_SEAT" });
+    touchLastSeen(room, seat);
+    ack?.({ ok: true, serverTime: Date.now(), turnDeadline: room.turnDeadline || null });
   });
 
   socket.on("set_hero", (payload, ack) => {
@@ -527,6 +627,10 @@ io.on("connection", (socket) => {
     }
     if (!playerId) playerId = `anon-${socket.id.slice(0, 12)}`;
     const info = addToRankedQueue(socket.id, playerId);
+    if (info?.ok === false) {
+      ack?.({ ok: false, error: info.error || "SERVER_BUSY" });
+      return;
+    }
     ack?.({
       ok: true,
       inQueue: true,
@@ -563,13 +667,23 @@ io.on("connection", (socket) => {
       }
     }
     leaveSocketRoom(socket);
-    addToQueue(socket.id);
+    const queued = addToQueue(socket.id);
+    if (queued?.ok === false) {
+      ack?.({ ok: false, error: queued.error || "SERVER_BUSY" });
+      return;
+    }
     pairQueueSockets(io);
     const paired = socketRoom.get(socket.id);
     if (paired) {
       const room = getRoom(paired);
       const seat = seatForSocket(room, socket.id);
-      ack?.({ ok: true, matched: true, ...roomPublicView(room, seat), seat });
+      ack?.({
+        ok: true,
+        matched: true,
+        ...roomPublicView(room, seat),
+        seat,
+        seatToken: seatTokenFor(room, seat),
+      });
       return;
     }
     ack?.({ ok: true, inQueue: true, joinedAt: Date.now() });
@@ -582,15 +696,19 @@ io.on("connection", (socket) => {
   });
 
   socket.on("game_action", (payload, ack) => {
+    const t0 = Date.now();
     const actionType = payload?.action?.type || payload?.type;
-    // SYNC_STATE / PLAY_VISUAL são barulhentos — não consomem o budget de jogadas reais.
     const skipRate =
       actionType === "SYNC_STATE" ||
       actionType === "PLAY_VISUAL" ||
       actionType === "ATTACK_START" ||
       actionType === "ATTACK_PICK_ATTACKER" ||
       actionType === "ATTACK_PICK_DEFENDER";
+    if (actionType === "SYNC_STATE" && !allowSync(socket.id)) {
+      return ack?.({ ok: false, error: "SYNC_RATE" });
+    }
     if (!skipRate && !actionRateLimit(socket.id)) {
+      recordReject("RATE_LIMIT", { type: actionType });
       return ack?.({ ok: false, error: "RATE_LIMIT" });
     }
     const schema = validateGameAction(payload);
@@ -601,6 +719,7 @@ io.on("connection", (socket) => {
     if (room.status !== "playing") return ack?.({ ok: false, error: "NOT_PLAYING" });
     const seat = seatForSocket(room, socket.id);
     if (seat === null) return ack?.({ ok: false, error: "NO_SEAT" });
+    touchLastSeen(room, seat);
 
     const action = schema.action;
     if (action.playerId !== undefined && action.playerId !== seat) {
@@ -610,8 +729,19 @@ io.on("connection", (socket) => {
 
     const result = applyAuthoritativeAction(room, seat, action, payload?.snapshot || null);
     if (!result.ok) {
-      // Devolve o estado atual da sala para o cliente reconciliar (evita “SUA VEZ” fantasma).
       const auth = room.gameState?.players?.length ? room.gameState : null;
+      recordReject(result.error || "ILLEGAL_ACTION", {
+        roomCode: room.code,
+        seat,
+        type: action.type,
+      });
+      recordActionLatency(Date.now() - t0, {
+        roomCode: room.code,
+        seat,
+        type: action.type,
+        ok: false,
+        error: result.error,
+      });
       return ack?.({
         ok: false,
         error: result.error || "ILLEGAL_ACTION",
@@ -620,19 +750,21 @@ io.on("connection", (socket) => {
     }
 
     room.actionSeq += 1;
+    // Delta: peer recebe authoritativeState; snapshot do cliente só em anim/UI.
+    const sendClientSnap = action.type === "PLAY_VISUAL" || !!action.anim;
     const envelope = {
       seq: room.actionSeq,
       fromSeat: seat,
       action,
-      snapshot: payload?.snapshot || null,
-      authoritativeState: result.state || null,
+      snapshot: sendClientSnap ? (payload?.snapshot || null) : null,
+      authoritativeState: result.state || room.gameState || null,
       events: result.events || [],
       logEntry: result.logEntry || null,
       delegated: !!result.delegated,
       skip: !!result.skip,
       forfeit: action.type === "SURRENDER",
     };
-    if (result.state) {
+    if (result.state && !result.skip) {
       room.lastSnapshot = { state: result.state, full: true };
     }
 
@@ -643,17 +775,25 @@ io.on("connection", (socket) => {
     }
 
     resetTurnTimer(room);
-    touchPersist();
+    touchPersist(room);
     maybeFinishMatch(room, result.state);
     scheduleServerAi(room, io, {
       emitEnvelope: emitActionEnvelope,
       onAfterAction: afterAuthoritativeAction,
     });
 
+    recordActionLatency(Date.now() - t0, {
+      roomCode: room.code,
+      seat,
+      type: action.type,
+      seq: room.actionSeq,
+      ok: true,
+    });
+
     ack?.({
       ok: true,
       seq: room.actionSeq,
-      authoritativeState: result.state || null,
+      authoritativeState: result.state || room.gameState || null,
       events: result.events || [],
       logEntry: result.logEntry || null,
       skip: !!result.skip,
@@ -738,6 +878,11 @@ io.on("connection", (socket) => {
     if (!room) return;
     const info = disconnectSocket(room, socket.id);
     socketRoom.delete(socket.id);
+    recordDisconnect({
+      roomCode: room.code,
+      seat: info?.seat,
+      playing: room.status === "playing",
+    });
     emitRoom(room, "peer_disconnected", { seat: info?.seat, canReconnect: room.status === "playing" });
     if (room.status === "playing" && info?.seat != null) {
       markSeatDisconnectedForAi(room, info.seat, io, {
@@ -746,26 +891,50 @@ io.on("connection", (socket) => {
       });
     }
     broadcastRoomState(room);
-    touchPersist();
+    touchPersist(room);
   });
 });
 
-process.on("SIGINT", () => {
+let shuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logMp("shutdown", { signal });
+  try {
+    io.emit("server_restarting", { ok: true, reason: signal, gameVersion: GAME_VERSION });
+  } catch (e) { /* */ }
   shutdownRankedMatchmaking();
-  void shutdownPostgres();
+  try {
+    await flushAllLiveRooms(listPlayingRooms);
+  } catch (e) { /* */ }
   flushPersistRooms(listPlayingRooms);
-  process.exit(0);
-});
-process.on("SIGTERM", () => {
-  shutdownRankedMatchmaking();
-  void shutdownPostgres();
-  flushPersistRooms(listPlayingRooms);
-  process.exit(0);
-});
+  try {
+    await shutdownPostgres();
+  } catch (e) { /* */ }
+  setTimeout(() => process.exit(0), 400);
+}
+
+process.on("SIGINT", () => { void gracefulShutdown("SIGINT"); });
+process.on("SIGTERM", () => { void gracefulShutdown("SIGTERM"); });
 
 await initPostgres();
+await initLiveRoomsSchema();
+await initRankedStoreSchema();
 await initAuthStore();
 startSessionPruneScheduler();
+
+// Restaura salas de PG (preferência) além do rooms.json.
+try {
+  const live = await loadLiveRoomsFromPg();
+  let n = 0;
+  for (const saved of live) {
+    if (importPersistedRoom(saved)) n += 1;
+  }
+  if (n) console.log(`[live-rooms] ${n} sala(s) restaurada(s) do Postgres`);
+} catch (e) {
+  console.warn("[live-rooms] restore:", e?.message || e);
+}
+
 await initRankedMatchmaking(async (entry0, entry1) => {
   pairRankedSockets(io, entry0, entry1);
 });
@@ -774,4 +943,11 @@ httpServer.listen(PORT, () => {
   console.log(`Dragonfall server em http://localhost:${PORT}`);
   console.log(`WebSocket (Socket.IO) na mesma porta`);
   logMailStatusOnBoot();
+  startSelfKeepAlive(PORT);
+  logMp("boot", {
+    gameVersion: GAME_VERSION,
+    rooms: listRoomsCount(),
+    postgres: isPostgresEnabled(),
+    matchmaking: getMatchmakingMode(),
+  });
 });

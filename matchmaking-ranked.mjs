@@ -13,10 +13,18 @@ export function removeFromRankedQueue(socketId) {
 
 export function addToRankedQueue(socketId, playerId) {
   removeFromRankedQueue(socketId);
+  let max = 24;
+  try {
+    // dynamic import sync not available — use env
+    max = Number(process.env.DF_MAX_QUEUE) || 24;
+  } catch (e) { /* */ }
+  if (queue.length >= max) {
+    return { ok: false, error: "SERVER_BUSY", mmr: getMmr(playerId), position: queue.length };
+  }
   const mmr = getMmr(playerId);
   queue.push({ socketId, playerId: String(playerId), mmr, joinedAt: Date.now() });
   queue.sort((a, b) => a.joinedAt - b.joinedAt);
-  return { mmr, position: queue.length };
+  return { ok: true, mmr, position: queue.length };
 }
 
 export function isInRankedQueue(socketId) {

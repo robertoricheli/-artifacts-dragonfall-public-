@@ -1,39 +1,39 @@
-# Deploy no Render: https://render.com/docs/blueprint-spec
-# New > Blueprint > conectar repositório > caminho server/render.yaml
-# Ou: Dashboard → Blueprints → Sync (após push deste arquivo)
+# Deploy no Render: Blueprint ou sync via npm run df:render:sync -- --push
+# Pacote flat em render-deploy-tmp/ (rootDir = ".")
 services:
   - type: web
     name: dragonfall-multiplayer
     runtime: node
-    rootDir: server
+    # Layout flat do repo de deploy (index.mjs na raiz).
+    rootDir: .
     buildCommand: npm install
     startCommand: npm start
-    plan: free
+    # Starter = always-on (elimina cold start do free). Ajuste no Dashboard se o plano diferir.
+    plan: starter
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
       - key: CORS_ORIGIN
-        value: "https://dragonfall.netlify.app,http://127.0.0.1:5173,http://localhost:5173"
+        value: "https://dragonfall.netlify.app,https://artifacts-dragonfall.netlify.app,http://127.0.0.1:5173,http://localhost:5173"
+      - key: DF_KEEPALIVE
+        value: "1"
+      - key: DF_MAX_ROOMS
+        value: "40"
+      - key: DF_MAX_QUEUE
+        value: "24"
       - key: DATABASE_URL
         fromDatabase:
           name: dragonfall-postgres
           property: connectionString
-      # Opcional legado. passwordEnc não é mais gravado; forgot usa senha temporária + hash.
+      # Redis opcional — ranked BullMQ + futuro adapter Socket.IO
+      - key: REDIS_URL
+        sync: false
       - key: DF_AUTH_ENC_KEY
         sync: false
-      # E-mail (Esqueci a senha) — ver server/MAIL-SETUP.md
-      # - key: DF_SMTP_HOST
-      #   value: smtp.gmail.com
-      # - key: DF_SMTP_USER
-      #   sync: false
-      # - key: DF_SMTP_PASS
-      #   sync: false
-      # - key: DF_MAIL_FROM
-      #   value: Dragonfall <noreply@example.com>
 
 databases:
   - name: dragonfall-postgres
-    plan: free
+    plan: basic-256mb
     databaseName: dragonfall
     user: dragonfall

@@ -1,23 +1,10 @@
 /**
  * Salas 1v1 — código DRAGON-XXXX
  */
+import { MAX_ROOMS } from "./df-mp-limits.mjs";
+import { ensureSeatTokens, seatTokenFor } from "./df-seat-token.mjs";
 
 const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
-
-/** @typedef {{ id: string, seat: 0|1, name: string, heroId: string|null, ready: boolean }} RoomPlayer */
-/** @typedef {{
- *   code: string,
- *   createdAt: number,
- *   status: 'lobby'|'playing'|'ended',
- *   sockets: [string|null, string|null],
- *   heroes: [string|null, string|null],
- *   winPoints: number,
- *   ready: [boolean, boolean],
- *   lastSnapshot: object|null,
- *   gameState: object|null,
- *   eventLog: object[],
- *   actionSeq: number,
- * }} Room */
 
 const rooms = new Map();
 
@@ -36,8 +23,12 @@ export function makeRoomCode() {
   return code;
 }
 
-/** @returns {Room} */
+/** @returns {{ ok: true, room: object } | { ok: false, error: string }} */
 export function createRoom() {
+  pruneOldRooms();
+  if (rooms.size >= MAX_ROOMS) {
+    return { ok: false, error: "SERVER_BUSY" };
+  }
   const code = makeRoomCode();
   const room = {
     code,
@@ -53,9 +44,23 @@ export function createRoom() {
     eventLog: [],
     actionSeq: 0,
     aiControlled: [false, false],
+    seatTokens: [null, null],
+    lastSeen: [0, 0],
   };
+  ensureSeatTokens(room);
   rooms.set(code, room);
-  return room;
+  return { ok: true, room };
+}
+
+/** Compat: createRoom always returned room before — wrappers use createRoomSafe. */
+export function createRoomOrThrow() {
+  const r = createRoom();
+  if (!r.ok) {
+    const err = new Error(r.error || "SERVER_BUSY");
+    err.code = r.error;
+    throw err;
+  }
+  return r.room;
 }
 
 /** @returns {Room|null} */
@@ -85,34 +90,61 @@ export function seatForSocket(room, socketId) {
 /**
  * @returns {{ ok: true, seat: 0|1, room: Room } | { ok: false, error: string }}
  */
-export function joinRoom(code, socketId, preferSeat = null) {
+export function joinRoom(code, socketId, preferSeat = null, seatToken = null) {
   pruneOldRooms();
   let room = getRoom(code);
 
   if (!room) return { ok: false, error: "ROOM_NOT_FOUND" };
 
   const existing = seatForSocket(room, socketId);
-  if (existing !== null) return { ok: true, seat: existing, room, reconnected: true };
+  if (existing !== null) {
+    touchLastSeen(room, existing);
+    return {
+      ok: true,
+      seat: existing,
+      room,
+      reconnected: true,
+      seatToken: seatTokenFor(room, existing),
+    };
+  }
 
   if (preferSeat === 0 || preferSeat === 1) {
-    if (!room.sockets[preferSeat] && room.heroes[preferSeat]) {
+    ensureSeatTokens(room);
+    const tokenOk = !seatToken || room.seatTokens[preferSeat] === seatToken;
+    if (!tokenOk) return { ok: false, error: "BAD_SEAT_TOKEN" };
+    // Reconecta se assento livre OU mesmo token (socket antigo caiu).
+    if (!room.sockets[preferSeat] || (seatToken && room.seatTokens[preferSeat] === seatToken)) {
       room.sockets[preferSeat] = socketId;
-      return { ok: true, seat: preferSeat, room, reconnected: true };
+      touchLastSeen(room, preferSeat);
+      return {
+        ok: true,
+        seat: preferSeat,
+        room,
+        reconnected: true,
+        seatToken: seatTokenFor(room, preferSeat),
+      };
     }
   }
 
   if (!room.sockets[0]) {
     room.sockets[0] = socketId;
-    return { ok: true, seat: 0, room };
+    touchLastSeen(room, 0);
+    return { ok: true, seat: 0, room, seatToken: seatTokenFor(room, 0) };
   }
   if (!room.sockets[1]) {
     room.sockets[1] = socketId;
-    return { ok: true, seat: 1, room };
+    touchLastSeen(room, 1);
+    return { ok: true, seat: 1, room, seatToken: seatTokenFor(room, 1) };
   }
   return { ok: false, error: "ROOM_FULL" };
 }
 
-/** Queda de conexão — preserva partida para reconexão (Fase 4). */
+export function touchLastSeen(room, seat) {
+  if (!room.lastSeen) room.lastSeen = [0, 0];
+  if (seat === 0 || seat === 1) room.lastSeen[seat] = Date.now();
+}
+
+/** Queda de conexão — preserva partida para reconexão. */
 export function disconnectSocket(room, socketId) {
   const seat = seatForSocket(room, socketId);
   if (seat === null) return null;
@@ -137,7 +169,13 @@ export function leaveRoom(room, socketId) {
   return { deleted: false, seat };
 }
 
-export function roomPublicView(room, yourSeat = null) {
+/**
+ * Vista pública. Em lobby não envia gameState (Fase 2 — payload leve).
+ * Em playing, includeGameState=false para broadcasts de lobby-like.
+ */
+export function roomPublicView(room, yourSeat = null, opts = {}) {
+  const includeGame =
+    opts.includeGameState !== false && room.status === "playing";
   return {
     code: room.code,
     status: room.status,
@@ -169,7 +207,8 @@ export function roomPublicView(room, yourSeat = null) {
     actionSeq: room.actionSeq || 0,
     turnDeadline: room.turnDeadline || null,
     arenaScenarioId: room.arenaScenarioId || null,
-    gameState: room.status === "playing" ? room.gameState || null : null,
+    gameState: includeGame ? room.gameState || null : null,
+    seatToken: yourSeat === 0 || yourSeat === 1 ? seatTokenFor(room, yourSeat) : null,
   };
 }
 
@@ -181,9 +220,18 @@ export function listRoomsCount() {
   return rooms.size;
 }
 
+export function listActiveMatchCount() {
+  let n = 0;
+  for (const room of rooms.values()) {
+    if (room.status === "playing") n += 1;
+  }
+  return n;
+}
+
 /** Restaura sala persistida (sem sockets — reconexão preenche assentos). */
 export function importPersistedRoom(data) {
   if (!data?.code || rooms.has(data.code)) return null;
+  if (rooms.size >= MAX_ROOMS) return null;
   const room = {
     code: data.code,
     createdAt: data.createdAt || Date.now(),
@@ -200,7 +248,13 @@ export function importPersistedRoom(data) {
     turnTimer: null,
     deckSeed: data.deckSeed != null ? data.deckSeed : null,
     arenaScenarioId: data.arenaScenarioId || null,
+    ranked: !!data.ranked,
+    rankedPlayerIds: data.rankedPlayerIds || null,
+    seatTokens: data.seatTokens || [null, null],
+    lastSeen: [0, 0],
+    aiControlled: [false, false],
   };
+  ensureSeatTokens(room);
   rooms.set(room.code, room);
   return room;
 }

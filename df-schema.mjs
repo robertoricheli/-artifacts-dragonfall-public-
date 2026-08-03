@@ -16,6 +16,9 @@ export function validateJoinRoom(payload) {
   if (payload.preferSeat != null && payload.preferSeat !== 0 && payload.preferSeat !== 1) {
     return bad("BAD_SEAT");
   }
+  if (payload.seatToken != null && typeof payload.seatToken !== "string") {
+    return bad("BAD_SEAT_TOKEN");
+  }
   return { ok: true };
 }
 

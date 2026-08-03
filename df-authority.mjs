@@ -116,6 +116,26 @@ function mergeValidatedSnapshot(room, seat, action, snapshot) {
 }
 
 /**
+ * SYNC_STATE não reescreve o tabuleiro — servidor permanece a fonte de verdade.
+ * O peer recebe authoritativeState; animação vai em action.anim.
+ */
+function applySyncStateCosmetic(room, seat, action) {
+  const state = resolveGameState(room);
+  if (!state?.players) return { ok: false, error: "NO_GAME_STATE" };
+  const entry = appendEventLogEntry(room.eventLog, room.actionSeq + 1, seat, action, [
+    { type: "SYNC_COSMETIC" },
+  ]);
+  return {
+    ok: true,
+    skip: true,
+    uiOnly: true,
+    state,
+    events: [{ type: "SYNC_COSMETIC" }],
+    logEntry: entry,
+  };
+}
+
+/**
  * Aplica ação no estado da sala (fonte da verdade no servidor).
  */
 export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
@@ -135,12 +155,40 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
   const { DfEngine } = getEngine();
   const shaped = { ...action, playerId: seat };
 
+  // SYNC: cosmético — nunca merge de snapshot de tabuleiro.
+  if (shaped.type === "SYNC_STATE") {
+    return applySyncStateCosmetic(room, seat, shaped);
+  }
+
   const v = DfEngine.validateAction(state, shaped);
   if (v.ok === false && v.code && v.code !== "DELEGATE") {
     return { ok: false, error: v.code || v.error || "ILLEGAL" };
   }
 
-  if (DELEGATED_TYPES.has(action.type)) {
+  // Delegados: tenta motor primeiro (expansão de autoridade); fallback snapshot.
+  if (DELEGATED_TYPES.has(shaped.type)) {
+    try {
+      const applied = DfEngine.applyAction(DfEngine.cloneState(state), shaped, {
+        rng: roomActionRng(room, seat),
+      });
+      if (applied?.ok && applied.state?.players) {
+        room.gameState = applied.state;
+        const entry = appendEventLogEntry(
+          room.eventLog,
+          room.actionSeq + 1,
+          seat,
+          shaped,
+          applied.events || [],
+        );
+        return {
+          ok: true,
+          state: applied.state,
+          events: applied.events || [],
+          logEntry: entry,
+          promoted: true,
+        };
+      }
+    } catch (e) { /* fallback */ }
     if (!snapshot) {
       return { ok: false, error: "SNAPSHOT_REQUIRED" };
     }

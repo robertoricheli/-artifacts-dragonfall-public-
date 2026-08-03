@@ -8,6 +8,8 @@ import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
 const AI_GRACE_MS = 8000;
 const AI_STEP_MS = 900;
 const AI_MAX_STEPS_PER_TURN = 12;
+/** Budget de CPU por tick — cede o event loop (Fase 3). */
+const AI_TICK_BUDGET_MS = Number(process.env.DF_AI_TICK_BUDGET_MS) || 40;
 
 function ensureAiFlags(room) {
   if (!room.aiControlled) room.aiControlled = [false, false];
@@ -131,17 +133,21 @@ export function scheduleServerAi(room, io, hooks) {
       && steps < AI_MAX_STEPS_PER_TURN;
 
     if (stillAiTurn) {
-      room.aiStepTimer = setTimeout(tick, AI_STEP_MS);
+      // Cede o event loop antes do próximo passo (não bloqueia Socket.IO).
+      const delay = Math.max(AI_STEP_MS, AI_TICK_BUDGET_MS);
+      room.aiStepTimer = setTimeout(() => {
+        setImmediate(tick);
+      }, delay);
     } else if (
       room.status === "playing"
       && room.gameState?.winner == null
       && room.aiControlled[room.gameState?.currentPlayer]
     ) {
-      room.aiStepTimer = setTimeout(tick, AI_STEP_MS);
+      room.aiStepTimer = setTimeout(() => setImmediate(tick), AI_STEP_MS);
     }
   };
 
-  room.aiStepTimer = setTimeout(tick, AI_STEP_MS);
+  room.aiStepTimer = setTimeout(() => setImmediate(tick), AI_STEP_MS);
 }
 
 /**
