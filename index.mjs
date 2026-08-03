@@ -627,6 +627,7 @@ io.on("connection", (socket) => {
       logEntry: result.logEntry || null,
       delegated: !!result.delegated,
       skip: !!result.skip,
+      forfeit: action.type === "SURRENDER",
     };
     if (result.state) {
       room.lastSnapshot = { state: result.state, full: true };
@@ -686,38 +687,41 @@ io.on("connection", (socket) => {
     const room = getRoom(socketRoom.get(socket.id));
     const seat = room ? seatForSocket(room, socket.id) : null;
     let forfeitPayload = null;
-    // Saída voluntária durante partida = desistência (vitória do oponente).
-    if (room && room.status === "playing" && seat !== null && room.gameState?.winner == null) {
-      const result = applyAuthoritativeAction(room, seat, { type: "SURRENDER", playerId: seat }, null);
-      if (result.ok) {
-        room.actionSeq += 1;
-        const envelope = {
-          seq: room.actionSeq,
-          fromSeat: seat,
-          action: { type: "SURRENDER", playerId: seat },
-          snapshot: null,
-          authoritativeState: result.state || null,
-          events: result.events || [],
-          forfeit: true,
-        };
-        if (result.state) {
-          room.lastSnapshot = { state: result.state, full: true };
+    const wantForfeit = !!(payload && typeof payload === "object" && payload.forfeit);
+    // Saída voluntária / desistência: vitória imediata do oponente.
+    if (room && seat !== null && (room.status === "playing" || room.status === "ended")) {
+      if (room.gameState?.winner == null && room.status === "playing") {
+        const result = applyAuthoritativeAction(room, seat, { type: "SURRENDER", playerId: seat }, null);
+        if (result.ok) {
+          room.actionSeq += 1;
+          const envelope = {
+            seq: room.actionSeq,
+            fromSeat: seat,
+            action: { type: "SURRENDER", playerId: seat },
+            snapshot: null,
+            authoritativeState: result.state || null,
+            events: result.events || [],
+            forfeit: true,
+          };
+          if (result.state) {
+            room.lastSnapshot = { state: result.state, full: true };
+          }
+          for (let s = 0; s < 2; s++) {
+            const sid = room.sockets[s];
+            if (!sid || sid === socket.id) continue;
+            io.to(sid).emit("remote_action", envelope);
+          }
+          maybeFinishMatch(room, result.state);
+          const winner = result.state?.winner ?? ((seat + 1) % 2);
+          forfeitPayload = { forfeit: true, winner, seat };
         }
-        for (let s = 0; s < 2; s++) {
-          const sid = room.sockets[s];
-          if (!sid || sid === socket.id) continue;
-          io.to(sid).emit("remote_action", envelope);
-        }
-        maybeFinishMatch(room, result.state);
-        const winner = result.state?.winner ?? ((seat + 1) % 2);
+      } else if (room.gameState?.winner != null || wantForfeit) {
+        // SURRENDER já aplicado (status ended) — ainda avisa o peer com forfeit.
+        const winner = room.gameState?.winner != null
+          ? room.gameState.winner
+          : ((seat + 1) % 2);
         forfeitPayload = { forfeit: true, winner, seat };
       }
-    } else if (room && room.status === "playing" && room.gameState?.winner != null) {
-      forfeitPayload = {
-        forfeit: true,
-        winner: room.gameState.winner,
-        seat,
-      };
     }
     leaveSocketRoom(socket, forfeitPayload);
     ack?.({ ok: true });
