@@ -155,6 +155,9 @@ const io = new Server(httpServer, {
     methods: ["GET", "POST"],
   },
   maxHttpBufferSize: 2e6,
+  // Mobile/abas em segundo plano: evita disconnect falso por ping curto.
+  pingInterval: 25000,
+  pingTimeout: 60000,
 });
 
 /** socket.id -> room code */
