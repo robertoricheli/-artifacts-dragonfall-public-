@@ -116,6 +116,40 @@ export function validateAction(state, action, ctx = {}) {
         }
         case T.ULTIMATE_PLAY:
             return validateUltimatePlay(state, a);
+        case T.FIELD_COMMIT: {
+            if (state.currentPlayer !== pid)
+                return { ok: false, code: "NOT_YOUR_TURN" };
+            const mutations = a.mutations;
+            if (!Array.isArray(mutations) || !mutations.length)
+                return { ok: false, code: "NO_MUTATIONS" };
+            for (const m of mutations) {
+                const op = String(m?.op || "");
+                const tp = m.targetP;
+                const ti = m.targetI;
+                if (tp == null || ti == null || tp < 0 || ti < 0)
+                    return { ok: false, code: "BAD_TARGET" };
+                const champ = state.players[tp]?.field;
+                const card = champ?.[ti];
+                if (!card)
+                    return { ok: false, code: "NO_TARGET" };
+                if (op === "reducePower") {
+                    const amount = m.amount | 0;
+                    if (amount < 1)
+                        return { ok: false, code: "BAD_AMOUNT" };
+                }
+                else if (op === "destroy") {
+                    if (m.requirePower != null) {
+                        const pow = card.currentPower ?? card.power ?? 0;
+                        if (pow !== m.requirePower)
+                            return { ok: false, code: "BAD_POWER" };
+                    }
+                }
+                else {
+                    return { ok: false, code: "BAD_MUTATION" };
+                }
+            }
+            return { ok: true, code: "OK" };
+        }
         default:
             return { ok: true, code: "DELEGATE" };
     }
@@ -344,6 +378,110 @@ export function applyAction(state, action, ctx = {}) {
             events.push(...(res.events || []));
             break;
         }
+        case T.FIELD_COMMIT: {
+            const mutations = a.mutations || [];
+            for (const m of mutations) {
+                const op = String(m.op || "");
+                const tp = m.targetP;
+                const ti = m.targetI;
+                const owner = next.players[tp];
+                const field = owner?.field;
+                const card = field?.[ti];
+                if (!card || !field) {
+                    return { ok: false, state, events: [], error: "NO_TARGET" };
+                }
+                if (op === "reducePower") {
+                    const amount = m.amount | 0;
+                    if (typeof R.reduceChampionPower === "function") {
+                        R.reduceChampionPower(card, amount);
+                    }
+                    else {
+                        card.currentPower = Math.max(0, (card.currentPower ?? card.power ?? 0) - amount);
+                    }
+                    events.push({
+                        type: "POWER_REDUCED",
+                        targetP: tp,
+                        targetI: ti,
+                        amount,
+                        powerAfter: card.currentPower,
+                    });
+                    const destroyIfZero = m.destroyIfZero !== false;
+                    if (destroyIfZero && (card.currentPower ?? 0) <= 0) {
+                        field.splice(ti, 1);
+                        const discard = owner.discard || [];
+                        discard.push(card);
+                        owner.discard = discard;
+                        events.push({
+                            type: "DESTROY",
+                            p: tp,
+                            i: ti,
+                            reason: m.reason || "field_commit",
+                            card: card.name,
+                        });
+                        if (m.awardVpTo != null && !m.noVpOnKill) {
+                            const killer = next.players[m.awardVpTo];
+                            if (killer) {
+                                const amountVp = 1;
+                                killer.vp = (killer.vp ?? 0) + amountVp;
+                                events.push({
+                                    type: "VP_GAIN",
+                                    playerId: m.awardVpTo,
+                                    amount: amountVp,
+                                    reason: m.reason || "field_commit",
+                                });
+                            }
+                        }
+                        const burst = R.applyOnDestroyBurst(next, tp, card, m.reason || "field_commit", ctx.rng);
+                        if (burst?.ability) {
+                            events.push({
+                                type: "ON_DESTROY_BURST",
+                                ownerIdx: tp,
+                                source: card.name,
+                                reason: m.reason || "field_commit",
+                                ...burst,
+                            });
+                        }
+                    }
+                }
+                else if (op === "destroy") {
+                    field.splice(ti, 1);
+                    const discard = owner.discard || [];
+                    discard.push(card);
+                    owner.discard = discard;
+                    events.push({
+                        type: "DESTROY",
+                        p: tp,
+                        i: ti,
+                        reason: m.reason || "field_commit",
+                        card: card.name,
+                    });
+                    const noHonor = !m.forceAward && R.hasNoHonor(card);
+                    if (m.awardVpTo != null && !m.noVpOnKill && !noHonor) {
+                        const killer = next.players[m.awardVpTo];
+                        if (killer) {
+                            killer.vp = (killer.vp ?? 0) + 1;
+                            events.push({
+                                type: "VP_GAIN",
+                                playerId: m.awardVpTo,
+                                amount: 1,
+                                reason: m.reason || "field_commit",
+                            });
+                        }
+                    }
+                    const burst = R.applyOnDestroyBurst(next, tp, card, m.reason || "field_commit", ctx.rng);
+                    if (burst?.ability) {
+                        events.push({
+                            type: "ON_DESTROY_BURST",
+                            ownerIdx: tp,
+                            source: card.name,
+                            reason: m.reason || "field_commit",
+                            ...burst,
+                        });
+                    }
+                }
+            }
+            break;
+        }
         case T.ULTIMATE_PLAY: {
             const ult = applyUltimatePlay(state, a, ctx.rng || Math.random);
             if (!ult.ok)
@@ -380,10 +518,16 @@ export function applyAction(state, action, ctx = {}) {
             return { ok: false, state, events: [], error: "NOT_IMPLEMENTED" };
         }
     }
+    // Evita winner === undefined (checkWin legado tratava !== null como vitória).
+    if (next.winner === undefined)
+        next.winner = null;
     const winner = R.findWinnerIndex(next);
     if (winner != null) {
         next.winner = winner;
         events.push({ type: "GAME_OVER", winner });
+    }
+    else if (next.winner == null) {
+        next.winner = null;
     }
     return { ok: true, state: next, events };
 }

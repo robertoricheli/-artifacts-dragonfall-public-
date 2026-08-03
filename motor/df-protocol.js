@@ -31,6 +31,8 @@ export const ACTION_TYPES = Object.freeze({
     SYNC_STATE: "SYNC_STATE",
     ULTIMATE_PLAY: "ULTIMATE_PLAY",
     PLAY_VISUAL: "PLAY_VISUAL",
+    /** Commit autoritativo de poder/destruição (Bola de Fogo, Assassinar, Explosão…). */
+    FIELD_COMMIT: "FIELD_COMMIT",
 });
 export const GAME_PHASES = Object.freeze([
     "normal",
@@ -55,6 +57,7 @@ export const REQUIRES_NORMAL_PHASE = new Set([
     ACTION_TYPES.ULTIMATE_START,
     ACTION_TYPES.DRAW_CARD,
     ACTION_TYPES.END_TURN,
+    ACTION_TYPES.FIELD_COMMIT,
 ]);
 export function validateActionShape(action) {
     if (!action || typeof action !== "object") {

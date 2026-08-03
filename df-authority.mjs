@@ -23,6 +23,7 @@ export const AUTHORITATIVE_TYPES = new Set([
   "TALENT_START",
   "ULTIMATE_PLAY",
   "SURRENDER",
+  "FIELD_COMMIT",
 ]);
 
 /** Tipos só-UI — não alteram estado no servidor. */
