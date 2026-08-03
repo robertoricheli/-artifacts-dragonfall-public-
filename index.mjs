@@ -751,7 +751,9 @@ io.on("connection", (socket) => {
 
     room.actionSeq += 1;
     // Delta: peer recebe authoritativeState; snapshot do cliente só em anim/UI.
-    const sendClientSnap = action.type === "PLAY_VISUAL" || !!action.anim;
+    // ATTACK_RESOLVE: nunca retransmitir snapshot pré-combate (clobber / revive).
+    const sendClientSnap = (action.type === "PLAY_VISUAL" || !!action.anim)
+        && action.type !== "ATTACK_RESOLVE";
     const envelope = {
       seq: room.actionSeq,
       fromSeat: seat,
