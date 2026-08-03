@@ -579,7 +579,15 @@ io.on("connection", (socket) => {
   });
 
   socket.on("game_action", (payload, ack) => {
-    if (!actionRateLimit(socket.id)) {
+    const actionType = payload?.action?.type || payload?.type;
+    // SYNC_STATE / PLAY_VISUAL são barulhentos — não consomem o budget de jogadas reais.
+    const skipRate =
+      actionType === "SYNC_STATE" ||
+      actionType === "PLAY_VISUAL" ||
+      actionType === "ATTACK_START" ||
+      actionType === "ATTACK_PICK_ATTACKER" ||
+      actionType === "ATTACK_PICK_DEFENDER";
+    if (!skipRate && !actionRateLimit(socket.id)) {
       return ack?.({ ok: false, error: "RATE_LIMIT" });
     }
     const schema = validateGameAction(payload);
