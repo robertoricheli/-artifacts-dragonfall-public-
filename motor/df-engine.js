@@ -100,8 +100,9 @@ export function validateAction(state, action, ctx = {}) {
         case T.TALENT_START: {
             if (state.currentPlayer !== pid)
                 return { ok: false, code: "NOT_YOUR_TURN" };
-            const card = state.players[pid]?.hand;
-            const handCard = card?.[a.handIdx];
+            const hand = state.players[pid]?.hand;
+            const talentIdx = resolveSummonHandIdx(hand || [], a.handIdx, a.cardName, a.uid);
+            const handCard = hand?.[talentIdx];
             if (!handCard || handCard.category !== "talent")
                 return { ok: false, code: "NOT_TALENT" };
             const pl = state.players[pid];
@@ -143,6 +144,9 @@ export function validateAction(state, action, ctx = {}) {
                         if (pow !== m.requirePower)
                             return { ok: false, code: "BAD_POWER" };
                     }
+                }
+                else if (op === "setStatus") {
+                    // flags opcionais — alvo já validado
                 }
                 else {
                     return { ok: false, code: "BAD_MUTATION" };
@@ -372,7 +376,10 @@ export function applyAction(state, action, ctx = {}) {
             const ER = getEffects();
             if (!ER?.applyTalentFromHand)
                 return { ok: false, state, events: [], error: "NO_TALENT" };
-            const res = ER.applyTalentFromHand(next, pid, a.handIdx);
+            const talentHand = p.hand;
+            const talentIdx = resolveSummonHandIdx(talentHand, a.handIdx, a.cardName, a.uid);
+            a.handIdx = talentIdx;
+            const res = ER.applyTalentFromHand(next, pid, talentIdx);
             if (!res.ok)
                 return { ok: false, state, events: [], error: res.error || "TALENT_FAILED" };
             events.push(...(res.events || []));
@@ -478,6 +485,34 @@ export function applyAction(state, action, ctx = {}) {
                             ...burst,
                         });
                     }
+                }
+                else if (op === "setStatus") {
+                    const STATUS_BOOL = [
+                        "frozen", "tapped", "freeAttack", "shielded", "shieldedPermanent",
+                        "barrier", "barrierPermanent", "vulnerable", "silenced", "poisoned",
+                        "fury", "pulled", "inspiracao", "mimico", "wallBuff", "guerraBuff",
+                        "foreverGrowth", "fireAura", "burning", "corruptedNoHonor", "furyBonusActive",
+                    ];
+                    const STATUS_NUM = [
+                        "frozenTurns", "shieldedTurns", "barrierTurns", "poisonTurns",
+                        "furyTurns", "furyStacks", "guerraBuffTurns", "burningTurns",
+                        "fireAuraTurns", "currentPower", "poisonedByP",
+                    ];
+                    const flags = (m.flags || m);
+                    for (const k of STATUS_BOOL) {
+                        if (flags[k] != null)
+                            card[k] = !!flags[k];
+                    }
+                    for (const k of STATUS_NUM) {
+                        if (flags[k] != null)
+                            card[k] = flags[k] | 0;
+                    }
+                    events.push({
+                        type: "STATUS_SET",
+                        targetP: tp,
+                        targetI: ti,
+                        flags: { ...flags },
+                    });
                 }
             }
             break;

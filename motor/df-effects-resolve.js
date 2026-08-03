@@ -802,11 +802,13 @@ function applyTalentFromHand(state, pIdx, handIdx) {
     if ((p.actions ?? 0) < cost)
         return { ok: false, state, events: [], error: "INSUFFICIENT_ACTIONS" };
     p.actions = Math.max(0, (p.actions ?? 0) - cost);
+    const [removed] = p.hand.splice(handIdx, 1);
+    state.activeTalent = { ownerP: pIdx, card: removed, spentActions: cost > 0 ? cost : 0 };
     return {
         ok: true,
         state,
-        events: [{ type: "TALENT_STARTED", playerId: pIdx, handIdx, talentEffect: card.talentEffect, card: card.name }],
-        card,
+        events: [{ type: "TALENT_STARTED", playerId: pIdx, handIdx, talentEffect: removed.talentEffect, card: removed.name }],
+        card: removed,
     };
 }
 const ON_ENTER_RESOLVE_KEYS = [
