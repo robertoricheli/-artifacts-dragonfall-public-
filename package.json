@@ -17,6 +17,7 @@
     "socket.io": "^4.8.1"
   },
   "optionalDependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
     "bullmq": "^5.34.5",
     "ioredis": "^5.4.2",
     "pg": "^8.13.1"
