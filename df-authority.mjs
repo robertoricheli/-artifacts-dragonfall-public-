@@ -39,15 +39,17 @@ export const UI_ONLY_TYPES = new Set([
   "OPEN_DISCARD",
 ]);
 
-/** Tipos delegados — snapshot validado antes de merge (menus / sync parcial). */
+/** Tipos delegados — snapshot se motor ainda CLIENT_ONLY / NOT_IMPLEMENTED. */
 export const DELEGATED_TYPES = new Set([
-  "TALENT_TARGET",
   "ABILITY_TARGET",
   "ULTIMATE_TARGET",
   "MENU_CHOICE",
   "NECROMANCIA_PICK",
   "UNFREEZE_CONFIRM",
   "SYNC_STATE",
+  // TALENT_TARGET: promovido a autoritativo quando applyTalentTarget existe;
+  // permanece aqui só como fallback snapshot se motor retornar NOT_IMPLEMENTED.
+  "TALENT_TARGET",
 ]);
 
 let engine = null;
@@ -72,6 +74,17 @@ export function roomActionRng(room, seat) {
 function getEngine() {
   if (!engine) engine = bootDragonfallEngine();
   return engine;
+}
+
+/** Health: motor carregou (DfEngine.applyAction disponível). */
+export function getEngineBootStatus() {
+  try {
+    const eng = getEngine();
+    const ok = !!(eng?.DfEngine?.applyAction && eng?.DfEngine?.applyActionWithOnEnter);
+    return { motorOk: ok, error: ok ? null : "ENGINE_INCOMPLETE" };
+  } catch (e) {
+    return { motorOk: false, error: e?.message || String(e) };
+  }
 }
 
 function resolveGameState(room) {
@@ -166,13 +179,30 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
     return { ok: false, error: v.code || v.error || "ILLEGAL" };
   }
 
-  // Delegados: tenta motor primeiro (expansão de autoridade); fallback snapshot.
+  /** CLIENT_ONLY / estado idêntico = motor não aplicou — não promover. */
+  function isClientOnlyNoop(applied, before) {
+    if (!applied?.ok || !applied.state?.players) return true;
+    const evs = applied.events || [];
+    if (evs.some((e) => e && e.type === "CLIENT_ONLY")) return true;
+    if (!evs.length) {
+      try {
+        return JSON.stringify(before.players) === JSON.stringify(applied.state.players)
+          && before.currentPlayer === applied.state.currentPlayer
+          && before.winner === applied.state.winner;
+      } catch (e) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  // Delegados: motor real → senão snapshot validado (nunca ACK vazio).
   if (DELEGATED_TYPES.has(shaped.type)) {
     try {
       const applied = DfEngine.applyAction(DfEngine.cloneState(state), shaped, {
         rng: roomActionRng(room, seat),
       });
-      if (applied?.ok && applied.state?.players) {
+      if (applied?.ok && applied.state?.players && !isClientOnlyNoop(applied, state)) {
         room.gameState = applied.state;
         const entry = appendEventLogEntry(
           room.eventLog,
@@ -200,7 +230,12 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
     return { ok: false, error: "UNKNOWN_ACTION" };
   }
 
-  const applied = DfEngine.applyAction(DfEngine.cloneState(state), shaped, {
+  // SUMMON: resolve on-enter auto (tokens Wyvern/Cubo, rapidez…) no servidor.
+  const applyFn = typeof DfEngine.applyActionWithOnEnter === "function"
+    && (shaped.type === "SUMMON" || shaped.type === "ON_ENTER_RESOLVE")
+    ? DfEngine.applyActionWithOnEnter
+    : DfEngine.applyAction;
+  const applied = applyFn(DfEngine.cloneState(state), shaped, {
     rng: roomActionRng(room, seat),
   });
   if (!applied.ok) {
@@ -216,11 +251,16 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
     applied.events || [],
   );
 
+  const presentation = (applied.events || [])
+    .filter((e) => e && e.visual)
+    .map((e) => ({ kind: e.visual, ...e }));
+
   return {
     ok: true,
     state: applied.state,
     events: applied.events || [],
     logEntry: entry,
+    presentation: presentation.length ? presentation : undefined,
   };
 }
 

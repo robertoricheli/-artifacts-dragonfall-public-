@@ -385,6 +385,19 @@ export function applyAction(state, action, ctx = {}) {
             events.push(...(res.events || []));
             break;
         }
+        case T.TALENT_TARGET: {
+            const ER = getEffects();
+            if (typeof ER?.applyTalentTarget !== "function") {
+                return { ok: false, state, events: [], error: "NO_TALENT_TARGET" };
+            }
+            const res = ER.applyTalentTarget(next, pid, a.targetPlayerId ?? a.targetP, a.targetFieldIdx ?? a.targetI);
+            if (!res.ok)
+                return { ok: false, state, events: res.events || [], error: res.error || "TALENT_TARGET_FAILED" };
+            if (res.state)
+                Object.assign(next, res.state);
+            events.push(...(res.events || []));
+            break;
+        }
         case T.FIELD_COMMIT: {
             const mutations = a.mutations || [];
             for (const m of mutations) {
@@ -393,8 +406,30 @@ export function applyAction(state, action, ctx = {}) {
                 const ti = m.targetI;
                 const owner = next.players[tp];
                 const field = owner?.field;
+                if (!field) {
+                    return { ok: false, state, events: [], error: "NO_TARGET" };
+                }
+                if (op === "insertToken" || op === "insert") {
+                    const cardSnap = { ...m.card };
+                    if (!cardSnap.uid)
+                        cardSnap.uid = `tok-${Date.now()}-${field.length}`;
+                    if (cardSnap.currentPower == null)
+                        cardSnap.currentPower = cardSnap.power ?? 0;
+                    const idx = ti != null
+                        ? Math.max(0, Math.min(ti | 0, field.length))
+                        : field.length;
+                    field.splice(idx, 0, cardSnap);
+                    events.push({
+                        type: "TOKEN_INSERT",
+                        targetP: tp,
+                        targetI: idx,
+                        cardName: cardSnap.name,
+                        uid: cardSnap.uid,
+                    });
+                    continue;
+                }
                 const card = field?.[ti];
-                if (!card || !field) {
+                if (!card) {
                     return { ok: false, state, events: [], error: "NO_TARGET" };
                 }
                 if (op === "reducePower") {
@@ -535,7 +570,6 @@ export function applyAction(state, action, ctx = {}) {
                 T.REACTIVE_PROTECTION_QUERY,
                 T.ABILITY_START,
                 T.ABILITY_TARGET,
-                T.TALENT_TARGET,
                 T.ULTIMATE_START,
                 T.ULTIMATE_TARGET,
                 T.SYNC_STATE,
@@ -546,7 +580,10 @@ export function applyAction(state, action, ctx = {}) {
                 T.MATCH_START,
                 T.RESTART_MATCH,
                 T.UNFREEZE_CONFIRM,
+                T.MENU_CHOICE,
+                T.NECROMANCIA_PICK,
             ]);
+            // TALENT_TARGET sai de CLIENT_ONLY — tratado no case acima.
             if (uiOnly.has(a.type)) {
                 return { ok: true, state: next, events: [{ type: "CLIENT_ONLY", actionType: a.type }] };
             }
@@ -573,7 +610,9 @@ export function autoOnEnterResolution(state, casterIdx, fieldIdx, plan, rng = Ma
     if (!R || !plan?.ok)
         return resolution;
     const mode = plan.mode;
-    if (mode === "none" || mode === "visual_only")
+    if (mode === "none")
+        return resolution;
+    if (mode === "visual_only")
         return resolution;
     if (mode === "necromancia_pick") {
         const disc = state.players[casterIdx]?.discard;

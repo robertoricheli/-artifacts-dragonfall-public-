@@ -4,25 +4,52 @@
  */
 const WINDOW_MS = 60_000;
 const actionSamples = [];
+const presentationSamples = [];
 const disconnectTimes = [];
 let rejectCount = 0;
 let actionCount = 0;
+let presentationCount = 0;
 
-function prune(arr, now = Date.now()) {
+function pruneSamples(arr, now = Date.now()) {
+  while (arr.length && now - arr[0].t > WINDOW_MS) arr.shift();
+}
+
+function pruneTimestamps(arr, now = Date.now()) {
   while (arr.length && now - arr[0] > WINDOW_MS) arr.shift();
+}
+
+function isPresentationType(type) {
+  return type === "SYNC_STATE" || type === "PLAY_VISUAL"
+    || type === "ATTACK_START" || type === "ATTACK_PICK_ATTACKER"
+    || type === "ATTACK_PICK_DEFENDER";
 }
 
 export function recordActionLatency(ms, meta = {}) {
   const now = Date.now();
   const n = Math.max(0, Number(ms) || 0);
+  const type = meta?.type || null;
+  if (isPresentationType(type)) {
+    presentationSamples.push({ t: now, ms: n });
+    pruneSamples(presentationSamples, now);
+    presentationCount += 1;
+    logMp("presentation", {
+      room: meta.roomCode || null,
+      seat: meta.seat,
+      type,
+      seq: meta.seq,
+      latencyMs: Math.round(n),
+      ok: meta.ok !== false,
+    });
+    return;
+  }
   actionSamples.push({ t: now, ms: n });
-  prune(actionSamples, now);
+  pruneSamples(actionSamples, now);
   actionCount += 1;
-  if (meta?.type && meta.type !== "SYNC_STATE" && meta.type !== "PLAY_VISUAL") {
+  if (type) {
     logMp("action", {
       room: meta.roomCode || null,
       seat: meta.seat,
-      type: meta.type,
+      type,
       seq: meta.seq,
       latencyMs: Math.round(n),
       ok: meta.ok !== false,
@@ -44,7 +71,7 @@ export function recordReject(error, meta = {}) {
 export function recordDisconnect(meta = {}) {
   const now = Date.now();
   disconnectTimes.push(now);
-  prune(disconnectTimes, now);
+  pruneTimestamps(disconnectTimes, now);
   logMp("disconnect", {
     room: meta.roomCode || null,
     seat: meta.seat,
@@ -52,20 +79,31 @@ export function recordDisconnect(meta = {}) {
   });
 }
 
-export function getActionStats() {
-  const now = Date.now();
-  prune(actionSamples, now);
-  prune(disconnectTimes, now);
-  const ms = actionSamples.map((s) => s.ms).sort((a, b) => a - b);
+function percentileStats(samples) {
+  const ms = samples.map((s) => s.ms).sort((a, b) => a - b);
   const avg = ms.length ? ms.reduce((a, b) => a + b, 0) / ms.length : 0;
   const p95 = ms.length ? ms[Math.min(ms.length - 1, Math.floor(ms.length * 0.95))] : 0;
+  return { avg: Math.round(avg), p95: Math.round(p95), n: ms.length };
+}
+
+export function getActionStats() {
+  const now = Date.now();
+  pruneSamples(actionSamples, now);
+  pruneSamples(presentationSamples, now);
+  pruneTimestamps(disconnectTimes, now);
+  const core = percentileStats(actionSamples);
+  const pres = percentileStats(presentationSamples);
   return {
-    avgActionMs: Math.round(avg),
-    p95ActionMs: Math.round(p95),
-    actions1m: ms.length,
+    avgActionMs: core.avg,
+    p95ActionMs: core.p95,
+    actions1m: core.n,
+    avgPresentationMs: pres.avg,
+    p95PresentationMs: pres.p95,
+    presentations1m: pres.n,
     disconnects1m: disconnectTimes.length,
     rejectsTotal: rejectCount,
     actionsTotal: actionCount,
+    presentationsTotal: presentationCount,
   };
 }
 

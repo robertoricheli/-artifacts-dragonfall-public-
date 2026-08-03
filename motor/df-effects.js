@@ -108,6 +108,10 @@ function applyTalentFromHand(state, pIdx, handIdx) {
     return resolveApi()?.applyTalentFromHand(state, pIdx, handIdx)
         || { ok: false, state, events: [], error: "NO_TALENT_RESOLVE" };
 }
+function applyTalentTarget(state, pIdx, targetP, targetI) {
+    return resolveApi()?.applyTalentTarget?.(state, pIdx, targetP, targetI)
+        || { ok: false, state, events: [], error: "NO_TALENT_TARGET_RESOLVE" };
+}
 function bootstrapRegistry() {
     const rules = R();
     if (!rules)
@@ -161,5 +165,6 @@ const DfEffects = {
     applyOnEnter,
     applyReactiveUse,
     applyTalentFromHand,
+    applyTalentTarget,
 };
 export { DfEffects };

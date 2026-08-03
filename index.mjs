@@ -54,7 +54,7 @@ import { initPostgres, isPostgresEnabled, getReplayByRoomCode, shutdownPostgres 
 import { initAuthStore, getAuthStoreMode } from "./df-auth.mjs";
 import { authPlayerFromToken, startSessionPruneScheduler } from "./df-auth-store.mjs";
 import { recordMatchEnd } from "./df-match-history.mjs";
-import { applyAuthoritativeAction, seedRoomFromSnapshot, buildReplayPayload } from "./df-authority.mjs";
+import { applyAuthoritativeAction, seedRoomFromSnapshot, buildReplayPayload, getEngineBootStatus } from "./df-authority.mjs";
 import { loadPersistedRooms, schedulePersistRooms, flushPersistRooms } from "./room-persist.mjs";
 import {
   initLiveRoomsSchema,
@@ -73,6 +73,11 @@ import {
 } from "./df-mp-metrics.mjs";
 import { allowSync, MAX_ROOMS, MAX_QUEUE } from "./df-mp-limits.mjs";
 import { ensureSeatTokens, seatTokenFor } from "./df-seat-token.mjs";
+import {
+  redisConfigured,
+  attachSocketRedisAdapter,
+  isRedisAdapterAttached,
+} from "./df-socket-redis.mjs";
 import { createRateLimiter } from "./rate-limit.mjs";
 import { readGameVersion } from "./df-game-version.mjs";
 import { createInitialMatchState } from "./df-match-init.mjs";
@@ -118,7 +123,10 @@ if (restoredRooms.length) {
 }
 
 function touchPersist(room = null) {
-  schedulePersistRooms(listPlayingRooms);
+  // Produção com Postgres: live rooms é a fonte; JSON só em fallback local.
+  if (!isPostgresEnabled()) {
+    schedulePersistRooms(listPlayingRooms);
+  }
   if (room) scheduleLiveRoomPersist(room);
   else {
     for (const r of listPlayingRooms()) scheduleLiveRoomPersist(r);
@@ -147,8 +155,11 @@ app.get("/", (_req, res) => {
 });
 app.get("/health", (_req, res) => {
   const stats = getActionStats();
-  res.json({
-    ok: true,
+  const motor = getEngineBootStatus();
+  const body = {
+    ok: !!motor.motorOk,
+    motorOk: !!motor.motorOk,
+    motorError: motor.error || null,
     gameVersion: GAME_VERSION,
     rooms: listRoomsCount(),
     activeMatches: listActiveMatchCount(),
@@ -163,9 +174,15 @@ app.get("/health", (_req, res) => {
     mailConfigured: isMailConfigured(),
     avgActionMs: stats.avgActionMs,
     p95ActionMs: stats.p95ActionMs,
+    avgPresentationMs: stats.avgPresentationMs,
+    p95PresentationMs: stats.p95PresentationMs,
+    presentations1m: stats.presentations1m,
     disconnects1m: stats.disconnects1m,
     actions1m: stats.actions1m,
-  });
+    redisConfigured: redisConfigured(),
+    redisAdapter: isRedisAdapterAttached(),
+  };
+  res.status(motor.motorOk ? 200 : 503).json(body);
 });
 
 app.get("/history/replay/:code", async (req, res) => {
@@ -727,6 +744,18 @@ io.on("connection", (socket) => {
     }
     action.playerId = seat;
 
+    // Idempotência: cliente pode reenviar o mesmo clientActionId após ACK_TIMEOUT.
+    const clientActionId = payload?.clientActionId != null
+      ? String(payload.clientActionId)
+      : (action.clientActionId != null ? String(action.clientActionId) : null);
+    if (clientActionId) {
+      if (!room._ackedClientActions) room._ackedClientActions = new Map();
+      const prevAck = room._ackedClientActions.get(`${seat}:${clientActionId}`);
+      if (prevAck) {
+        return ack?.(prevAck);
+      }
+    }
+
     const result = applyAuthoritativeAction(room, seat, action, payload?.snapshot || null);
     if (!result.ok) {
       const auth = room.gameState?.players?.length ? room.gameState : null;
@@ -765,6 +794,7 @@ io.on("connection", (socket) => {
       delegated: !!result.delegated,
       skip: !!result.skip,
       forfeit: action.type === "SURRENDER",
+      presentation: result.presentation || null,
     };
     if (result.state && !result.skip) {
       room.lastSnapshot = { state: result.state, full: true };
@@ -792,14 +822,24 @@ io.on("connection", (socket) => {
       ok: true,
     });
 
-    ack?.({
+    const ackPayload = {
       ok: true,
       seq: room.actionSeq,
       authoritativeState: result.state || room.gameState || null,
       events: result.events || [],
       logEntry: result.logEntry || null,
       skip: !!result.skip,
-    });
+      presentation: result.presentation || null,
+    };
+    if (clientActionId) {
+      room._ackedClientActions.set(`${seat}:${clientActionId}`, ackPayload);
+      // Limite simples — evita crescimento infinito.
+      if (room._ackedClientActions.size > 200) {
+        const first = room._ackedClientActions.keys().next().value;
+        room._ackedClientActions.delete(first);
+      }
+    }
+    ack?.(ackPayload);
   });
 
   socket.on("get_replay", (payload, ack) => {
@@ -820,10 +860,21 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.on("sync_snapshot", (payload) => {
+  socket.on("sync_snapshot", (payload, ack) => {
+    // Gate: só host da sala em playing, com token de assento — sem seed arbitrário.
     const room = getRoom(socketRoom.get(socket.id));
-    if (!room || room.status !== "playing") return;
+    if (!room || room.status !== "playing") {
+      return ack?.({ ok: false, error: "NOT_PLAYING" });
+    }
+    const seat = seatForSocket(room, socket.id);
+    if (seat === null) return ack?.({ ok: false, error: "NO_SEAT" });
+    // Desabilitado em produção: estado só via game_action autoritativo.
+    if (process.env.NODE_ENV === "production" || process.env.DF_ALLOW_SYNC_SNAPSHOT !== "1") {
+      logMp("sync_snapshot_denied", { room: room.code, seat });
+      return ack?.({ ok: false, error: "SYNC_SNAPSHOT_DISABLED" });
+    }
     if (payload?.snapshot) seedRoomFromSnapshot(room, payload.snapshot);
+    ack?.({ ok: true, seq: room.actionSeq });
   });
 
   socket.on("leave_room", (payload, ack) => {
@@ -941,15 +992,22 @@ await initRankedMatchmaking(async (entry0, entry1) => {
   pairRankedSockets(io, entry0, entry1);
 });
 
+// Warm motor + Redis adapter antes do listen.
+getEngineBootStatus();
+await attachSocketRedisAdapter(io);
+
 httpServer.listen(PORT, () => {
   console.log(`Dragonfall server em http://localhost:${PORT}`);
   console.log(`WebSocket (Socket.IO) na mesma porta`);
   logMailStatusOnBoot();
   startSelfKeepAlive(PORT);
+  const motor = getEngineBootStatus();
   logMp("boot", {
     gameVersion: GAME_VERSION,
     rooms: listRoomsCount(),
     postgres: isPostgresEnabled(),
     matchmaking: getMatchmakingMode(),
+    motorOk: motor.motorOk,
+    redisAdapter: isRedisAdapterAttached(),
   });
 });
