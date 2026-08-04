@@ -109,6 +109,10 @@ export function validateAction(state, action, ctx = {}) {
             if (!a.use)
                 return { ok: true, code: "OK" };
             return R.canOfferReactiveProtection(state, pid, a.attOwner ?? 1 - pid);
+        case T.REACTIVE_CANCEL_ANSWER:
+            if (!a.use)
+                return { ok: true, code: "OK" };
+            return R.canOfferCancelUltimate(state, pid, a.attOwner ?? 1 - pid);
         case T.ON_ENTER_RESOLVE:
             if (a.casterIdx == null || a.fieldIdx == null)
                 return { ok: false, code: "BAD_ON_ENTER" };
@@ -417,6 +421,16 @@ export function applyAction(state, action, ctx = {}) {
             events.push(...(res.events || []));
             break;
         }
+        case T.REACTIVE_CANCEL_ANSWER: {
+            const ER = getEffects();
+            if (!ER?.applyReactiveUse)
+                return { ok: false, state, events: [], error: "NO_REACTIVE" };
+            const res = ER.applyReactiveUse(next, pid, "cancelarUltimate", !!a.use);
+            if (!res.ok)
+                return { ok: false, state, events: [], error: res.error || "REACTIVE_FAILED" };
+            events.push(...(res.events || []));
+            break;
+        }
         case T.SURRENDER: {
             const count = next.playersCount ?? next.players.length;
             const opp = ((pid + 1) % count);
@@ -621,6 +635,7 @@ export function applyAction(state, action, ctx = {}) {
                 T.ATTACK_PICK_DEFENDER,
                 T.REACTIVE_BLOCK_QUERY,
                 T.REACTIVE_PROTECTION_QUERY,
+                T.REACTIVE_CANCEL_QUERY,
                 T.ABILITY_START,
                 T.ABILITY_TARGET,
                 T.ULTIMATE_START,
