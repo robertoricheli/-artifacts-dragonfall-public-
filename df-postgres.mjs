@@ -44,6 +44,12 @@ export async function initPostgres() {
       connectionTimeoutMillis: 15_000,
     });
     await pool.query(SCHEMA);
+    try {
+      const { initAnalyticsSchema } = await import("./df-analytics-pg.mjs");
+      await initAnalyticsSchema();
+    } catch (e) {
+      console.warn("[postgres] analytics schema:", e?.message || e);
+    }
     enabled = true;
     console.log("[postgres] histórico/replays ativo");
     return { enabled: true };
@@ -85,6 +91,9 @@ export async function saveMatchHistory(payload) {
     gameVersion = null,
     eventLog = [],
     gameState = null,
+    startedAt = null,
+    durationMs = null,
+    turnNumber = null,
   } = payload;
 
   const client = await pool.connect();
@@ -92,8 +101,9 @@ export async function saveMatchHistory(payload) {
     await client.query("BEGIN");
     const ins = await client.query(
       `INSERT INTO df_matches
-        (room_code, winner_seat, hero_0, hero_1, ranked, player_0_id, player_1_id, action_seq, game_version)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        (room_code, winner_seat, hero_0, hero_1, ranked, player_0_id, player_1_id,
+         action_seq, game_version, started_at, duration_ms, turn_number)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::timestamptz,$11,$12)
        RETURNING id`,
       [
         roomCode,
@@ -105,6 +115,9 @@ export async function saveMatchHistory(payload) {
         rankedPlayerIds[1],
         actionSeq,
         gameVersion,
+        startedAt ? new Date(startedAt).toISOString() : null,
+        durationMs != null ? Math.max(0, Number(durationMs) | 0) : null,
+        turnNumber != null ? Math.max(0, Number(turnNumber) | 0) : null,
       ],
     );
     const matchId = ins.rows[0]?.id;

@@ -19,6 +19,11 @@ import {
   prunePlayerSessions,
 } from "./df-auth-store.mjs";
 import { createRateLimiter } from "./rate-limit.mjs";
+import {
+  recordActivity,
+  recordActivitySync,
+  recordMatchXpEvent,
+} from "./df-analytics.mjs";
 
 export { initAuthStore, getAuthStoreMode };
 
@@ -228,6 +233,7 @@ async function authRegister(req, body) {
   await insertPlayer(player);
   const token = await createSession(id);
   const saved = await getPlayerById(id);
+  recordActivity(id, "register");
   return { status: 200, data: { ok: true, token, player: playerPublic(saved) } };
 }
 
@@ -247,6 +253,7 @@ async function authLogin(req, body) {
   }
   const token = await createSession(player.id);
   const fresh = await getPlayerById(player.id);
+  recordActivity(player.id, "login");
   return { status: 200, data: { ok: true, token, player: playerPublic(fresh || player) } };
 }
 
@@ -335,6 +342,7 @@ async function authChangePassword(req, body) {
 async function authMe(req) {
   const player = await authFromHeader(req);
   if (!player) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  recordActivitySync(player.id);
   return { status: 200, data: { ok: true, player: playerPublic(player) } };
 }
 
@@ -490,6 +498,10 @@ async function authAwardMatchXp(req, body) {
     return { status: 409, data: { ok: false, error: r.error, player: playerPublic(r.player) } };
   }
   const after = statsFromTotalXp(r.player.xpTotal);
+
+  try {
+    recordMatchXpEvent(r.player, body);
+  } catch (e) { /* analytics never blocks */ }
 
   return {
     status: 200,

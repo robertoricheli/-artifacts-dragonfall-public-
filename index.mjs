@@ -246,6 +246,7 @@ function startMatchForRoom(room, io) {
   if (!room.heroes[0] || !room.heroes[1]) return null;
   room.winPoints = 15;
   room.status = "playing";
+  room.matchStartedAt = Date.now();
   room.actionSeq = 0;
   room.eventLog = room.eventLog || [];
   room.ready = [true, true];
