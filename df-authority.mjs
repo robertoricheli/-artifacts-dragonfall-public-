@@ -449,6 +449,7 @@ export function getRoomReplaySlice(room, fromSeq = 0) {
 
 export function buildReplayPayload(room) {
   if (!room || room.status !== "playing") return null;
+  if (!room.gameState?.players?.length) return null;
   return {
     seq: room.actionSeq,
     entries: getRoomReplaySlice(room, 0),
