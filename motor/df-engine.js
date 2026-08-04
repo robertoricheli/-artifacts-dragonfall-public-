@@ -727,7 +727,9 @@ export function applyActionWithOnEnter(state, action, ctx = {}) {
             const cIdx = (pe.playerId ?? pe.casterIdx);
             const fIdx = pe.fieldIdx;
             const plan = ER.planOnEnter(st, cIdx, fIdx);
-            if (!plan?.ok || plan.mode === "target" || plan.mode === "blocked")
+            // target / necromancia: cliente humano escolhe — não auto-resolver no SUMMON.
+            if (!plan?.ok || plan.mode === "target" || plan.mode === "blocked"
+                || plan.mode === "necromancia_pick")
                 continue;
             const follow = applyAction(st, {
                 type: T.ON_ENTER_RESOLVE,

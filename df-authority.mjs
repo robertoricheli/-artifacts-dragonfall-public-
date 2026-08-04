@@ -160,6 +160,62 @@ function applySyncStateCosmetic(room, seat, action) {
 }
 
 /**
+ * Normaliza events do motor → anim replay no cliente (casterIdx→casterP, etc.).
+ */
+function normalizeOnEnterVisual(ev) {
+  const kind = ev.visual || ev.kind;
+  if (!kind) return null;
+  const out = { ...ev, kind };
+  if (out.casterP == null && out.casterIdx != null) out.casterP = out.casterIdx;
+  if (out.ownerP == null && out.casterIdx != null) out.ownerP = out.casterIdx;
+  if (out.casterFieldIdx == null && out.fieldIdx != null) out.casterFieldIdx = out.fieldIdx;
+  if (out.casterField == null && out.fieldIdx != null) out.casterField = out.fieldIdx;
+  if (out.cardName == null && out.card != null) {
+    out.cardName = typeof out.card === "string" ? out.card : (out.card.name || null);
+  }
+  // fire_aura / barrier_grant / guardian aliases
+  if (out.indices == null && Array.isArray(out.picks)) {
+    /* keep picks */
+  }
+  if (kind === "fire_aura" || kind === "barrier_grant") {
+    if (out.ownerP == null && out.casterIdx != null) out.ownerP = out.casterIdx;
+    if (!out.indices && Array.isArray(out.indices) === false && Array.isArray(ev.indices)) {
+      out.indices = ev.indices;
+    }
+  }
+  if (kind === "guardian" || kind === "guardiao") {
+    out.kind = "guardian";
+    if (out.casterP == null && out.casterIdx != null) out.casterP = out.casterIdx;
+  }
+  if (kind === "em_chamas") out.kind = "incendiar";
+  if (kind === "freeze") out.kind = "zero_absoluto";
+  return out;
+}
+
+function mapEventTypeToVisual(ev) {
+  const TYPE_KIND = {
+    ROUBAR: "roubar",
+    DESACELERAR: "desacelerar",
+    PESADELO: "pesadelo",
+    MALDICAO_SETE_MARES: "maldicao_sete_mares",
+    FUMACA_TOXICA: "fumaca_toxica",
+    NECROMANCIA: "necromancia",
+    RAPIDEZ: "wings",
+    FORTALECER: "strong_arm",
+    GUARDIAO: "guardian",
+    AURA_DE_FOGO: "fire_aura",
+    AURA_ANTI_MAGIA: "barrier_grant",
+    RAIO_DUPLO: "raio_duplo",
+    DRAW: "card_draw",
+    THUNDER_DISCARD: "thunder_discard",
+  };
+  const kind = TYPE_KIND[ev.type];
+  if (!kind) return null;
+  if (ev.type === "DRAW" && ev.reason !== "upkeep") return null;
+  return normalizeOnEnterVisual({ ...ev, visual: kind });
+}
+
+/**
  * Monta envelope de apresentação a partir dos events do motor.
  * Clientes aplicam fieldPatches (após VFX quando deferBoardApply) sem confiar em snapshots.
  */
@@ -171,7 +227,11 @@ export function buildPresentationEnvelope(events = [], action = null) {
   for (const ev of events || []) {
     if (!ev || typeof ev !== "object") continue;
     if (ev.visual) {
-      visuals.push({ kind: ev.visual, ...ev });
+      const n = normalizeOnEnterVisual(ev);
+      if (n) visuals.push(n);
+    } else if (ev.type) {
+      const mapped = mapEventTypeToVisual(ev);
+      if (mapped) visuals.push(mapped);
     }
     if (ev.type === "STATUS_SET" && ev.targetP != null && ev.targetI != null) {
       fieldPatches.push({

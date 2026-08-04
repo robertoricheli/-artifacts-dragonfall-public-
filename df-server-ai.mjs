@@ -175,6 +175,25 @@ export function markSeatDisconnectedForAi(room, seat, io, hooks) {
   }, AI_GRACE_MS);
 }
 
+/** Abandono explícito: IA assume imediatamente (sem grace de 8s). */
+export function markSeatAbandonedForAi(room, seat, io, hooks) {
+  ensureAiFlags(room);
+  if (seat !== 0 && seat !== 1) return;
+  if (room.status !== "playing") return;
+  if (room.aiGraceTimer[seat]) {
+    clearTimeout(room.aiGraceTimer[seat]);
+    room.aiGraceTimer[seat] = null;
+  }
+  if (room.sockets[seat]) {
+    // Assento já limpo pelo caller — se ainda houver socket, não forçar.
+  }
+  room.aiControlled[seat] = true;
+  try {
+    io.to(room.code).emit("peer_ai_control", { seat, active: true });
+  } catch (e) { /* */ }
+  scheduleServerAi(room, io, hooks);
+}
+
 export function onHumanReconnectedClearAi(room, seat, io) {
   clearAiSeat(room, seat);
   try {

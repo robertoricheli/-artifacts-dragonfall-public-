@@ -85,6 +85,7 @@ import { registerAuthRoutes } from "./df-auth.mjs";
 import { logMailStatusOnBoot, isMailConfigured } from "./df-auth-mail.mjs";
 import {
   markSeatDisconnectedForAi,
+  markSeatAbandonedForAi,
   onHumanReconnectedClearAi,
   scheduleServerAi,
   clearAllAi,
@@ -890,9 +891,11 @@ io.on("connection", (socket) => {
     const seat = room ? seatForSocket(room, socket.id) : null;
     let forfeitPayload = null;
     const wantForfeit = !!(payload && typeof payload === "object" && payload.forfeit);
-    // Saída voluntária / desistência: vitória imediata do oponente.
-    if (room && seat !== null && (room.status === "playing" || room.status === "ended")) {
-      if (room.gameState?.winner == null && room.status === "playing") {
+    const wantAbandon = !!(payload && typeof payload === "object" && payload.abandon);
+
+    if (room && seat !== null && room.status === "playing" && room.gameState?.winner == null) {
+      if (wantForfeit) {
+        // Desistir: vitória imediata do oponente.
         const result = applyAuthoritativeAction(room, seat, { type: "SURRENDER", playerId: seat }, null);
         if (result.ok) {
           room.actionSeq += 1;
@@ -917,8 +920,33 @@ io.on("connection", (socket) => {
           const winner = result.state?.winner ?? ((seat + 1) % 2);
           forfeitPayload = { forfeit: true, winner, seat };
         }
-      } else if (room.gameState?.winner != null || wantForfeit) {
-        // SURRENDER já aplicado (status ended) — ainda avisa o peer com forfeit.
+        leaveSocketRoom(socket, forfeitPayload);
+        ack?.({ ok: true });
+        return;
+      }
+
+      // Abandono / sair da partida: assento fica livre para reconexão; IA assume.
+      // (igual queda de rede, mas IA imediata)
+      const info = disconnectSocket(room, socket.id);
+      socketRoom.delete(socket.id);
+      try { socket.leave(room.code); } catch (e) { /* */ }
+      emitRoom(room, "peer_disconnected", {
+        seat: info?.seat ?? seat,
+        canReconnect: true,
+        abandoned: true,
+      });
+      markSeatAbandonedForAi(room, seat, io, {
+        emitEnvelope: emitActionEnvelope,
+        onAfterAction: afterAuthoritativeAction,
+      });
+      touchPersist(room);
+      ack?.({ ok: true, abandoned: true });
+      return;
+    }
+
+    // Lobby / partida já encerrada: saída limpa.
+    if (room && seat !== null && (room.status === "ended" || wantForfeit)) {
+      if (room.gameState?.winner != null || wantForfeit) {
         const winner = room.gameState?.winner != null
           ? room.gameState.winner
           : ((seat + 1) % 2);
