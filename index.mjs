@@ -54,7 +54,7 @@ import { initPostgres, isPostgresEnabled, getReplayByRoomCode, shutdownPostgres 
 import { initAuthStore, getAuthStoreMode } from "./df-auth.mjs";
 import { authPlayerFromToken, startSessionPruneScheduler } from "./df-auth-store.mjs";
 import { recordMatchEnd } from "./df-match-history.mjs";
-import { applyAuthoritativeAction, seedRoomFromSnapshot, buildReplayPayload, getEngineBootStatus } from "./df-authority.mjs";
+import { applyAuthoritativeAction, seedRoomFromSnapshot, buildReplayPayload, getEngineBootStatus, projectStateForSeat } from "./df-authority.mjs";
 import { loadPersistedRooms, schedulePersistRooms, flushPersistRooms } from "./room-persist.mjs";
 import {
   initLiveRoomsSchema,
@@ -414,7 +414,13 @@ function emitActionEnvelope(room, envelope) {
   for (let s = 0; s < 2; s++) {
     const sid = room.sockets[s];
     if (!sid) continue;
-    io.to(sid).emit("remote_action", envelope);
+    const projected = envelope.authoritativeState
+      ? {
+          ...envelope,
+          authoritativeState: projectStateForSeat(envelope.authoritativeState, s),
+        }
+      : envelope;
+    io.to(sid).emit("remote_action", projected);
   }
 }
 
@@ -547,13 +553,33 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("match_ping", (_payload, ack) => {
+  socket.on("match_ping", (payload, ack) => {
     const room = getRoom(socketRoom.get(socket.id));
     if (!room) return ack?.({ ok: false, error: "NOT_IN_ROOM" });
     const seat = seatForSocket(room, socket.id);
     if (seat === null) return ack?.({ ok: false, error: "NO_SEAT" });
     touchLastSeen(room, seat);
-    ack?.({ ok: true, serverTime: Date.now(), turnDeadline: room.turnDeadline || null });
+    // Telemetria opcional do cliente (presentSkew / queueWait).
+    if (payload && typeof payload === "object") {
+      if (payload.presentSkewMs != null || payload.queueWaitMs != null) {
+        recordActionLatency(Number(payload.queueWaitMs) || 0, {
+          roomCode: room.code,
+          seat,
+          type: "PRESENT_TELEMETRY",
+          seq: room.actionSeq,
+          ok: true,
+        });
+      }
+    }
+    ack?.({
+      ok: true,
+      serverTime: Date.now(),
+      serverNow: Date.now(),
+      turnDeadline: room.turnDeadline || null,
+      lastSeq: room.actionSeq | 0,
+      presentBudgetMs: 2500,
+      gameVersion: GAME_VERSION,
+    });
   });
 
   socket.on("set_hero", (payload, ack) => {
@@ -720,6 +746,7 @@ io.on("connection", (socket) => {
     const skipRate =
       actionType === "SYNC_STATE" ||
       actionType === "PLAY_VISUAL" ||
+      actionType === "PRESENT" ||
       actionType === "ATTACK_START" ||
       actionType === "ATTACK_PICK_ATTACKER" ||
       actionType === "ATTACK_PICK_DEFENDER";
@@ -812,7 +839,13 @@ io.on("connection", (socket) => {
     for (let s = 0; s < 2; s++) {
       const sid = room.sockets[s];
       if (!sid || sid === socket.id) continue;
-      io.to(sid).emit("remote_action", envelope);
+      const peerEnv = envelope.authoritativeState
+        ? {
+            ...envelope,
+            authoritativeState: projectStateForSeat(envelope.authoritativeState, s),
+          }
+        : envelope;
+      io.to(sid).emit("remote_action", peerEnv);
     }
 
     touchPersist(room);
@@ -1033,7 +1066,11 @@ await initRankedMatchmaking(async (entry0, entry1) => {
 
 // Warm motor + Redis adapter antes do listen.
 getEngineBootStatus();
-await attachSocketRedisAdapter(io);
+const redisOk = await attachSocketRedisAdapter(io);
+if (process.env.DF_REQUIRE_REDIS === "1" && !redisOk) {
+  console.error("[boot] DF_REQUIRE_REDIS=1 mas Redis adapter falhou — abortando.");
+  process.exit(1);
+}
 
 httpServer.listen(PORT, () => {
   console.log(`Dragonfall server em http://localhost:${PORT}`);

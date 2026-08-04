@@ -33,6 +33,8 @@ export const ACTION_TYPES = Object.freeze({
     SYNC_STATE: "SYNC_STATE",
     ULTIMATE_PLAY: "ULTIMATE_PLAY",
     PLAY_VISUAL: "PLAY_VISUAL",
+    /** Frame de apresentação (VFX) mediado pelo servidor — UI_ONLY. */
+    PRESENT: "PRESENT",
     /** Commit autoritativo de poder/destruição (Bola de Fogo, Assassinar, Explosão…). */
     FIELD_COMMIT: "FIELD_COMMIT",
 });

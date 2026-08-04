@@ -172,10 +172,28 @@ export function leaveRoom(room, socketId) {
 /**
  * Vista pública. Em lobby não envia gameState (Fase 2 — payload leve).
  * Em playing, includeGameState=false para broadcasts de lobby-like.
+ * Fog-of-war: mãos adversárias projetadas por seat.
  */
 export function roomPublicView(room, yourSeat = null, opts = {}) {
   const includeGame =
     opts.includeGameState !== false && room.status === "playing";
+  let gameState = includeGame ? room.gameState || null : null;
+  if (gameState && (yourSeat === 0 || yourSeat === 1)) {
+    try {
+      gameState = JSON.parse(JSON.stringify(gameState));
+      for (let i = 0; i < (gameState.players || []).length; i++) {
+        if (i === yourSeat) continue;
+        const pl = gameState.players[i];
+        if (!pl?.hand) continue;
+        const n = pl.hand.length;
+        pl.hand = Array.from({ length: n }, () => ({ fog: true, category: "hidden" }));
+        if (Array.isArray(pl.deck)) {
+          pl.deckCount = pl.deck.length;
+          pl.deck = [];
+        }
+      }
+    } catch (e2) { /* keep raw */ }
+  }
   return {
     code: room.code,
     status: room.status,
@@ -207,7 +225,7 @@ export function roomPublicView(room, yourSeat = null, opts = {}) {
     actionSeq: room.actionSeq || 0,
     turnDeadline: room.turnDeadline || null,
     arenaScenarioId: room.arenaScenarioId || null,
-    gameState: includeGame ? room.gameState || null : null,
+    gameState,
     seatToken: yourSeat === 0 || yourSeat === 1 ? seatTokenFor(room, yourSeat) : null,
   };
 }

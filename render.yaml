@@ -32,6 +32,7 @@ services:
       - key: DF_AUTH_ENC_KEY
         sync: false
       # Em produção ranked: defina REDIS_URL. DF_REQUIRE_REDIS=1 falha o boot sem Redis.
+      # Fase E: recomenda-se DF_REQUIRE_REDIS=1 quando REDIS_URL estiver no Dashboard.
       - key: DF_REQUIRE_REDIS
         value: "0"
 

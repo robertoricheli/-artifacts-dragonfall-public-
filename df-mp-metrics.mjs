@@ -19,7 +19,8 @@ function pruneTimestamps(arr, now = Date.now()) {
 }
 
 function isPresentationType(type) {
-  return type === "SYNC_STATE" || type === "PLAY_VISUAL"
+  return type === "SYNC_STATE" || type === "PLAY_VISUAL" || type === "PRESENT"
+    || type === "PRESENT_TELEMETRY"
     || type === "ATTACK_START" || type === "ATTACK_PICK_ATTACKER"
     || type === "ATTACK_PICK_DEFENDER";
 }

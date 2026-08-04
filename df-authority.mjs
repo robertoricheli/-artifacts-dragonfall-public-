@@ -30,6 +30,7 @@ export const AUTHORITATIVE_TYPES = new Set([
 /** Tipos só-UI — não alteram estado no servidor. */
 export const UI_ONLY_TYPES = new Set([
   "PLAY_VISUAL",
+  "PRESENT",
   "ATTACK_START",
   "ATTACK_PICK_ATTACKER",
   "ATTACK_PICK_DEFENDER",
@@ -41,7 +42,7 @@ export const UI_ONLY_TYPES = new Set([
   "OPEN_DISCARD",
 ]);
 
-/** Tipos delegados — snapshot se motor ainda CLIENT_ONLY / NOT_IMPLEMENTED. */
+/** Tipos delegados — tenta motor; snapshot só se CLIENT_ONLY / NOT_IMPLEMENTED. */
 export const DELEGATED_TYPES = new Set([
   "ABILITY_TARGET",
   "ULTIMATE_TARGET",
@@ -49,8 +50,7 @@ export const DELEGATED_TYPES = new Set([
   "NECROMANCIA_PICK",
   "UNFREEZE_CONFIRM",
   "SYNC_STATE",
-  // TALENT_TARGET: promovido a autoritativo quando applyTalentTarget existe;
-  // permanece aqui só como fallback snapshot se motor retornar NOT_IMPLEMENTED.
+  // Motor aplica os talentos conhecidos; demais ainda usam snapshot validado.
   "TALENT_TARGET",
 ]);
 
@@ -210,6 +210,29 @@ function mapEventTypeToVisual(ev) {
     RAIO_DUPLO: "raio_duplo",
     DRAW: "card_draw",
     THUNDER_DISCARD: "thunder_discard",
+    TALENT_BOLA_DE_FOGO: "bola_de_fogo",
+    TALENT_EXPLOSAO: "explosao",
+    TALENT_FORTALECER: "strong_arm",
+    TALENT_VENENO: "baforada_venenosa",
+    TALENT_ZERO: "zero_absoluto",
+    TALENT_ZERO_SHATTER: "zero_absoluto",
+    TALENT_ZERO_FREEZE: "zero_absoluto",
+    TALENT_RESOLVED: null,
+    REACTIVE_USED: null,
+    DESTROY: "destroy",
+    POWER_REDUCED: null,
+    STATUS_SET: null,
+    COMBAT_RESOLVED: "combat",
+    ATTACK_RESOLVED: "combat",
+    DEVOUR: "devour",
+    ASSASSINAR: "assassinar",
+    TROCA_INJUSTA: "troca_injusta",
+    IMITAR: "imitar",
+    URSIFICACAO: "ursificacao",
+    TRANSFORMAR_BICHINHO: "transformar_bichinho",
+    INCENDIAR: "incendiar",
+    STRONG_ARM: "strong_arm",
+    WINGS: "wings",
   };
   const kind = TYPE_KIND[ev.type];
   if (!kind) return null;
@@ -217,11 +240,29 @@ function mapEventTypeToVisual(ev) {
   return normalizeOnEnterVisual({ ...ev, visual: kind });
 }
 
+/** Kinds que podem rodar em paralelo no peer (FX). */
+const PARALLEL_FX_KINDS = new Set([
+  "pesadelo", "wings", "roubar", "desacelerar", "strong_arm",
+  "bola_de_fogo", "assassinar", "maldicao_sete_mares", "troca_injusta",
+  "devour", "imitar", "ursificacao", "transformar_bichinho", "fury",
+  "fire_aura", "guardiao", "guardian", "fumaca_toxica", "raio_duplo",
+  "explosao", "zero_absoluto", "barrier_grant", "baforada_venenosa",
+  "incendiar", "land_impact", "card_draw", "combat_telegraph",
+  "misseis_magicos", "divine_protection", "cancel_ultimate",
+  "blocked_attack", "vinganca", "necromancia", "thunder_discard",
+  "scare_return",
+]);
+
+const BOARD_SERIAL_KINDS = new Set([
+  "talent_cast", "talent_discard", "summon_land", "combat", "destroy",
+  "dragon_token_summon",
+]);
+
 /**
  * Monta envelope de apresentação a partir dos events do motor.
  * Clientes aplicam fieldPatches (após VFX quando deferBoardApply) sem confiar em snapshots.
  */
-export function buildPresentationEnvelope(events = [], action = null) {
+export function buildPresentationEnvelope(events = [], action = null, meta = {}) {
   const visuals = [];
   const fieldPatches = [];
   let deferBoardApply = false;
@@ -298,8 +339,52 @@ export function buildPresentationEnvelope(events = [], action = null) {
     }
   }
 
+  // Anexa parallelGroup / timingHint a cada visual.
+  for (const v of visuals) {
+    if (!v || !v.kind) continue;
+    if (!v.parallelGroup) {
+      if (BOARD_SERIAL_KINDS.has(v.kind)) v.parallelGroup = "board";
+      else if (PARALLEL_FX_KINDS.has(v.kind)) v.parallelGroup = "fx";
+      else v.parallelGroup = "board";
+    }
+  }
+
   if (!visuals.length && !fieldPatches.length) return null;
-  return { visuals, fieldPatches, deferBoardApply, skipBoardApply: false };
+  return {
+    visuals,
+    fieldPatches,
+    deferBoardApply,
+    skipBoardApply: false,
+    causeActionType: action?.type || meta.causeActionType || null,
+    seed: meta.seed != null ? meta.seed : null,
+    applyPolicy: deferBoardApply ? "after_vfx" : "with_vfx",
+  };
+}
+
+/**
+ * Fog-of-war: peer recebe mãos adversárias só como contagem (anti-cheat).
+ * Viewer vê a própria mão completa.
+ */
+export function projectStateForSeat(state, viewerSeat) {
+  if (!state?.players?.length) return state;
+  try {
+    const next = JSON.parse(JSON.stringify(state));
+    for (let i = 0; i < next.players.length; i++) {
+      if (i === viewerSeat) continue;
+      const pl = next.players[i];
+      if (!pl?.hand) continue;
+      const n = pl.hand.length;
+      pl.hand = Array.from({ length: n }, () => ({ fog: true, category: "hidden" }));
+      if (pl.deck && Array.isArray(pl.deck)) {
+        pl.deckCount = pl.deck.length;
+        // Não vazar ordem do baralho.
+        pl.deck = [];
+      }
+    }
+    return next;
+  } catch (e) {
+    return state;
+  }
 }
 
 /**
@@ -414,7 +499,10 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
     applied.events || [],
   );
 
-  const presentationEnvelope = buildPresentationEnvelope(applied.events || [], shaped);
+  const presentationEnvelope = buildPresentationEnvelope(applied.events || [], shaped, {
+    causeActionType: shaped.type,
+    seed: ((room.actionSeq + 1) * 2654435761 + seat * 40503 + (room.deckSeed || 0)) >>> 0,
+  });
   const presentation = presentationEnvelope?.visuals?.length
     ? presentationEnvelope.visuals
     : (applied.events || [])

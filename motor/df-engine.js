@@ -628,6 +628,7 @@ export function applyAction(state, action, ctx = {}) {
         default: {
             const uiOnly = new Set([
                 T.PLAY_VISUAL,
+                T.PRESENT,
                 T.MENU_CHOICE,
                 T.OPEN_DISCARD,
                 T.ATTACK_START,
