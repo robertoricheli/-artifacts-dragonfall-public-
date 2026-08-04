@@ -196,7 +196,8 @@ function isCombatOrPowerReductionDestroy(reason) {
  */
 function applyOnDestroyBurst(state, ownerIdx, champ, reason, rng = Math.random) {
     const ability = resolveOnDestroyAbility(champ);
-    if (ability !== "explosaoGelo" && ability !== "explosaoVenenosa" && ability !== "furiaLegado")
+    if (ability !== "explosaoGelo" && ability !== "explosaoVenenosa"
+        && ability !== "furiaLegado" && ability !== "vinganca")
         return { ability: null, targets: [], applied: [] };
     if (ability === "explosaoVenenosa" && !isCombatOrPowerReductionDestroy(reason))
         return { ability, targets: [], applied: [] };
@@ -215,6 +216,28 @@ function applyOnDestroyBurst(state, ownerIdx, champ, reason, rng = Math.random) 
             });
         }
         return { ability, targets, applied };
+    }
+    if (ability === "vinganca") {
+        const pool = gatherEnemyTargets(state, ownerIdx, () => true);
+        if (!pool.length)
+            return { ability, targets: [], applied: [] };
+        const pick = pool[Math.floor(rng() * pool.length)];
+        const victim = state.players[pick.p]?.field?.[pick.i];
+        if (!victim)
+            return { ability, targets: [pick], applied: [] };
+        reduceChampionPower(victim, 1);
+        const appliedEntry = {
+            ...pick,
+            name: victim.name,
+            currentPower: victim.currentPower ?? 0,
+            removed: false,
+        };
+        if ((victim.currentPower ?? 0) <= 0) {
+            discardChampionAt(state, pick.p, pick.i);
+            appliedEntry.removed = true;
+            appliedEntry.currentPower = 0;
+        }
+        return { ability, targets: [pick], applied: [appliedEntry] };
     }
     const pool = gatherEnemyTargets(state, ownerIdx, () => true);
     for (let i = pool.length - 1; i > 0; i--) {

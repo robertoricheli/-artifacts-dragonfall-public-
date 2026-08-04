@@ -584,7 +584,7 @@ export function applyAction(state, action, ctx = {}) {
                     const STATUS_NUM = [
                         "frozenTurns", "shieldedTurns", "barrierTurns", "poisonTurns",
                         "furyTurns", "furyStacks", "guerraBuffTurns", "burningTurns",
-                        "fireAuraTurns", "currentPower", "poisonedByP",
+                        "fireAuraTurns", "currentPower", "poisonedByP", "burningByP",
                     ];
                     const flags = (m.flags || m);
                     for (const k of STATUS_BOOL) {

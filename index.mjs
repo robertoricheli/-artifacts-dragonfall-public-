@@ -788,13 +788,16 @@ io.on("connection", (socket) => {
       fromSeat: seat,
       action,
       snapshot: sendClientSnap ? (payload?.snapshot || null) : null,
-      authoritativeState: result.state || room.gameState || null,
+      authoritativeState: (result.omitAuthoritativeState || (result.skip && result.uiOnly))
+        ? null
+        : (result.state || room.gameState || null),
       events: result.events || [],
       logEntry: result.logEntry || null,
       delegated: !!result.delegated,
       skip: !!result.skip,
       forfeit: action.type === "SURRENDER",
       presentation: result.presentation || null,
+      presentationEnvelope: result.presentationEnvelope || null,
     };
     if (result.state && !result.skip) {
       room.lastSnapshot = { state: result.state, full: true };
@@ -825,11 +828,14 @@ io.on("connection", (socket) => {
     const ackPayload = {
       ok: true,
       seq: room.actionSeq,
-      authoritativeState: result.state || room.gameState || null,
+      authoritativeState: (result.omitAuthoritativeState || (result.skip && result.uiOnly))
+        ? (room.gameState || null)
+        : (result.state || room.gameState || null),
       events: result.events || [],
       logEntry: result.logEntry || null,
       skip: !!result.skip,
       presentation: result.presentation || null,
+      presentationEnvelope: result.presentationEnvelope || null,
     };
     if (clientActionId) {
       room._ackedClientActions.set(`${seat}:${clientActionId}`, ackPayload);

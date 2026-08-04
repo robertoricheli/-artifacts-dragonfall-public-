@@ -131,7 +131,8 @@ function mergeValidatedSnapshot(room, seat, action, snapshot) {
 
 /**
  * SYNC_STATE não reescreve o tabuleiro — servidor permanece a fonte de verdade.
- * O peer recebe authoritativeState; animação vai em action.anim.
+ * O peer NÃO deve aplicar authoritativeState (stale vs FIELD_COMMIT / patches).
+ * Animação vai em action.anim / presentationEnvelope.
  */
 function applySyncStateCosmetic(room, seat, action) {
   const state = resolveGameState(room);
@@ -139,14 +140,104 @@ function applySyncStateCosmetic(room, seat, action) {
   const entry = appendEventLogEntry(room.eventLog, room.actionSeq + 1, seat, action, [
     { type: "SYNC_COSMETIC" },
   ]);
+  const presentationEnvelope = {
+    visuals: action.anim?.kind ? [action.anim] : [],
+    fieldPatches: Array.isArray(action.anim?.fieldPatches) ? action.anim.fieldPatches : [],
+    deferBoardApply: false,
+    skipBoardApply: true,
+  };
   return {
     ok: true,
     skip: true,
     uiOnly: true,
-    state,
+    // Não retransmitir state cosmético — peer usa só presentation.
+    state: null,
+    omitAuthoritativeState: true,
     events: [{ type: "SYNC_COSMETIC" }],
     logEntry: entry,
+    presentationEnvelope,
   };
+}
+
+/**
+ * Monta envelope de apresentação a partir dos events do motor.
+ * Clientes aplicam fieldPatches (após VFX quando deferBoardApply) sem confiar em snapshots.
+ */
+export function buildPresentationEnvelope(events = [], action = null) {
+  const visuals = [];
+  const fieldPatches = [];
+  let deferBoardApply = false;
+
+  for (const ev of events || []) {
+    if (!ev || typeof ev !== "object") continue;
+    if (ev.visual) {
+      visuals.push({ kind: ev.visual, ...ev });
+    }
+    if (ev.type === "STATUS_SET" && ev.targetP != null && ev.targetI != null) {
+      fieldPatches.push({
+        targetP: ev.targetP,
+        targetI: ev.targetI,
+        ...(ev.flags || {}),
+      });
+    }
+    if (ev.type === "DESTROY" && (ev.p != null || ev.targetP != null)) {
+      fieldPatches.push({
+        targetP: ev.targetP ?? ev.p,
+        targetI: ev.targetI ?? ev.i,
+        removed: true,
+      });
+      deferBoardApply = true;
+    }
+    if (ev.type === "ON_DESTROY_BURST" && ev.ability === "vinganca") {
+      for (const t of ev.applied || []) {
+        if (t?.p == null) continue;
+        if (t.removed) {
+          fieldPatches.push({ targetP: t.p, targetI: t.i, removed: true });
+          deferBoardApply = true;
+        } else if (t.currentPower != null) {
+          fieldPatches.push({
+            targetP: t.p,
+            targetI: t.i,
+            currentPower: t.currentPower,
+          });
+        }
+        visuals.push({
+          kind: "vinganca",
+          ownerP: ev.ownerIdx,
+          targetP: t.p,
+          targetI: t.i,
+          powerAfter: t.currentPower,
+          fieldPatches: t.removed
+            ? [{ targetP: t.p, targetI: t.i, removed: true }]
+            : [{ targetP: t.p, targetI: t.i, currentPower: t.currentPower }],
+        });
+        deferBoardApply = true;
+      }
+    }
+    if (ev.type === "POWER_REDUCED" && ev.targetP != null && ev.targetI != null) {
+      if (ev.removed || (ev.currentPower != null && ev.currentPower <= 0)) {
+        fieldPatches.push({ targetP: ev.targetP, targetI: ev.targetI, removed: true });
+        deferBoardApply = true;
+      } else if (ev.currentPower != null) {
+        fieldPatches.push({
+          targetP: ev.targetP,
+          targetI: ev.targetI,
+          currentPower: ev.currentPower,
+        });
+      }
+    }
+  }
+
+  if (action?.anim?.kind) {
+    visuals.push(action.anim);
+    if (Array.isArray(action.anim.fieldPatches)) {
+      for (const p of action.anim.fieldPatches) fieldPatches.push(p);
+      if (action.anim.fieldPatches.some((p) => p?.removed)) deferBoardApply = true;
+    }
+  }
+
+  if (!visuals.length && !fieldPatches.length) return null;
+  return { visuals, fieldPatches, deferBoardApply, skipBoardApply: false };
 }
 
 /**
@@ -158,7 +249,16 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
   if (!room.eventLog) room.eventLog = [];
 
   if (UI_ONLY_TYPES.has(action.type)) {
-    return { ok: true, skip: true, uiOnly: true };
+    const presentationEnvelope = buildPresentationEnvelope([], action);
+    return {
+      ok: true,
+      skip: true,
+      uiOnly: true,
+      omitAuthoritativeState: true,
+      state: null,
+      presentationEnvelope: presentationEnvelope || undefined,
+      presentation: presentationEnvelope?.visuals,
+    };
   }
 
   let state = resolveGameState(room);
@@ -217,6 +317,7 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
           events: applied.events || [],
           logEntry: entry,
           promoted: true,
+          presentationEnvelope: buildPresentationEnvelope(applied.events || [], shaped) || undefined,
         };
       }
     } catch (e) { /* fallback */ }
@@ -251,16 +352,20 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
     applied.events || [],
   );
 
-  const presentation = (applied.events || [])
-    .filter((e) => e && e.visual)
-    .map((e) => ({ kind: e.visual, ...e }));
+  const presentationEnvelope = buildPresentationEnvelope(applied.events || [], shaped);
+  const presentation = presentationEnvelope?.visuals?.length
+    ? presentationEnvelope.visuals
+    : (applied.events || [])
+      .filter((e) => e && e.visual)
+      .map((e) => ({ kind: e.visual, ...e }));
 
   return {
     ok: true,
     state: applied.state,
     events: applied.events || [],
     logEntry: entry,
-    presentation: presentation.length ? presentation : undefined,
+    presentation: presentation?.length ? presentation : undefined,
+    presentationEnvelope: presentationEnvelope || undefined,
   };
 }
 
