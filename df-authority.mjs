@@ -220,6 +220,8 @@ function mapEventTypeToVisual(ev) {
     TALENT_ZERO_FREEZE: "zero_absoluto",
     TALENT_RESOLVED: null,
     REACTIVE_USED: null,
+    SCARE_RETURN: "scare_return",
+    TOKEN_INSERT: "dragon_token_summon",
     DESTROY: "destroy",
     POWER_REDUCED: null,
     STATUS_SET: null,

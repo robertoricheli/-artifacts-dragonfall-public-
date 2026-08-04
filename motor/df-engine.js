@@ -156,9 +156,20 @@ export function validateAction(state, action, ctx = {}) {
                 const op = String(m?.op || "");
                 const tp = m.targetP;
                 const ti = m.targetI;
-                if (tp == null || ti == null || tp < 0 || ti < 0)
+                if (tp == null || tp < 0)
                     return { ok: false, code: "BAD_TARGET" };
                 const champ = state.players[tp]?.field;
+                if (!champ)
+                    return { ok: false, code: "NO_TARGET" };
+                if (op === "insertToken" || op === "insert") {
+                    if (ti == null || ti < 0)
+                        return { ok: false, code: "BAD_TARGET" };
+                    if (!m.card || typeof m.card !== "object")
+                        return { ok: false, code: "NO_CARD" };
+                    continue;
+                }
+                if (ti == null || ti < 0)
+                    return { ok: false, code: "BAD_TARGET" };
                 const card = champ?.[ti];
                 if (!card)
                     return { ok: false, code: "NO_TARGET" };
@@ -176,6 +187,9 @@ export function validateAction(state, action, ctx = {}) {
                 }
                 else if (op === "setStatus") {
                     // flags opcionais — alvo já validado
+                }
+                else if (op === "returnToHand") {
+                    // Medo / scare — remove do campo e devolve à mão
                 }
                 else {
                     return { ok: false, code: "BAD_MUTATION" };
@@ -512,6 +526,28 @@ export function applyAction(state, action, ctx = {}) {
                         targetI: idx,
                         cardName: cardSnap.name,
                         uid: cardSnap.uid,
+                    });
+                    continue;
+                }
+                if (op === "returnToHand") {
+                    const card = field?.[ti];
+                    if (!card) {
+                        return { ok: false, state, events: [], error: "NO_TARGET" };
+                    }
+                    field.splice(ti, 1);
+                    const handCard = m.handCard && typeof m.handCard === "object"
+                        ? { ...m.handCard }
+                        : { ...card, tapped: false, freeAttack: false };
+                    delete handCard._summoning;
+                    const hand = owner.hand || [];
+                    hand.push(handCard);
+                    owner.hand = hand;
+                    events.push({
+                        type: "SCARE_RETURN",
+                        targetP: tp,
+                        targetI: ti,
+                        cardName: handCard.name,
+                        visual: "scare_return",
                     });
                     continue;
                 }
