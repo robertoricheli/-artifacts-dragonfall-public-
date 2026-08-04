@@ -278,6 +278,19 @@ export function applyAction(state, action, ctx = {}) {
             const defP = next.players[a.defenderPlayerId];
             const defField = defP.field;
             const def = defField[a.defenderIdx];
+            if (a.blocked) {
+                const cost = leg.actionCost ?? R.getAttackActionCost(att, def);
+                if (cost > 0)
+                    p.actions = p.actions - cost;
+                att.tapped = true;
+                att.freeAttack = false;
+                events.push({
+                    type: "COMBAT_BLOCKED",
+                    attacker: { p: pid, i: a.attackerIdx },
+                    defender: { p: a.defenderPlayerId, i: a.defenderIdx },
+                });
+                break;
+            }
             const out = R.combatOutcome(att, def);
             const cost = leg.actionCost ?? R.getAttackActionCost(att, def);
             if (cost > 0)
