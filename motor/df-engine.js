@@ -77,6 +77,22 @@ export function validateAction(state, action, ctx = {}) {
         case T.SUMMON: {
             const hand = state.players[pid]?.hand;
             const idx = resolveSummonHandIdx(hand, a.handIdx, a.cardName, a.uid);
+            const card = hand?.[idx];
+            if (card?.summonRitual && a.freeAction) {
+                const sacIdx = a.sacrificeIdx;
+                const field = state.players[pid]?.field;
+                const sac = field?.[sacIdx];
+                const req = card.summonRitual;
+                if (sacIdx == null || sacIdx < 0 || !sac) {
+                    return { ok: false, code: "NO_RITUAL_SACRIFICE" };
+                }
+                const sacPow = sac.currentPower ?? sac.power ?? 0;
+                if (sacPow !== req)
+                    return { ok: false, code: "BAD_RITUAL_POWER" };
+                if (a.sacrificeUid != null && String(sac.uid || "") !== String(a.sacrificeUid)) {
+                    return { ok: false, code: "BAD_RITUAL_UID" };
+                }
+            }
             return R.canSummon(state, pid, idx, {
                 freeAction: !!a.freeAction,
                 ...R.summonContextForPlayer(state, pid),
@@ -204,6 +220,30 @@ export function applyAction(state, action, ctx = {}) {
             const handCard = hand[summonIdx];
             if (wantName && (!handCard || String(handCard.name || "") !== wantName)) {
                 return { ok: false, state, events: [], error: "CARD_MISMATCH" };
+            }
+            // Ritual: sacrifica o aliado no servidor ANTES de invocar (evita Gamer+Tiamat).
+            if (handCard?.summonRitual && a.freeAction) {
+                const sacIdx = a.sacrificeIdx;
+                const fieldNow = p.field;
+                const sac = fieldNow?.[sacIdx];
+                const req = handCard.summonRitual;
+                if (sacIdx == null || sacIdx < 0 || !sac) {
+                    return { ok: false, state, events: [], error: "NO_RITUAL_SACRIFICE" };
+                }
+                const sacPow = sac.currentPower ?? sac.power ?? 0;
+                if (sacPow !== req)
+                    return { ok: false, state, events: [], error: "BAD_RITUAL_POWER" };
+                if (a.sacrificeUid != null && String(sac.uid || "") !== String(a.sacrificeUid)) {
+                    return { ok: false, state, events: [], error: "BAD_RITUAL_UID" };
+                }
+                const removed = fieldNow.splice(sacIdx, 1)[0];
+                events.push({
+                    type: "DESTROY",
+                    p: pid,
+                    i: sacIdx,
+                    reason: "ritualSacrifice",
+                    card: removed,
+                });
             }
             const card = hand.splice(summonIdx, 1)[0];
             const champ = {
