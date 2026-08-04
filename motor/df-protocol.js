@@ -22,6 +22,8 @@ export const ACTION_TYPES = Object.freeze({
     ON_ENTER_RESOLVE: "ON_ENTER_RESOLVE",
     TALENT_START: "TALENT_START",
     TALENT_TARGET: "TALENT_TARGET",
+    /** Limpa activeTalent + move carta ao discard (pós-resolve MP). Sem reaplicar efeito. */
+    TALENT_DISCARD: "TALENT_DISCARD",
     ABILITY_START: "ABILITY_START",
     ABILITY_TARGET: "ABILITY_TARGET",
     ULTIMATE_START: "ULTIMATE_START",

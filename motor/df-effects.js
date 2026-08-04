@@ -112,6 +112,10 @@ function applyTalentTarget(state, pIdx, targetP, targetI) {
     return resolveApi()?.applyTalentTarget?.(state, pIdx, targetP, targetI)
         || { ok: false, state, events: [], error: "NO_TALENT_TARGET_RESOLVE" };
 }
+function applyTalentDiscard(state, pIdx) {
+    return resolveApi()?.applyTalentDiscard?.(state, pIdx)
+        || { ok: false, state, events: [], error: "NO_TALENT_DISCARD_RESOLVE" };
+}
 function bootstrapRegistry() {
     const rules = R();
     if (!rules)
@@ -166,5 +170,6 @@ const DfEffects = {
     applyReactiveUse,
     applyTalentFromHand,
     applyTalentTarget,
+    applyTalentDiscard,
 };
 export { DfEffects };

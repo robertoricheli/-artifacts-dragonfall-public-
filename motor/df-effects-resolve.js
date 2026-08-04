@@ -850,6 +850,38 @@ function applyTalentFromHand(state, pIdx, handIdx) {
     };
 }
 /**
+ * Pós-resolve MP: limpa activeTalent e garante carta no discard.
+ * Idempotente se já estiver limpo. Não reaplica efeito.
+ */
+function applyTalentDiscard(state, pIdx) {
+    const events = [];
+    const at = state.activeTalent;
+    if (!at?.card) {
+        return { ok: true, state, events: [{ type: "TALENT_DISCARDED", playerId: pIdx, alreadyClear: true }] };
+    }
+    if (at.ownerP !== pIdx) {
+        return { ok: false, state, events, error: "NOT_TALENT_OWNER" };
+    }
+    const card = at.card;
+    state.activeTalent = null;
+    const disc = state.players[pIdx].discard || [];
+    const uid = card.uid != null ? String(card.uid) : "";
+    const already = uid
+        ? disc.some((c) => c && String(c.uid || "") === uid)
+        : disc.some((c) => c && c === card);
+    if (!already) {
+        disc.push(card);
+        state.players[pIdx].discard = disc;
+    }
+    events.push({
+        type: "TALENT_DISCARDED",
+        playerId: pIdx,
+        talentEffect: card.talentEffect,
+        cardName: card.name,
+    });
+    return { ok: true, state, events };
+}
+/**
  * Resolve talento ativo com alvo (autoridade servidor / motor).
  * Talentos sem implementação completa retornam NOT_IMPLEMENTED (fallback snapshot).
  */
@@ -993,6 +1025,7 @@ const DfEffectsResolve = {
     applyReactiveUse,
     applyTalentFromHand,
     applyTalentTarget,
+    applyTalentDiscard,
     swapFieldChamps,
     inferConstantOnDestroy,
     bootstrapResolveRegistry,

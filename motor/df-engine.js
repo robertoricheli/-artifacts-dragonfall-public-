@@ -135,6 +135,15 @@ export function validateAction(state, action, ctx = {}) {
                 return { ok: false, code: "INSUFFICIENT_ACTIONS" };
             return { ok: true, code: "OK" };
         }
+        case T.TALENT_DISCARD: {
+            const at = state.activeTalent;
+            if (!at?.ownerP && at !== null && at !== undefined) {
+                /* activeTalent shape odd — still allow clear attempt */
+            }
+            if (at && at.ownerP != null && at.ownerP !== pid)
+                return { ok: false, code: "NOT_TALENT_OWNER" };
+            return { ok: true, code: "OK" };
+        }
         case T.ULTIMATE_PLAY:
             return validateUltimatePlay(state, a);
         case T.FIELD_COMMIT: {
@@ -449,6 +458,17 @@ export function applyAction(state, action, ctx = {}) {
             const res = ER.applyTalentFromHand(next, pid, talentIdx);
             if (!res.ok)
                 return { ok: false, state, events: [], error: res.error || "TALENT_FAILED" };
+            events.push(...(res.events || []));
+            break;
+        }
+        case T.TALENT_DISCARD: {
+            const ER = getEffects();
+            if (typeof ER?.applyTalentDiscard !== "function") {
+                return { ok: false, state, events: [], error: "NO_TALENT_DISCARD" };
+            }
+            const res = ER.applyTalentDiscard(next, pid);
+            if (!res.ok)
+                return { ok: false, state, events: res.events || [], error: res.error || "TALENT_DISCARD_FAILED" };
             events.push(...(res.events || []));
             break;
         }
