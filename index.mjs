@@ -459,9 +459,10 @@ function resetTurnTimer(room) {
       forced: true,
     };
     if (result.state) room.lastSnapshot = { state: result.state, full: true };
+    resetTurnTimer(room);
+    envelope.turnDeadline = room.turnDeadline || null;
     emitRoom(room, "remote_action", envelope);
     broadcastRoomState(room);
-    resetTurnTimer(room);
     touchPersist(room);
     maybeFinishMatch(room, result.state);
     scheduleServerAi(room, io, {
@@ -804,13 +805,16 @@ io.on("connection", (socket) => {
       room.lastSnapshot = { state: result.state, full: true };
     }
 
+    // Relógio do turno: ambos os clientes sincronizam a partir do deadline.
+    resetTurnTimer(room);
+    envelope.turnDeadline = room.turnDeadline || null;
+
     for (let s = 0; s < 2; s++) {
       const sid = room.sockets[s];
       if (!sid || sid === socket.id) continue;
       io.to(sid).emit("remote_action", envelope);
     }
 
-    resetTurnTimer(room);
     touchPersist(room);
     maybeFinishMatch(room, result.state);
     scheduleServerAi(room, io, {
@@ -837,6 +841,7 @@ io.on("connection", (socket) => {
       skip: !!result.skip,
       presentation: result.presentation || null,
       presentationEnvelope: result.presentationEnvelope || null,
+      turnDeadline: room.turnDeadline || null,
     };
     if (clientActionId) {
       room._ackedClientActions.set(`${seat}:${clientActionId}`, ackPayload);
