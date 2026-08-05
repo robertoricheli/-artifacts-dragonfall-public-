@@ -171,6 +171,7 @@ export function markSeatDisconnectedForAi(room, seat, io, hooks) {
     try {
       io.to(room.code).emit("peer_ai_control", { seat, active: true });
     } catch (e) { /* */ }
+    try { hooks?.persist?.(); } catch (e) { /* */ }
     scheduleServerAi(room, io, hooks);
   }, AI_GRACE_MS);
 }
@@ -191,6 +192,7 @@ export function markSeatAbandonedForAi(room, seat, io, hooks) {
   try {
     io.to(room.code).emit("peer_ai_control", { seat, active: true });
   } catch (e) { /* */ }
+  try { hooks?.persist?.(); } catch (e) { /* */ }
   scheduleServerAi(room, io, hooks);
 }
 

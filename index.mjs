@@ -977,6 +977,7 @@ io.on("connection", (socket) => {
       markSeatAbandonedForAi(room, seat, io, {
         emitEnvelope: emitActionEnvelope,
         onAfterAction: afterAuthoritativeAction,
+        persist: () => touchPersist(room),
       });
       touchPersist(room);
       ack?.({ ok: true, abandoned: true });
@@ -1014,6 +1015,7 @@ io.on("connection", (socket) => {
       markSeatDisconnectedForAi(room, info.seat, io, {
         emitEnvelope: emitActionEnvelope,
         onAfterAction: afterAuthoritativeAction,
+        persist: () => touchPersist(room),
       });
     }
     broadcastRoomState(room);

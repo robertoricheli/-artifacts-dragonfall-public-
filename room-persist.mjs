@@ -28,6 +28,8 @@ function serializeRoom(room) {
     turnDeadline: room.turnDeadline || null,
     deckSeed: room.deckSeed != null ? room.deckSeed : null,
     arenaScenarioId: room.arenaScenarioId || null,
+    seatTokens: room.seatTokens || [null, null],
+    aiControlled: room.aiControlled || [false, false],
   };
 }
 

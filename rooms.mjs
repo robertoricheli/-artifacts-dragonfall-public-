@@ -270,7 +270,9 @@ export function importPersistedRoom(data) {
     rankedPlayerIds: data.rankedPlayerIds || null,
     seatTokens: data.seatTokens || [null, null],
     lastSeen: [0, 0],
-    aiControlled: [false, false],
+    aiControlled: Array.isArray(data.aiControlled)
+      ? [!!data.aiControlled[0], !!data.aiControlled[1]]
+      : [false, false],
   };
   ensureSeatTokens(room);
   rooms.set(room.code, room);
