@@ -188,6 +188,9 @@ export function validateAction(state, action, ctx = {}) {
                 else if (op === "setStatus") {
                     // flags opcionais — alvo já validado
                 }
+                else if (op === "transformToken") {
+                    // Identidade in-place (Transformar / Ursificar) — card/flags já no mutation
+                }
                 else if (op === "returnToHand") {
                     // Medo / scare — remove do campo e devolve à mão
                 }
@@ -670,6 +673,59 @@ export function applyAction(state, action, ctx = {}) {
                         targetP: tp,
                         targetI: ti,
                         flags: { ...flags },
+                    });
+                }
+                else if (op === "transformToken") {
+                    const patch = (m.card || m.flags || m);
+                    const IDENTITY = [
+                        "name", "power", "basePower", "currentPower", "abilityType", "abilityName",
+                        "abilityDesc", "onEnter", "onDestroy", "talentEffect", "summonRitual",
+                        "constantEffect", "isToken", "hidden",
+                    ];
+                    for (const k of IDENTITY) {
+                        if (Object.prototype.hasOwnProperty.call(patch, k)) {
+                            card[k] = patch[k];
+                        }
+                    }
+                    // Limpa status temporários — criatura “renasce” (Transformar / Ursificar).
+                    card.frozen = false;
+                    card.frozenTurns = 0;
+                    card.shielded = false;
+                    card.shieldedTurns = 0;
+                    card.shieldedPermanent = false;
+                    card.freeAttack = false;
+                    card.silenced = false;
+                    card.poisoned = false;
+                    card.poisonTurns = 0;
+                    card.poisonedByP = -1;
+                    card.pulled = false;
+                    card.pulledFromOwner = -1;
+                    card.pulledTurns = 0;
+                    card.wallBuff = false;
+                    card.wallBuffApplied = false;
+                    card.wallBuffSnapshot = 0;
+                    card.foreverGrowth = false;
+                    card.guerraBuff = false;
+                    card.guerraBuffTurns = 0;
+                    card.barrier = false;
+                    card.barrierTurns = 0;
+                    card.barrierPermanent = false;
+                    card.fireAura = false;
+                    card.fireAuraTurns = 0;
+                    card.burning = false;
+                    card.burningTurns = 0;
+                    card.burningByP = undefined;
+                    card.fury = false;
+                    card.furyTurns = 0;
+                    card.furyStacks = 0;
+                    card.furyBonusActive = false;
+                    card.vulnerable = false;
+                    card.corruptedNoHonor = false;
+                    events.push({
+                        type: "STATUS_SET",
+                        targetP: tp,
+                        targetI: ti,
+                        flags: { ...patch, transformToken: true },
                     });
                 }
             }
