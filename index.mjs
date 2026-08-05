@@ -984,14 +984,16 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Lobby / partida já encerrada: saída limpa.
-    if (room && seat !== null && (room.status === "ended" || wantForfeit)) {
-      if (room.gameState?.winner != null || wantForfeit) {
-        const winner = room.gameState?.winner != null
-          ? room.gameState.winner
-          : ((seat + 1) % 2);
-        forfeitPayload = { forfeit: true, winner, seat };
-      }
+    // Lobby / partida já encerrada: saída limpa — NÃO emitir forfeit
+    // (Voltar ao Menu após vitória/derrota não é desistência).
+    if (room && seat !== null && room.status === "ended") {
+      leaveSocketRoom(socket, null);
+      ack?.({ ok: true });
+      return;
+    }
+    if (room && seat !== null && wantForfeit && room.gameState?.winner == null) {
+      const winner = (seat + 1) % 2;
+      forfeitPayload = { forfeit: true, winner, seat };
     }
     leaveSocketRoom(socket, forfeitPayload);
     ack?.({ ok: true });

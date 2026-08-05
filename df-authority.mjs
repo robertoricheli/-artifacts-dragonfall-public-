@@ -251,6 +251,7 @@ function mapEventTypeToVisual(ev) {
     WINGS: "wings",
     RAJADA_CONGELANTE_FREEZE: "rajada_congelante",
     RAJADA_CONGELANTE_DESTROY: "rajada_congelante_destroy",
+    CORROMPER: "corrupt",
   };
   const kind = TYPE_KIND[ev.type];
   if (!kind) return null;
@@ -269,6 +270,7 @@ const PARALLEL_FX_KINDS = new Set([
   "misseis_magicos", "divine_protection", "cancel_ultimate",
   "blocked_attack", "vinganca", "necromancia", "thunder_discard",
   "scare_return", "aceleracao", "rajada_congelante", "rajada_congelante_destroy",
+  "corrupt",
 ]);
 
 const BOARD_SERIAL_KINDS = new Set([
