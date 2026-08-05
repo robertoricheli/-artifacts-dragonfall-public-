@@ -168,6 +168,16 @@ export function validateAction(state, action, ctx = {}) {
                         return { ok: false, code: "NO_CARD" };
                     continue;
                 }
+                if (op === "setActions") {
+                    if (m.actions == null)
+                        return { ok: false, code: "BAD_AMOUNT" };
+                    continue;
+                }
+                if (op === "discardToHand") {
+                    if (!m.card || typeof m.card !== "object")
+                        return { ok: false, code: "NO_CARD" };
+                    continue;
+                }
                 if (ti == null || ti < 0)
                     return { ok: false, code: "BAD_TARGET" };
                 const card = champ?.[ti];
@@ -532,6 +542,49 @@ export function applyAction(state, action, ctx = {}) {
                     });
                     continue;
                 }
+                if (op === "setActions") {
+                    owner.actions = m.actions | 0;
+                    events.push({
+                        type: "ACTIONS_SET",
+                        targetP: tp,
+                        actions: owner.actions,
+                    });
+                    continue;
+                }
+                if (op === "discardToHand") {
+                    const discard = owner.discard || [];
+                    let di = m.discardIdx;
+                    if (di == null || di < 0) {
+                        const cardObj = m.card;
+                        const wantUid = cardObj?.uid || m.uid;
+                        const wantName = cardObj?.name || m.cardName;
+                        if (wantUid) {
+                            di = discard.findIndex((c) => c && c.uid === wantUid);
+                        }
+                        if ((di == null || di < 0) && wantName) {
+                            di = discard.findIndex((c) => c && c.name === wantName);
+                        }
+                    }
+                    if (di == null || di < 0 || di >= discard.length) {
+                        return { ok: false, state, events: [], error: "NO_DISCARD_CARD" };
+                    }
+                    discard.splice(di, 1);
+                    owner.discard = discard;
+                    const handCard = m.card && typeof m.card === "object"
+                        ? { ...m.card }
+                        : {};
+                    delete handCard._summoning;
+                    const hand = owner.hand || [];
+                    hand.push(handCard);
+                    owner.hand = hand;
+                    events.push({
+                        type: "NECROMANCIA",
+                        casterIdx: tp,
+                        card: handCard.name,
+                        visual: "necromancia",
+                    });
+                    continue;
+                }
                 if (op === "returnToHand") {
                     const card = field?.[ti];
                     if (!card) {
@@ -659,6 +712,12 @@ export function applyAction(state, action, ctx = {}) {
                         "furyTurns", "furyStacks", "guerraBuffTurns", "burningTurns",
                         "fireAuraTurns", "currentPower", "poisonedByP", "burningByP",
                     ];
+                    const STATUS_ANY = [
+                        "abilityType", "abilityName", "abilityDesc", "onEnter", "onDestroy",
+                        "talentEffect", "constantEffect", "summonRitual",
+                        "mimicAbilityName", "mimicAbilityDesc", "mimicOnEnter", "mimicOnDestroy",
+                        "mimicSourceName", "mimicConstantEffect",
+                    ];
                     const flags = (m.flags || m);
                     for (const k of STATUS_BOOL) {
                         if (flags[k] != null)
@@ -667,6 +726,11 @@ export function applyAction(state, action, ctx = {}) {
                     for (const k of STATUS_NUM) {
                         if (flags[k] != null)
                             card[k] = flags[k] | 0;
+                    }
+                    for (const k of STATUS_ANY) {
+                        if (Object.prototype.hasOwnProperty.call(flags, k)) {
+                            card[k] = flags[k];
+                        }
                     }
                     events.push({
                         type: "STATUS_SET",

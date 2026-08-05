@@ -192,6 +192,19 @@ function normalizeOnEnterVisual(ev) {
   }
   if (kind === "em_chamas") out.kind = "incendiar";
   if (kind === "freeze") out.kind = "zero_absoluto";
+  // Raio Duplo: motor emite hits[]; peer/replay esperam picks[].
+  if (kind === "raio_duplo") {
+    if (!out.picks?.length && Array.isArray(out.hits)) {
+      out.picks = out.hits.map((h) => ({ p: h.p, i: h.i }));
+    }
+    if (!out.fieldPatches?.length && Array.isArray(out.hits)) {
+      out.fieldPatches = out.hits.map((h) => (
+        (h.after | 0) <= 0
+          ? { targetP: h.p, targetI: h.i, removed: true }
+          : { targetP: h.p, targetI: h.i, currentPower: h.after | 0 }
+      ));
+    }
+  }
   return out;
 }
 
@@ -236,6 +249,8 @@ function mapEventTypeToVisual(ev) {
     INCENDIAR: "incendiar",
     STRONG_ARM: "strong_arm",
     WINGS: "wings",
+    RAJADA_CONGELANTE_FREEZE: "rajada_congelante",
+    RAJADA_CONGELANTE_DESTROY: "rajada_congelante_destroy",
   };
   const kind = TYPE_KIND[ev.type];
   if (!kind) return null;
@@ -253,7 +268,7 @@ const PARALLEL_FX_KINDS = new Set([
   "incendiar", "land_impact", "card_draw", "combat_telegraph",
   "misseis_magicos", "divine_protection", "cancel_ultimate",
   "blocked_attack", "vinganca", "necromancia", "thunder_discard",
-  "scare_return",
+  "scare_return", "aceleracao", "rajada_congelante", "rajada_congelante_destroy",
 ]);
 
 const BOARD_SERIAL_KINDS = new Set([
@@ -330,6 +345,17 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
           targetI: ev.targetI,
           currentPower: ev.currentPower,
         });
+      }
+    }
+    if (ev.type === "RAIO_DUPLO" && Array.isArray(ev.hits)) {
+      for (const h of ev.hits) {
+        if (!h || h.p == null) continue;
+        if ((h.after | 0) <= 0) {
+          fieldPatches.push({ targetP: h.p, targetI: h.i, removed: true });
+          deferBoardApply = true;
+        } else {
+          fieldPatches.push({ targetP: h.p, targetI: h.i, currentPower: h.after | 0 });
+        }
       }
     }
   }
