@@ -95,7 +95,7 @@ const cardDefs = [
         onDestroy: "explosaoGelo", onEnter: null, composedFace: true },
     { name: "HELA", power: 2, category: "champion", abilityType: "instant",
         abilityName: "Corromper",
-        abilityDesc: "Escolha um campeão aliado. Ele recebe o Status Sem Honra.",
+        abilityDesc: "Escolha um Campeão aliado. Ele ficará corrompido, e o jogador adversário que o destruir, não receberá Ponto de vitória.",
         onDestroy: null, onEnter: "corromper", composedFace: true },
     { name: "TARTARUGA VENENOSA", power: 1, category: "champion", abilityType: "constant",
         abilityName: "Explosão Venenosa",

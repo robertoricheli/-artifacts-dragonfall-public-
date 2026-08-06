@@ -320,14 +320,12 @@ function hasTransformarBichinhoTarget(state, casterIdx) {
     return false;
 }
 function gatherImitableAllies(state, casterIdx, excludeFieldIdx) {
-    const used = state.players[casterIdx]?.onEnterUsedThisTurn || [];
-    const oncePerTurnOnEnter = new Set(["pesadelo", "desacelerar", "maldicaoSeteMares"]);
+    // Manual: Imitar pode repetir qualquer habilidade instantânea já usada neste turno
+    // (inclui Maldição dos Sete Mares, Pesadelo, Desacelerar, Bola de Fogo, etc.).
     return gatherAllyTargets(state, casterIdx, excludeFieldIdx, (c) => {
         if (!(c.onEnter || c.onDestroy || (c.abilityType === "constant" && c.abilityName)))
             return false;
         if (c.onEnter === "imitar" || isImitatorChamp(c) || c.mimico || c.silenced)
-            return false;
-        if (c.onEnter && oncePerTurnOnEnter.has(c.onEnter) && used.includes(c.onEnter))
             return false;
         if (c.onEnter === "pesadelo" && !hasPesadeloTarget(state, casterIdx))
             return false;
