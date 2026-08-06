@@ -1,14 +1,17 @@
 /**
- * Métricas + logs estruturados do multiplayer (Fase 0).
+ * Métricas + logs estruturados do multiplayer (Fase 0 / Fase 1).
  * Janela deslizante ~60s para health/ops.
  */
 const WINDOW_MS = 60_000;
 const actionSamples = [];
 const presentationSamples = [];
+const presentSkewSamples = [];
+const gapFillTimes = [];
 const disconnectTimes = [];
 let rejectCount = 0;
 let actionCount = 0;
 let presentationCount = 0;
+let gapFillTotal = 0;
 
 function pruneSamples(arr, now = Date.now()) {
   while (arr.length && now - arr[0].t > WINDOW_MS) arr.shift();
@@ -59,6 +62,35 @@ export function recordActionLatency(ms, meta = {}) {
   }
 }
 
+/** Skew de apresentação do cliente (match_ping.presentSkewMs). */
+export function recordPresentSkew(ms, meta = {}) {
+  const now = Date.now();
+  const n = Math.max(0, Number(ms) || 0);
+  presentSkewSamples.push({ t: now, ms: n });
+  pruneSamples(presentSkewSamples, now);
+  logMp("present_skew", {
+    room: meta.roomCode || null,
+    seat: meta.seat,
+    seq: meta.seq,
+    skewMs: Math.round(n),
+  });
+}
+
+/** Gap-fill: cliente pediu replay com fromSeq atrás do actionSeq da sala. */
+export function recordGapFill(meta = {}) {
+  const now = Date.now();
+  gapFillTimes.push(now);
+  pruneTimestamps(gapFillTimes, now);
+  gapFillTotal += 1;
+  logMp("gap_fill", {
+    room: meta.roomCode || null,
+    seat: meta.seat,
+    fromSeq: meta.fromSeq != null ? (meta.fromSeq | 0) : null,
+    actionSeq: meta.actionSeq != null ? (meta.actionSeq | 0) : null,
+    gap: meta.gap != null ? (meta.gap | 0) : null,
+  });
+}
+
 export function recordReject(error, meta = {}) {
   rejectCount += 1;
   logMp("reject", {
@@ -91,9 +123,12 @@ export function getActionStats() {
   const now = Date.now();
   pruneSamples(actionSamples, now);
   pruneSamples(presentationSamples, now);
+  pruneSamples(presentSkewSamples, now);
   pruneTimestamps(disconnectTimes, now);
+  pruneTimestamps(gapFillTimes, now);
   const core = percentileStats(actionSamples);
   const pres = percentileStats(presentationSamples);
+  const skew = percentileStats(presentSkewSamples);
   return {
     avgActionMs: core.avg,
     p95ActionMs: core.p95,
@@ -101,7 +136,14 @@ export function getActionStats() {
     avgPresentationMs: pres.avg,
     p95PresentationMs: pres.p95,
     presentations1m: pres.n,
+    avgPresentSkewMs: skew.avg,
+    p95PresentSkewMs: skew.p95,
+    presentSkew1m: skew.n,
+    avgQueueWaitMs: pres.avg,
+    p95QueueWaitMs: pres.p95,
     disconnects1m: disconnectTimes.length,
+    gapFills1m: gapFillTimes.length,
+    gapFillsTotal: gapFillTotal,
     rejectsTotal: rejectCount,
     actionsTotal: actionCount,
     presentationsTotal: presentationCount,

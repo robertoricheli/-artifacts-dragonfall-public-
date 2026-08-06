@@ -65,6 +65,8 @@ import {
 } from "./df-live-rooms.mjs";
 import {
   recordActionLatency,
+  recordPresentSkew,
+  recordGapFill,
   recordReject,
   recordDisconnect,
   getActionStats,
@@ -178,7 +180,16 @@ app.get("/health", (_req, res) => {
     avgPresentationMs: stats.avgPresentationMs,
     p95PresentationMs: stats.p95PresentationMs,
     presentations1m: stats.presentations1m,
+    avgPresentSkewMs: stats.avgPresentSkewMs,
+    p95PresentSkewMs: stats.p95PresentSkewMs,
+    presentSkew1m: stats.presentSkew1m,
+    avgQueueWaitMs: stats.avgQueueWaitMs,
+    p95QueueWaitMs: stats.p95QueueWaitMs,
     disconnects1m: stats.disconnects1m,
+    gapFills1m: stats.gapFills1m,
+    gapFillsTotal: stats.gapFillsTotal,
+    rejectsTotal: stats.rejectsTotal,
+    actionsTotal: stats.actionsTotal,
     actions1m: stats.actions1m,
     redisConfigured: redisConfigured(),
     redisAdapter: isRedisAdapterAttached(),
@@ -591,15 +602,25 @@ io.on("connection", (socket) => {
     const seat = seatForSocket(room, socket.id);
     if (seat === null) return ack?.({ ok: false, error: "NO_SEAT" });
     touchLastSeen(room, seat);
-    // Telemetria opcional do cliente (presentSkew / queueWait).
+    // Telemetria opcional do cliente (presentSkew / queueWait) — separados.
     if (payload && typeof payload === "object") {
-      if (payload.presentSkewMs != null || payload.queueWaitMs != null) {
+      const seatMeta = { roomCode: room.code, seat, seq: room.actionSeq };
+      if (payload.queueWaitMs != null) {
         recordActionLatency(Number(payload.queueWaitMs) || 0, {
-          roomCode: room.code,
-          seat,
+          ...seatMeta,
           type: "PRESENT_TELEMETRY",
-          seq: room.actionSeq,
           ok: true,
+        });
+      }
+      if (payload.presentSkewMs != null) {
+        recordPresentSkew(Number(payload.presentSkewMs) || 0, seatMeta);
+      }
+      if (payload.gapFill === true || payload.gapDetected === true) {
+        recordGapFill({
+          ...seatMeta,
+          fromSeq: payload.fromSeq,
+          actionSeq: room.actionSeq,
+          gap: payload.gapSize,
         });
       }
     }
@@ -925,6 +946,19 @@ io.on("connection", (socket) => {
     const room = getRoom(socketRoom.get(socket.id));
     if (!room) return ack?.({ ok: false, error: "NOT_IN_ROOM" });
     const fromSeq = Number(payload?.fromSeq) || 0;
+    const seat = seatForSocket(room, socket.id);
+    const actionSeq = room.actionSeq | 0;
+    // Gap-fill mid-match (fromSeq>0 atrás do seq) — fromSeq=0 = resume/reconnect, não conta.
+    const isGapFill = fromSeq > 0 && fromSeq < actionSeq;
+    if (isGapFill) {
+      recordGapFill({
+        roomCode: room.code,
+        seat,
+        fromSeq,
+        actionSeq,
+        gap: actionSeq - fromSeq,
+      });
+    }
     const full = buildReplayPayload(room);
     if (!full) return ack?.({ ok: false, error: "NOT_PLAYING" });
     ack?.({
@@ -934,6 +968,7 @@ io.on("connection", (socket) => {
       snapshot: full.snapshot,
       gameState: full.gameState,
       heroIds: full.heroIds,
+      gapFill: isGapFill,
     });
   });
 
