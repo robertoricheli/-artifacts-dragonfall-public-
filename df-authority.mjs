@@ -255,7 +255,8 @@ function mapEventTypeToVisual(ev) {
   };
   const kind = TYPE_KIND[ev.type];
   if (!kind) return null;
-  if (ev.type === "DRAW" && ev.reason !== "upkeep") return null;
+  // Upkeep DRAW: cliente anima via dfOnlinePlayUpkeepDrawFromEvents — sem card_draw no envelope.
+  if (ev.type === "DRAW") return null;
   return normalizeOnEnterVisual({ ...ev, visual: kind });
 }
 
@@ -289,6 +290,27 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
 
   for (const ev of events || []) {
     if (!ev || typeof ev !== "object") continue;
+    // Grito: expandir por aliado (não um fury genérico sem fieldIdx).
+    if (ev.type === "GRITO_DE_GUERRA" && Array.isArray(ev.applied)) {
+      const ownerP = ev.casterIdx ?? ev.ownerP ?? 0;
+      for (const t of ev.applied) {
+        if (t?.p == null || t?.i == null) continue;
+        visuals.push({
+          kind: "fury",
+          ownerP,
+          fieldIdx: t.i,
+          furyStacks: t.furyStacks,
+          fieldPatches: [{
+            targetP: t.p,
+            targetI: t.i,
+            fury: true,
+            furyStacks: t.furyStacks ?? 1,
+          }],
+        });
+        deferBoardApply = true;
+      }
+      continue;
+    }
     if (ev.visual) {
       const n = normalizeOnEnterVisual(ev);
       if (n) visuals.push(n);
