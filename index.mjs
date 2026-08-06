@@ -446,37 +446,68 @@ function clearTurnTimer(room) {
   room.turnDeadline = null;
 }
 
+function emitTurnDeadline(room) {
+  try {
+    emitRoom(room, "turn_deadline", { turnDeadline: room.turnDeadline || null });
+  } catch (e) { /* */ }
+}
+
+/** END_TURN forçado (timer esgotado / disconnect com deadline passado). */
+function forceServerEndTurn(room) {
+  const cp = room.gameState?.currentPlayer;
+  if (cp == null || room.status !== "playing") return false;
+  const result = applyAuthoritativeAction(room, cp, { type: "END_TURN", playerId: cp });
+  if (!result.ok) return false;
+  room.actionSeq += 1;
+  const envelope = {
+    seq: room.actionSeq,
+    fromSeat: cp,
+    action: { type: "END_TURN", playerId: cp },
+    authoritativeState: result.state || null,
+    events: result.events || [],
+    logEntry: result.logEntry || null,
+    forced: true,
+  };
+  if (result.state) room.lastSnapshot = { state: result.state, full: true };
+  resetTurnTimer(room);
+  envelope.turnDeadline = room.turnDeadline || null;
+  emitRoom(room, "remote_action", envelope);
+  broadcastRoomState(room);
+  touchPersist(room);
+  maybeFinishMatch(room, result.state);
+  scheduleServerAi(room, io, {
+    emitEnvelope: emitActionEnvelope,
+    onAfterAction: afterAuthoritativeAction,
+  });
+  return true;
+}
+
 function resetTurnTimer(room) {
   clearTurnTimer(room);
   if (room.status !== "playing" || !room.gameState?.players) return;
   room.turnDeadline = Date.now() + TURN_TIMEOUT_MS;
+  emitTurnDeadline(room);
   room.turnTimer = setTimeout(() => {
-    const cp = room.gameState?.currentPlayer;
-    if (cp == null || room.status !== "playing") return;
-    const result = applyAuthoritativeAction(room, cp, { type: "END_TURN", playerId: cp });
-    if (!result.ok) return;
-    room.actionSeq += 1;
-    const envelope = {
-      seq: room.actionSeq,
-      fromSeat: cp,
-      action: { type: "END_TURN", playerId: cp },
-      authoritativeState: result.state || null,
-      events: result.events || [],
-      logEntry: result.logEntry || null,
-      forced: true,
-    };
-    if (result.state) room.lastSnapshot = { state: result.state, full: true };
-    resetTurnTimer(room);
-    envelope.turnDeadline = room.turnDeadline || null;
-    emitRoom(room, "remote_action", envelope);
-    broadcastRoomState(room);
-    touchPersist(room);
-    maybeFinishMatch(room, result.state);
+    if (room.status !== "playing") return;
+    forceServerEndTurn(room);
+  }, TURN_TIMEOUT_MS);
+}
+
+/** Pós-boot: salas restauradas vêm com turnTimer:null — reativa relógio + IA. */
+function revivePlayingRoomTimers() {
+  for (const room of listPlayingRooms()) {
+    if (room.gameState?.winner != null) continue;
+    const expired = room.turnDeadline && room.turnDeadline <= Date.now();
+    if (expired) {
+      forceServerEndTurn(room);
+    } else {
+      resetTurnTimer(room);
+    }
     scheduleServerAi(room, io, {
       emitEnvelope: emitActionEnvelope,
       onAfterAction: afterAuthoritativeAction,
     });
-  }, TURN_TIMEOUT_MS);
+  }
 }
 
 function replayPayload(room) {
@@ -978,7 +1009,13 @@ io.on("connection", (socket) => {
         emitEnvelope: emitActionEnvelope,
         onAfterAction: afterAuthoritativeAction,
         persist: () => touchPersist(room),
+        onAiTakeover: () => {
+          resetTurnTimer(room);
+          emitTurnDeadline(room);
+        },
       });
+      resetTurnTimer(room);
+      emitTurnDeadline(room);
       touchPersist(room);
       ack?.({ ok: true, abandoned: true });
       return;
@@ -1014,11 +1051,24 @@ io.on("connection", (socket) => {
     });
     emitRoom(room, "peer_disconnected", { seat: info?.seat, canReconnect: room.status === "playing" });
     if (room.status === "playing" && info?.seat != null) {
+      const deadlineExpired = room.turnDeadline && room.turnDeadline <= Date.now();
+      const cp = room.gameState?.currentPlayer;
       markSeatDisconnectedForAi(room, info.seat, io, {
         emitEnvelope: emitActionEnvelope,
         onAfterAction: afterAuthoritativeAction,
         persist: () => touchPersist(room),
+        onAiTakeover: () => {
+          resetTurnTimer(room);
+          emitTurnDeadline(room);
+        },
       });
+      if (deadlineExpired && cp === info.seat) {
+        // Tempo esgotado no assento que caiu: encerra o turno (ou IA assume após grace).
+        forceServerEndTurn(room);
+      } else {
+        resetTurnTimer(room);
+        emitTurnDeadline(room);
+      }
     }
     broadcastRoomState(room);
     touchPersist(room);
@@ -1063,6 +1113,13 @@ try {
   if (n) console.log(`[live-rooms] ${n} sala(s) restaurada(s) do Postgres`);
 } catch (e) {
   console.warn("[live-rooms] restore:", e?.message || e);
+}
+
+// Relógio + IA das salas restauradas (JSON/PG deixam turnTimer:null).
+try {
+  revivePlayingRoomTimers();
+} catch (e) {
+  console.warn("[boot] revive timers:", e?.message || e);
 }
 
 await initRankedMatchmaking(async (entry0, entry1) => {
