@@ -210,6 +210,83 @@ export function validateAction(state, action, ctx = {}) {
             }
             return { ok: true, code: "OK" };
         }
+        case T.TALENT_TARGET: {
+            if (state.currentPlayer !== pid)
+                return { ok: false, code: "NOT_YOUR_TURN" };
+            if (!state.activeTalent)
+                return { ok: false, code: "NO_ACTIVE_TALENT" };
+            return { ok: true, code: "OK" };
+        }
+        case T.UNFREEZE_CONFIRM: {
+            if (state.currentPlayer !== pid)
+                return { ok: false, code: "NOT_YOUR_TURN" };
+            const fIdx = a.fieldIdx;
+            const field = state.players[pid]?.field;
+            const card = field?.[fIdx];
+            if (!card)
+                return { ok: false, code: "NO_TARGET" };
+            if (!card.frozen)
+                return { ok: false, code: "NOT_FROZEN" };
+            const yes = a.yes === true || a.confirmed === true
+                || (a.choiceIndex === 0 && a.yes !== false);
+            if (yes && (state.players[pid].actions | 0) < 1) {
+                return { ok: false, code: "INSUFFICIENT_ACTIONS" };
+            }
+            return { ok: true, code: "OK" };
+        }
+        case T.NECROMANCIA_PICK: {
+            if (state.currentPlayer !== pid)
+                return { ok: false, code: "NOT_YOUR_TURN" };
+            const casterIdx = (a.casterIdx ?? pid);
+            const discard = state.players[casterIdx]?.discard;
+            if (!discard?.length)
+                return { ok: false, code: "NO_DISCARD" };
+            const cardName = a.cardName || a.card?.name;
+            const uid = a.uid || a.card?.uid;
+            let di = a.discardIndex;
+            if (di == null)
+                di = a.discardIdx;
+            if ((di == null || di < 0) && uid) {
+                di = discard.findIndex((c) => c && c.uid === uid);
+            }
+            if ((di == null || di < 0) && cardName) {
+                di = discard.findIndex((c) => c && c.name === cardName);
+            }
+            if (di == null || di < 0 || di >= discard.length)
+                return { ok: false, code: "NECRO_BAD_CARD" };
+            return { ok: true, code: "OK" };
+        }
+        case T.ABILITY_TARGET: {
+            if (state.currentPlayer !== pid)
+                return { ok: false, code: "NOT_YOUR_TURN" };
+            const cIdx = (a.casterIdx ?? pid);
+            const fIdx = a.fieldIdx;
+            if (fIdx == null || fIdx < 0)
+                return { ok: false, code: "BAD_ON_ENTER" };
+            return R.canResolveOnEnter(state, cIdx, fIdx, ctx);
+        }
+        case T.ULTIMATE_TARGET:
+            return validateUltimatePlay(state, { ...a, type: T.ULTIMATE_PLAY });
+        case T.MENU_CHOICE: {
+            if (state.currentPlayer !== pid)
+                return { ok: false, code: "NOT_YOUR_TURN" };
+            const kind = String(a.menuKind || a.menuType || a.abilityKey || "");
+            if (kind === "unfreeze" || kind === "UNFREEZE_CONFIRM") {
+                return validateAction(state, {
+                    ...a,
+                    type: T.UNFREEZE_CONFIRM,
+                    yes: a.choiceIndex === 0 || a.yes === true,
+                }, ctx);
+            }
+            if (kind === "target-player" || a.targetPlayerIdx != null || a.abilityKey) {
+                const cIdx = (a.casterIdx ?? pid);
+                const fIdx = a.fieldIdx;
+                if (fIdx == null || fIdx < 0)
+                    return { ok: false, code: "BAD_MENU" };
+                return R.canResolveOnEnter(state, cIdx, fIdx, ctx);
+            }
+            return { ok: false, code: "BAD_MENU" };
+        }
         default:
             return { ok: true, code: "DELEGATE" };
     }
@@ -814,11 +891,180 @@ export function applyAction(state, action, ctx = {}) {
                 return { ok: false, state, events: ult.events, error: ult.error || "ULTIMATE_FAILED" };
             return { ok: true, state: ult.state, events: ult.events };
         }
+        case T.UNFREEZE_CONFIRM: {
+            const fIdx = a.fieldIdx;
+            const pl = next.players[pid];
+            const field = pl.field;
+            const card = field?.[fIdx];
+            if (!card?.frozen)
+                return { ok: false, state, events: [], error: "NOT_FROZEN" };
+            const yes = a.yes === true || a.confirmed === true
+                || (a.choiceIndex === 0 && a.yes !== false && a.confirmed !== false);
+            if (yes) {
+                if ((pl.actions | 0) < 1) {
+                    return { ok: false, state, events: [], error: "INSUFFICIENT_ACTIONS" };
+                }
+                pl.actions = (pl.actions | 0) - 1;
+                card.frozen = false;
+                card.frozenTurns = 0;
+                events.push({
+                    type: "STATUS_SET",
+                    targetP: pid,
+                    targetI: fIdx,
+                    flags: { frozen: false, frozenTurns: 0 },
+                });
+                events.push({
+                    type: "UNFREEZE",
+                    playerId: pid,
+                    fieldIdx: fIdx,
+                    visual: "unfreeze",
+                });
+            }
+            break;
+        }
+        case T.NECROMANCIA_PICK: {
+            const casterIdx = (a.casterIdx ?? pid);
+            const owner = next.players[casterIdx];
+            const discard = owner.discard || [];
+            let di = a.discardIndex;
+            if (di == null)
+                di = a.discardIdx;
+            const cardObj = a.card;
+            const wantUid = a.uid || cardObj?.uid;
+            const wantName = a.cardName || cardObj?.name;
+            if ((di == null || di < 0) && wantUid) {
+                di = discard.findIndex((c) => c && c.uid === wantUid);
+            }
+            if ((di == null || di < 0) && wantName) {
+                di = discard.findIndex((c) => c && c.name === wantName);
+            }
+            if (di == null || di < 0 || di >= discard.length) {
+                return { ok: false, state, events: [], error: "NECRO_BAD_CARD" };
+            }
+            const raw = discard.splice(di, 1)[0];
+            owner.discard = discard;
+            const handCard = { ...(cardObj && typeof cardObj === "object" ? cardObj : raw) };
+            // Sanitiza statuses (paridade com resolveNecromanciaChoice no cliente).
+            handCard.frozen = false;
+            handCard.frozenTurns = 0;
+            handCard.tapped = false;
+            handCard.shielded = false;
+            handCard.shieldedTurns = 0;
+            handCard.freeAttack = false;
+            handCard.silenced = false;
+            handCard.poisoned = false;
+            handCard.poisonTurns = 0;
+            handCard.pulled = false;
+            handCard.fury = false;
+            handCard.furyStacks = 0;
+            handCard.barrier = false;
+            handCard.fireAura = false;
+            handCard.burning = false;
+            handCard.vulnerable = false;
+            handCard.corruptedNoHonor = false;
+            delete handCard._summoning;
+            const hand = owner.hand || [];
+            hand.push(handCard);
+            owner.hand = hand;
+            const ER = getEffects();
+            if (typeof ER?.markOnEnterUsed === "function" && a.fieldIdx != null) {
+                try {
+                    ER.markOnEnterUsed(next, casterIdx, "necromancia");
+                }
+                catch (e) { /* */ }
+            }
+            events.push({
+                type: "NECROMANCIA",
+                casterIdx,
+                card: handCard.name,
+                visual: "necromancia",
+            });
+            break;
+        }
+        case T.ABILITY_TARGET: {
+            const ER = getEffects();
+            if (!ER?.applyOnEnter)
+                return { ok: false, state, events: [], error: "NO_RESOLVE" };
+            const cIdx = (a.casterIdx ?? pid);
+            const fIdx = a.fieldIdx;
+            const resolution = {
+                ...(a.resolution && typeof a.resolution === "object"
+                    ? a.resolution
+                    : {}),
+                rng: ctx.rng || Math.random,
+            };
+            if (a.targetP != null)
+                resolution.targetP = a.targetP;
+            if (a.targetI != null)
+                resolution.targetI = a.targetI;
+            if (a.targetPlayerIdx != null)
+                resolution.targetPlayerIdx = a.targetPlayerIdx;
+            if (a.success != null)
+                resolution.success = a.success;
+            if (a.necromanciaCard)
+                resolution.necromanciaCard = a.necromanciaCard;
+            const abilityKey = String(a.abilityKey || "");
+            if (["fortalecer", "devorar", "imitar", "ursificacao", "corromper"].includes(abilityKey)
+                && resolution.targetI != null) {
+                delete resolution.targetP;
+            }
+            const res = ER.applyOnEnter(next, cIdx, fIdx, resolution);
+            if (!res.ok) {
+                return { ok: false, state, events: res.events || [], error: res.error || "ABILITY_TARGET_FAILED" };
+            }
+            events.push(...(res.events || []));
+            break;
+        }
+        case T.ULTIMATE_TARGET: {
+            const ult = applyUltimatePlay(next, { ...a, type: T.ULTIMATE_PLAY, playerId: pid }, ctx.rng || Math.random);
+            if (!ult.ok)
+                return { ok: false, state, events: ult.events, error: ult.error || "ULTIMATE_FAILED" };
+            return { ok: true, state: ult.state, events: ult.events };
+        }
+        case T.MENU_CHOICE: {
+            const kind = String(a.menuKind || a.menuType || a.abilityKey || "");
+            if (kind === "unfreeze" || kind === "UNFREEZE_CONFIRM") {
+                const yes = a.choiceIndex === 0 || a.yes === true || a.confirmed === true;
+                const inner = applyAction(state, {
+                    ...a,
+                    type: T.UNFREEZE_CONFIRM,
+                    yes,
+                    fieldIdx: a.fieldIdx,
+                    playerId: pid,
+                }, ctx);
+                return inner;
+            }
+            if (kind === "target-player" || a.targetPlayerIdx != null || a.abilityKey) {
+                const ER = getEffects();
+                if (!ER?.applyOnEnter)
+                    return { ok: false, state, events: [], error: "NO_RESOLVE" };
+                const cIdx = (a.casterIdx ?? pid);
+                const fIdx = a.fieldIdx;
+                const targets = a.targets;
+                let targetPlayerIdx = a.targetPlayerIdx;
+                if (targetPlayerIdx == null && Array.isArray(targets) && a.choiceIndex != null) {
+                    targetPlayerIdx = targets[a.choiceIndex]?.p;
+                }
+                if (targetPlayerIdx == null && a.choiceIndex != null) {
+                    // Fallback: oponente do caster.
+                    targetPlayerIdx = 1 - cIdx;
+                }
+                const res = ER.applyOnEnter(next, cIdx, fIdx, {
+                    targetPlayerIdx,
+                    rng: ctx.rng || Math.random,
+                });
+                if (!res.ok) {
+                    return { ok: false, state, events: res.events || [], error: res.error || "MENU_CHOICE_FAILED" };
+                }
+                events.push(...(res.events || []));
+                break;
+            }
+            return { ok: false, state, events: [], error: "BAD_MENU" };
+        }
         default: {
             const uiOnly = new Set([
                 T.PLAY_VISUAL,
                 T.PRESENT,
-                T.MENU_CHOICE,
                 T.OPEN_DISCARD,
                 T.ATTACK_START,
                 T.ATTACK_PICK_ATTACKER,
@@ -827,9 +1073,7 @@ export function applyAction(state, action, ctx = {}) {
                 T.REACTIVE_PROTECTION_QUERY,
                 T.REACTIVE_CANCEL_QUERY,
                 T.ABILITY_START,
-                T.ABILITY_TARGET,
                 T.ULTIMATE_START,
-                T.ULTIMATE_TARGET,
                 T.SYNC_STATE,
                 T.LOBBY_CREATE,
                 T.LOBBY_JOIN,
@@ -837,11 +1081,7 @@ export function applyAction(state, action, ctx = {}) {
                 T.SETUP_WIN_POINTS,
                 T.MATCH_START,
                 T.RESTART_MATCH,
-                T.UNFREEZE_CONFIRM,
-                T.MENU_CHOICE,
-                T.NECROMANCIA_PICK,
             ]);
-            // TALENT_TARGET sai de CLIENT_ONLY — tratado no case acima.
             if (uiOnly.has(a.type)) {
                 return { ok: true, state: next, events: [{ type: "CLIENT_ONLY", actionType: a.type }] };
             }

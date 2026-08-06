@@ -11,6 +11,22 @@ import {
   validateSnapshotUpdate,
 } from "./df-snapshot-guard.mjs";
 
+/**
+ * Escape de emergência: DF_FORCE_SNAPSHOT_FALLBACK=1 mantém estes tipos em
+ * DELEGATED_TYPES (snapshot validado) em vez de AUTHORITATIVE_TYPES.
+ */
+const FORCE_SNAPSHOT_FALLBACK = String(process.env.DF_FORCE_SNAPSHOT_FALLBACK || "") === "1";
+
+/** Tipos promovidos na Fase 2 (motor aplica de verdade). */
+export const PHASE2_AUTHORITATIVE_TYPES = Object.freeze([
+  "ABILITY_TARGET",
+  "ULTIMATE_TARGET",
+  "MENU_CHOICE",
+  "NECROMANCIA_PICK",
+  "UNFREEZE_CONFIRM",
+  "TALENT_TARGET",
+]);
+
 /** Tipos aplicados no servidor — espelha DfEngine.applyAction (motor TS). */
 export const AUTHORITATIVE_TYPES = new Set([
   "SUMMON",
@@ -26,6 +42,7 @@ export const AUTHORITATIVE_TYPES = new Set([
   "ULTIMATE_PLAY",
   "SURRENDER",
   "FIELD_COMMIT",
+  ...(FORCE_SNAPSHOT_FALLBACK ? [] : PHASE2_AUTHORITATIVE_TYPES),
 ]);
 
 /** Tipos só-UI — não alteram estado no servidor. */
@@ -43,16 +60,14 @@ export const UI_ONLY_TYPES = new Set([
   "OPEN_DISCARD",
 ]);
 
-/** Tipos delegados — tenta motor; snapshot só se CLIENT_ONLY / NOT_IMPLEMENTED. */
+/**
+ * Tipos delegados — tenta motor; snapshot só se CLIENT_ONLY / NOT_IMPLEMENTED.
+ * SYNC_STATE é cosmético (caminho especial). Com DF_FORCE_SNAPSHOT_FALLBACK=1,
+ * a Fase 2 volta a este conjunto.
+ */
 export const DELEGATED_TYPES = new Set([
-  "ABILITY_TARGET",
-  "ULTIMATE_TARGET",
-  "MENU_CHOICE",
-  "NECROMANCIA_PICK",
-  "UNFREEZE_CONFIRM",
   "SYNC_STATE",
-  // Motor aplica os talentos conhecidos; demais ainda usam snapshot validado.
-  "TALENT_TARGET",
+  ...(FORCE_SNAPSHOT_FALLBACK ? PHASE2_AUTHORITATIVE_TYPES : []),
 ]);
 
 let engine = null;
@@ -505,7 +520,14 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
   }
 
   // Delegados: motor real → senão snapshot validado (nunca ACK vazio).
+  // DF_FORCE_SNAPSHOT_FALLBACK=1: ignora motor e exige snapshot (escape Fase 2).
   if (DELEGATED_TYPES.has(shaped.type)) {
+    if (FORCE_SNAPSHOT_FALLBACK && shaped.type !== "SYNC_STATE") {
+      if (!snapshot) {
+        return { ok: false, error: "SNAPSHOT_REQUIRED" };
+      }
+      return mergeValidatedSnapshot(room, seat, shaped, snapshot);
+    }
     try {
       const applied = DfEngine.applyAction(DfEngine.cloneState(state), shaped, {
         rng: roomActionRng(room, seat),
