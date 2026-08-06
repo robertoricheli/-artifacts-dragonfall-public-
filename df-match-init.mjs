@@ -115,5 +115,11 @@ export function createInitialMatchState(opts) {
     }
   }
 
+  // Saque livre do 1º turno do jogador que começa (sem banner de PV no cliente).
+  const { DfRules } = bootDragonfallEngine();
+  if (DfRules?.runTurnMaintenance) {
+    DfRules.runTurnMaintenance(state, firstPlayer);
+  }
+
   return state;
 }

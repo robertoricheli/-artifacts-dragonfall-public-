@@ -270,7 +270,7 @@ const PARALLEL_FX_KINDS = new Set([
   "misseis_magicos", "divine_protection", "cancel_ultimate",
   "blocked_attack", "vinganca", "necromancia", "thunder_discard",
   "scare_return", "aceleracao", "rajada_congelante", "rajada_congelante_destroy",
-  "corrupt",
+  "corrupt", "legado",
 ]);
 
 const BOARD_SERIAL_KINDS = new Set([
