@@ -349,6 +349,14 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
         });
       }
     }
+    if (ev.type === "POWER_CHANGED" && ev.targetP != null && ev.targetI != null
+        && ev.currentPower != null) {
+      fieldPatches.push({
+        targetP: ev.targetP,
+        targetI: ev.targetI,
+        currentPower: ev.currentPower | 0,
+      });
+    }
     if (ev.type === "RAIO_DUPLO" && Array.isArray(ev.hits)) {
       for (const h of ev.hits) {
         if (!h || h.p == null) continue;

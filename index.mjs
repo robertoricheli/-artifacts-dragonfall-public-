@@ -471,7 +471,7 @@ function forceServerEndTurn(room) {
   if (result.state) room.lastSnapshot = { state: result.state, full: true };
   resetTurnTimer(room);
   envelope.turnDeadline = room.turnDeadline || null;
-  emitRoom(room, "remote_action", envelope);
+  emitActionEnvelope(room, envelope);
   broadcastRoomState(room);
   touchPersist(room);
   maybeFinishMatch(room, result.state);

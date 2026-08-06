@@ -863,13 +863,27 @@ function applyWallBonusOnTurnEnd(state, endingPIdx) {
  */
 function applyMaintenanceCounters(state, pIdx) {
     const p = state.players[pIdx];
+    const powerChanges = [];
     if (!p)
-        return;
-    (p.field || []).forEach((c) => {
-        if (isCrescimentoDragon(c))
+        return powerChanges;
+    (p.field || []).forEach((c, i) => {
+        let gained = 0;
+        if (isCrescimentoDragon(c)) {
             c.currentPower = (c.currentPower ?? 0) + 1;
-        if (c.foreverGrowth && !c.silenced)
+            gained += 1;
+        }
+        if (c.foreverGrowth && !c.silenced) {
             c.currentPower = (c.currentPower ?? 0) + 1;
+            gained += 1;
+        }
+        if (gained > 0) {
+            powerChanges.push({
+                targetP: pIdx,
+                targetI: i,
+                currentPower: c.currentPower | 0,
+                reason: isCrescimentoDragon(c) ? "crescimento" : "foreverGrowth",
+            });
+        }
         // Congelado / Barreira / Aura / Proteção / tiroDuplo: só em
         // applyTurnStartStatusTicks — evita tick duplo na manutenção.
     });
@@ -897,6 +911,7 @@ function applyMaintenanceCounters(state, pIdx) {
         }
         p.guerraActive = false;
     }
+    return powerChanges;
 }
 /**
  * Em Chamas (Incendiar): após a manutenção do dono, -1 Poder por rodada (4 no total).
@@ -1081,7 +1096,7 @@ function returnPulledChampions(state, pIdx) {
  */
 function runTurnMaintenance(state, pIdx, limits = LIMITS) {
     const status = applyTurnStartStatusTicks(state, pIdx);
-    applyMaintenanceCounters(state, pIdx);
+    const powerChanges = applyMaintenanceCounters(state, pIdx) || [];
     const plan = computeMaintenancePlan(state, pIdx);
     const poisonDestroyed = [];
     let poisonVpGain = 0;
@@ -1112,6 +1127,7 @@ function runTurnMaintenance(state, pIdx, limits = LIMITS) {
         passiveVpGain: plan.passiveVpGain,
         poisonVpGain,
         skipDraw,
+        powerChanges,
     };
 }
 /** Lista reativas oferecíveis para defOwner contra attOwner. */

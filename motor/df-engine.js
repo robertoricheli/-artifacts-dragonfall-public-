@@ -407,6 +407,19 @@ export function applyAction(state, action, ctx = {}) {
             maint.poisonDestroyed.forEach((k) => {
                 events.push({ type: "POISON_KILL", ...k, by: nextPid });
             });
+            if (Array.isArray(maint.powerChanges)) {
+                for (const ch of maint.powerChanges) {
+                    if (ch?.targetP == null || ch?.targetI == null)
+                        continue;
+                    events.push({
+                        type: "POWER_CHANGED",
+                        targetP: ch.targetP,
+                        targetI: ch.targetI,
+                        currentPower: ch.currentPower | 0,
+                        reason: ch.reason || "crescimento",
+                    });
+                }
+            }
             if (maint.passiveVpGain > 0) {
                 events.push({ type: "VP_GAIN", playerId: nextPid, amount: maint.passiveVpGain, reason: "maintenance" });
             }
