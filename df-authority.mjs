@@ -250,11 +250,14 @@ function mapEventTypeToVisual(ev) {
     REACTIVE_USED: null,
     SCARE_RETURN: "scare_return",
     TOKEN_INSERT: "dragon_token_summon",
+    DRAGON_TOKEN_SUMMON: "dragon_token_summon",
     DESTROY: "destroy",
     POWER_REDUCED: null,
     STATUS_SET: null,
+    COMBAT: "combat",
     COMBAT_RESOLVED: "combat",
     ATTACK_RESOLVED: "combat",
+    COMBAT_BLOCKED: "blocked_attack",
     DEVOUR: "devour",
     ASSASSINAR: "assassinar",
     TROCA_INJUSTA: "troca_injusta",
@@ -267,12 +270,35 @@ function mapEventTypeToVisual(ev) {
     RAJADA_CONGELANTE_FREEZE: "rajada_congelante",
     RAJADA_CONGELANTE_DESTROY: "rajada_congelante_destroy",
     CORROMPER: "corrupt",
+    LEGADO: "legado",
   };
   const kind = TYPE_KIND[ev.type];
   if (!kind) return null;
   // Upkeep DRAW: cliente anima via dfOnlinePlayUpkeepDrawFromEvents — sem card_draw no envelope.
   if (ev.type === "DRAW") return null;
-  return normalizeOnEnterVisual({ ...ev, visual: kind });
+  const out = normalizeOnEnterVisual({ ...ev, visual: kind });
+  if (!out) return null;
+  // Combate: peer espera attOwner/attIdx/defOwner/defIdx (+ kills).
+  if (kind === "combat" || kind === "blocked_attack") {
+    if (ev.attacker) {
+      if (out.attOwner == null) out.attOwner = ev.attacker.p;
+      if (out.attIdx == null) out.attIdx = ev.attacker.i;
+    }
+    if (ev.defender) {
+      if (out.defOwner == null) out.defOwner = ev.defender.p;
+      if (out.defIdx == null) out.defIdx = ev.defender.i;
+    }
+    if (ev.outcome) {
+      out.killA = !!ev.outcome.killA;
+      out.killD = !!ev.outcome.killD;
+    }
+  }
+  // Token dragão: ownerP + insertIdx para land no peer.
+  if (kind === "dragon_token_summon") {
+    if (out.ownerP == null && out.casterIdx != null) out.ownerP = out.casterIdx;
+    if (out.fieldIdx == null && out.insertIdx != null) out.fieldIdx = out.insertIdx;
+  }
+  return out;
 }
 
 /** Kinds que podem rodar em paralelo no peer (FX). */
@@ -328,10 +354,40 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
     }
     if (ev.visual) {
       const n = normalizeOnEnterVisual(ev);
-      if (n) visuals.push(n);
+      if (n) {
+        // Combate com visual inline (sem TYPE_KIND) — enriquecer alvos.
+        if ((n.kind === "combat" || n.kind === "blocked_attack") && ev.attacker) {
+          if (n.attOwner == null) n.attOwner = ev.attacker.p;
+          if (n.attIdx == null) n.attIdx = ev.attacker.i;
+        }
+        if ((n.kind === "combat" || n.kind === "blocked_attack") && ev.defender) {
+          if (n.defOwner == null) n.defOwner = ev.defender.p;
+          if (n.defIdx == null) n.defIdx = ev.defender.i;
+        }
+        if (n.kind === "combat" && ev.outcome) {
+          n.killA = !!ev.outcome.killA;
+          n.killD = !!ev.outcome.killD;
+        }
+        if (n.kind === "dragon_token_summon") {
+          if (n.ownerP == null && n.casterIdx != null) n.ownerP = n.casterIdx;
+          if (n.fieldIdx == null && n.insertIdx != null) n.fieldIdx = n.insertIdx;
+        }
+        visuals.push(n);
+        if (n.kind === "combat" || n.kind === "destroy" || n.kind === "dragon_token_summon"
+            || n.kind === "blocked_attack" || n.killA || n.killD) {
+          deferBoardApply = true;
+        }
+      }
     } else if (ev.type) {
       const mapped = mapEventTypeToVisual(ev);
-      if (mapped) visuals.push(mapped);
+      if (mapped) {
+        visuals.push(mapped);
+        if (mapped.kind === "combat" || mapped.kind === "destroy"
+            || mapped.kind === "dragon_token_summon" || mapped.kind === "blocked_attack"
+            || mapped.killA || mapped.killD) {
+          deferBoardApply = true;
+        }
+      }
     }
     if (ev.type === "STATUS_SET" && ev.targetP != null && ev.targetI != null) {
       fieldPatches.push({
