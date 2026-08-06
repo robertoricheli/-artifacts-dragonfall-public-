@@ -3,6 +3,7 @@
  * Usa DfEngine.listLegalActions + política simples (Difícil-lite).
  */
 import { applyAuthoritativeAction } from "./df-authority.mjs";
+import { withRoomLock, mirrorRoomNow } from "./df-room-store.mjs";
 import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
 
 const AI_GRACE_MS = 8000;
@@ -85,66 +86,70 @@ export function scheduleServerAi(room, io, hooks) {
   let steps = 0;
   const tick = () => {
     room.aiStepTimer = null;
-    if (room.status !== "playing" || room.gameState?.winner != null) return;
-    const seat = room.gameState?.currentPlayer;
-    if (seat !== 0 && seat !== 1) return;
-    if (!room.aiControlled[seat]) return;
+    void withRoomLock(room.code, async () => {
+      if (room.status !== "playing" || room.gameState?.winner != null) return;
+      const seat = room.gameState?.currentPlayer;
+      if (seat !== 0 && seat !== 1) return;
+      if (!room.aiControlled[seat]) return;
 
-    const action = pickAiAction(room.gameState, seat);
-    const result = applyAuthoritativeAction(room, seat, action, null);
-    if (!result.ok) {
-      const end = applyAuthoritativeAction(room, seat, { type: "END_TURN", playerId: seat }, null);
-      if (!end.ok) return;
+      const action = pickAiAction(room.gameState, seat);
+      const result = applyAuthoritativeAction(room, seat, action, null);
+      if (!result.ok) {
+        const end = applyAuthoritativeAction(room, seat, { type: "END_TURN", playerId: seat }, null);
+        if (!end.ok) return;
+        room.actionSeq += 1;
+        const envelope = {
+          seq: room.actionSeq,
+          fromSeat: seat,
+          action: { type: "END_TURN", playerId: seat },
+          authoritativeState: end.state || null,
+          events: end.events || [],
+          serverAi: true,
+        };
+        if (end.state) room.lastSnapshot = { state: end.state, full: true };
+        await mirrorRoomNow(room);
+        hooks.emitEnvelope(room, envelope);
+        hooks.onAfterAction(room, end.state);
+        return;
+      }
+
       room.actionSeq += 1;
       const envelope = {
         seq: room.actionSeq,
         fromSeat: seat,
-        action: { type: "END_TURN", playerId: seat },
-        authoritativeState: end.state || null,
-        events: end.events || [],
+        action,
+        authoritativeState: result.state || null,
+        events: result.events || [],
         serverAi: true,
       };
-      if (end.state) room.lastSnapshot = { state: end.state, full: true };
+      if (result.state) room.lastSnapshot = { state: result.state, full: true };
+      await mirrorRoomNow(room);
       hooks.emitEnvelope(room, envelope);
-      hooks.onAfterAction(room, end.state);
-      return;
-    }
+      hooks.onAfterAction(room, result.state);
 
-    room.actionSeq += 1;
-    const envelope = {
-      seq: room.actionSeq,
-      fromSeat: seat,
-      action,
-      authoritativeState: result.state || null,
-      events: result.events || [],
-      serverAi: true,
-    };
-    if (result.state) room.lastSnapshot = { state: result.state, full: true };
-    hooks.emitEnvelope(room, envelope);
-    hooks.onAfterAction(room, result.state);
+      steps += 1;
+      const stillAiTurn =
+        room.status === "playing"
+        && room.gameState?.winner == null
+        && room.gameState?.currentPlayer === seat
+        && room.aiControlled[seat]
+        && action.type !== "END_TURN"
+        && steps < AI_MAX_STEPS_PER_TURN;
 
-    steps += 1;
-    const stillAiTurn =
-      room.status === "playing"
-      && room.gameState?.winner == null
-      && room.gameState?.currentPlayer === seat
-      && room.aiControlled[seat]
-      && action.type !== "END_TURN"
-      && steps < AI_MAX_STEPS_PER_TURN;
-
-    if (stillAiTurn) {
-      // Cede o event loop antes do próximo passo (não bloqueia Socket.IO).
-      const delay = Math.max(AI_STEP_MS, AI_TICK_BUDGET_MS);
-      room.aiStepTimer = setTimeout(() => {
-        setImmediate(tick);
-      }, delay);
-    } else if (
-      room.status === "playing"
-      && room.gameState?.winner == null
-      && room.aiControlled[room.gameState?.currentPlayer]
-    ) {
-      room.aiStepTimer = setTimeout(() => setImmediate(tick), AI_STEP_MS);
-    }
+      if (stillAiTurn) {
+        // Cede o event loop antes do próximo passo (não bloqueia Socket.IO).
+        const delay = Math.max(AI_STEP_MS, AI_TICK_BUDGET_MS);
+        room.aiStepTimer = setTimeout(() => {
+          setImmediate(tick);
+        }, delay);
+      } else if (
+        room.status === "playing"
+        && room.gameState?.winner == null
+        && room.aiControlled[room.gameState?.currentPlayer]
+      ) {
+        room.aiStepTimer = setTimeout(() => setImmediate(tick), AI_STEP_MS);
+      }
+    }).catch((e) => console.warn("[server-ai] lock", e?.message || e));
   };
 
   room.aiStepTimer = setTimeout(() => setImmediate(tick), AI_STEP_MS);

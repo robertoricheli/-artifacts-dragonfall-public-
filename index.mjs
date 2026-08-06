@@ -80,6 +80,14 @@ import {
   attachSocketRedisAdapter,
   isRedisAdapterAttached,
 } from "./df-socket-redis.mjs";
+import {
+  initRoomStore,
+  hydrateRoomsFromRedis,
+  withRoomLock,
+  mirrorRoomNow,
+  scheduleRoomMirror,
+  roomStoreHealth,
+} from "./df-room-store.mjs";
 import { createRateLimiter } from "./rate-limit.mjs";
 import { readGameVersion } from "./df-game-version.mjs";
 import { createInitialMatchState } from "./df-match-init.mjs";
@@ -130,9 +138,14 @@ function touchPersist(room = null) {
   if (!isPostgresEnabled()) {
     schedulePersistRooms(listPlayingRooms);
   }
-  if (room) scheduleLiveRoomPersist(room);
-  else {
-    for (const r of listPlayingRooms()) scheduleLiveRoomPersist(r);
+  if (room) {
+    scheduleLiveRoomPersist(room);
+    scheduleRoomMirror(room);
+  } else {
+    for (const r of listPlayingRooms()) {
+      scheduleLiveRoomPersist(r);
+      scheduleRoomMirror(r);
+    }
   }
 }
 
@@ -193,6 +206,7 @@ app.get("/health", (_req, res) => {
     actions1m: stats.actions1m,
     redisConfigured: redisConfigured(),
     redisAdapter: isRedisAdapterAttached(),
+    ...roomStoreHealth(),
   };
   res.status(motor.motorOk ? 200 : 503).json(body);
 });
@@ -465,31 +479,35 @@ function emitTurnDeadline(room) {
 
 /** END_TURN forçado (timer esgotado / disconnect com deadline passado). */
 function forceServerEndTurn(room) {
-  const cp = room.gameState?.currentPlayer;
-  if (cp == null || room.status !== "playing") return false;
-  const result = applyAuthoritativeAction(room, cp, { type: "END_TURN", playerId: cp });
-  if (!result.ok) return false;
-  room.actionSeq += 1;
-  const envelope = {
-    seq: room.actionSeq,
-    fromSeat: cp,
-    action: { type: "END_TURN", playerId: cp },
-    authoritativeState: result.state || null,
-    events: result.events || [],
-    logEntry: result.logEntry || null,
-    forced: true,
-  };
-  if (result.state) room.lastSnapshot = { state: result.state, full: true };
-  resetTurnTimer(room);
-  envelope.turnDeadline = room.turnDeadline || null;
-  emitActionEnvelope(room, envelope);
-  broadcastRoomState(room);
-  touchPersist(room);
-  maybeFinishMatch(room, result.state);
-  scheduleServerAi(room, io, {
-    emitEnvelope: emitActionEnvelope,
-    onAfterAction: afterAuthoritativeAction,
-  });
+  void withRoomLock(room.code, async () => {
+    const cp = room.gameState?.currentPlayer;
+    if (cp == null || room.status !== "playing") return;
+    const result = applyAuthoritativeAction(room, cp, { type: "END_TURN", playerId: cp });
+    if (!result.ok) return;
+    room.actionSeq += 1;
+    const envelope = {
+      seq: room.actionSeq,
+      fromSeat: cp,
+      action: { type: "END_TURN", playerId: cp },
+      authoritativeState: result.state || null,
+      events: result.events || [],
+      logEntry: result.logEntry || null,
+      forced: true,
+    };
+    if (result.state) room.lastSnapshot = { state: result.state, full: true };
+    resetTurnTimer(room);
+    envelope.turnDeadline = room.turnDeadline || null;
+    emitActionEnvelope(room, envelope);
+    await mirrorRoomNow(room);
+    touchPersist(room);
+    maybeFinishMatch(room, result.state);
+    if (room.status === "playing" && result.state?.winner == null) {
+      scheduleServerAi(room, io, {
+        emitEnvelope: emitActionEnvelope,
+        onAfterAction: afterAuthoritativeAction,
+      });
+    }
+  }).catch((e) => console.warn("[forceEndTurn]", e?.message || e));
   return true;
 }
 
@@ -794,6 +812,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("game_action", (payload, ack) => {
+    void (async () => {
     const t0 = Date.now();
     const actionType = payload?.action?.type || payload?.type;
     const skipRate =
@@ -813,131 +832,151 @@ io.on("connection", (socket) => {
     const schema = validateGameAction(payload);
     if (!schema.ok) return ack?.({ ok: false, error: schema.error });
 
-    const room = getRoom(socketRoom.get(socket.id));
-    if (!room) return ack?.({ ok: false, error: "NOT_IN_ROOM" });
-    if (room.status !== "playing") return ack?.({ ok: false, error: "NOT_PLAYING" });
-    const seat = seatForSocket(room, socket.id);
-    if (seat === null) return ack?.({ ok: false, error: "NO_SEAT" });
-    touchLastSeen(room, seat);
+    const roomCode = socketRoom.get(socket.id);
+    const roomProbe = getRoom(roomCode);
+    if (!roomProbe) return ack?.({ ok: false, error: "NOT_IN_ROOM" });
+    if (roomProbe.status !== "playing") return ack?.({ ok: false, error: "NOT_PLAYING" });
+    if (seatForSocket(roomProbe, socket.id) === null) return ack?.({ ok: false, error: "NO_SEAT" });
 
-    const action = schema.action;
-    if (action.playerId !== undefined && action.playerId !== seat) {
-      return ack?.({ ok: false, error: "WRONG_PLAYER" });
-    }
-    action.playerId = seat;
+    try {
+      await withRoomLock(roomProbe.code, async () => {
+        const room = getRoom(roomCode);
+        if (!room) return ack?.({ ok: false, error: "NOT_IN_ROOM" });
+        if (room.status !== "playing") return ack?.({ ok: false, error: "NOT_PLAYING" });
+        const seat = seatForSocket(room, socket.id);
+        if (seat === null) return ack?.({ ok: false, error: "NO_SEAT" });
+        touchLastSeen(room, seat);
 
-    // Idempotência: cliente pode reenviar o mesmo clientActionId após ACK_TIMEOUT.
-    const clientActionId = payload?.clientActionId != null
-      ? String(payload.clientActionId)
-      : (action.clientActionId != null ? String(action.clientActionId) : null);
-    if (clientActionId) {
-      if (!room._ackedClientActions) room._ackedClientActions = new Map();
-      const prevAck = room._ackedClientActions.get(`${seat}:${clientActionId}`);
-      if (prevAck) {
-        return ack?.(prevAck);
-      }
-    }
+        const action = schema.action;
+        if (action.playerId !== undefined && action.playerId !== seat) {
+          return ack?.({ ok: false, error: "WRONG_PLAYER" });
+        }
+        action.playerId = seat;
 
-    const result = applyAuthoritativeAction(room, seat, action, payload?.snapshot || null);
-    if (!result.ok) {
-      const auth = room.gameState?.players?.length ? room.gameState : null;
-      recordReject(result.error || "ILLEGAL_ACTION", {
-        roomCode: room.code,
-        seat,
-        type: action.type,
-      });
-      recordActionLatency(Date.now() - t0, {
-        roomCode: room.code,
-        seat,
-        type: action.type,
-        ok: false,
-        error: result.error,
-      });
-      return ack?.({
-        ok: false,
-        error: result.error || "ILLEGAL_ACTION",
-        authoritativeState: auth,
-      });
-    }
-
-    room.actionSeq += 1;
-    // Delta: peer recebe authoritativeState; snapshot do cliente só em anim/UI.
-    // ATTACK_RESOLVE: nunca retransmitir snapshot pré-combate (clobber / revive).
-    const sendClientSnap = (action.type === "PLAY_VISUAL" || !!action.anim)
-        && action.type !== "ATTACK_RESOLVE";
-    const envelope = {
-      seq: room.actionSeq,
-      fromSeat: seat,
-      action,
-      snapshot: sendClientSnap ? (payload?.snapshot || null) : null,
-      authoritativeState: (result.omitAuthoritativeState || (result.skip && result.uiOnly))
-        ? null
-        : (result.state || room.gameState || null),
-      events: result.events || [],
-      logEntry: result.logEntry || null,
-      delegated: !!result.delegated,
-      skip: !!result.skip,
-      forfeit: action.type === "SURRENDER",
-      presentation: result.presentation || null,
-      presentationEnvelope: result.presentationEnvelope || null,
-    };
-    if (result.state && !result.skip) {
-      room.lastSnapshot = { state: result.state, full: true };
-    }
-
-    // Relógio do turno: ambos os clientes sincronizam a partir do deadline.
-    resetTurnTimer(room);
-    envelope.turnDeadline = room.turnDeadline || null;
-
-    for (let s = 0; s < 2; s++) {
-      const sid = room.sockets[s];
-      if (!sid || sid === socket.id) continue;
-      const peerEnv = envelope.authoritativeState
-        ? {
-            ...envelope,
-            authoritativeState: projectStateForSeat(envelope.authoritativeState, s),
+        // Idempotência: cliente pode reenviar o mesmo clientActionId após ACK_TIMEOUT.
+        const clientActionId = payload?.clientActionId != null
+          ? String(payload.clientActionId)
+          : (action.clientActionId != null ? String(action.clientActionId) : null);
+        if (clientActionId) {
+          if (!room._ackedClientActions) room._ackedClientActions = new Map();
+          const prevAck = room._ackedClientActions.get(`${seat}:${clientActionId}`);
+          if (prevAck) {
+            return ack?.(prevAck);
           }
-        : envelope;
-      io.to(sid).emit("remote_action", peerEnv);
-    }
+        }
 
-    touchPersist(room);
-    maybeFinishMatch(room, result.state);
-    scheduleServerAi(room, io, {
-      emitEnvelope: emitActionEnvelope,
-      onAfterAction: afterAuthoritativeAction,
-    });
+        const result = applyAuthoritativeAction(room, seat, action, payload?.snapshot || null);
+        if (!result.ok) {
+          const auth = room.gameState?.players?.length ? room.gameState : null;
+          recordReject(result.error || "ILLEGAL_ACTION", {
+            roomCode: room.code,
+            seat,
+            type: action.type,
+          });
+          recordActionLatency(Date.now() - t0, {
+            roomCode: room.code,
+            seat,
+            type: action.type,
+            ok: false,
+            error: result.error,
+          });
+          return ack?.({
+            ok: false,
+            error: result.error || "ILLEGAL_ACTION",
+            authoritativeState: auth,
+          });
+        }
 
-    recordActionLatency(Date.now() - t0, {
-      roomCode: room.code,
-      seat,
-      type: action.type,
-      seq: room.actionSeq,
-      ok: true,
-    });
+        room.actionSeq += 1;
+        // Delta: peer recebe authoritativeState; snapshot do cliente só em anim/UI.
+        // ATTACK_RESOLVE: nunca retransmitir snapshot pré-combate (clobber / revive).
+        const sendClientSnap = (action.type === "PLAY_VISUAL" || !!action.anim)
+            && action.type !== "ATTACK_RESOLVE";
+        const envelope = {
+          seq: room.actionSeq,
+          fromSeat: seat,
+          action,
+          snapshot: sendClientSnap ? (payload?.snapshot || null) : null,
+          authoritativeState: (result.omitAuthoritativeState || (result.skip && result.uiOnly))
+            ? null
+            : (result.state || room.gameState || null),
+          events: result.events || [],
+          logEntry: result.logEntry || null,
+          delegated: !!result.delegated,
+          skip: !!result.skip,
+          forfeit: action.type === "SURRENDER",
+          presentation: result.presentation || null,
+          presentationEnvelope: result.presentationEnvelope || null,
+        };
+        if (result.state && !result.skip) {
+          room.lastSnapshot = { state: result.state, full: true };
+        }
 
-    const ackPayload = {
-      ok: true,
-      seq: room.actionSeq,
-      authoritativeState: (result.omitAuthoritativeState || (result.skip && result.uiOnly))
-        ? (room.gameState || null)
-        : (result.state || room.gameState || null),
-      events: result.events || [],
-      logEntry: result.logEntry || null,
-      skip: !!result.skip,
-      presentation: result.presentation || null,
-      presentationEnvelope: result.presentationEnvelope || null,
-      turnDeadline: room.turnDeadline || null,
-    };
-    if (clientActionId) {
-      room._ackedClientActions.set(`${seat}:${clientActionId}`, ackPayload);
-      // Limite simples — evita crescimento infinito.
-      if (room._ackedClientActions.size > 200) {
-        const first = room._ackedClientActions.keys().next().value;
-        room._ackedClientActions.delete(first);
+        // Relógio do turno: ambos os clientes sincronizam a partir do deadline.
+        resetTurnTimer(room);
+        envelope.turnDeadline = room.turnDeadline || null;
+
+        for (let s = 0; s < 2; s++) {
+          const sid = room.sockets[s];
+          if (!sid || sid === socket.id) continue;
+          const peerEnv = envelope.authoritativeState
+            ? {
+                ...envelope,
+                authoritativeState: projectStateForSeat(envelope.authoritativeState, s),
+              }
+            : envelope;
+          io.to(sid).emit("remote_action", peerEnv);
+        }
+
+        touchPersist(room);
+        await mirrorRoomNow(room);
+        maybeFinishMatch(room, result.state);
+        scheduleServerAi(room, io, {
+          emitEnvelope: emitActionEnvelope,
+          onAfterAction: afterAuthoritativeAction,
+        });
+
+        recordActionLatency(Date.now() - t0, {
+          roomCode: room.code,
+          seat,
+          type: action.type,
+          seq: room.actionSeq,
+          ok: true,
+        });
+
+        const ackPayload = {
+          ok: true,
+          seq: room.actionSeq,
+          authoritativeState: (result.omitAuthoritativeState || (result.skip && result.uiOnly))
+            ? (room.gameState || null)
+            : (result.state || room.gameState || null),
+          events: result.events || [],
+          logEntry: result.logEntry || null,
+          skip: !!result.skip,
+          presentation: result.presentation || null,
+          presentationEnvelope: result.presentationEnvelope || null,
+          turnDeadline: room.turnDeadline || null,
+        };
+        if (clientActionId) {
+          room._ackedClientActions.set(`${seat}:${clientActionId}`, ackPayload);
+          // Limite simples — evita crescimento infinito.
+          if (room._ackedClientActions.size > 200) {
+            const first = room._ackedClientActions.keys().next().value;
+            room._ackedClientActions.delete(first);
+          }
+        }
+        ack?.(ackPayload);
+      });
+    } catch (e) {
+      const errCode = e?.code || e?.message;
+      if (errCode === "ROOM_LOCK_TIMEOUT") {
+        recordReject("ROOM_LOCK_TIMEOUT", { type: actionType });
+        return ack?.({ ok: false, error: "ROOM_LOCK_TIMEOUT" });
       }
+      console.warn("[game_action]", e?.message || e);
+      return ack?.({ ok: false, error: "SERVER_ERROR" });
     }
-    ack?.(ackPayload);
+    })();
   });
 
   socket.on("get_replay", (payload, ack) => {
@@ -990,6 +1029,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("leave_room", (payload, ack) => {
+    void (async () => {
     removeFromQueue(socket.id);
     removeFromRankedQueue(socket.id);
     const room = getRoom(socketRoom.get(socket.id));
@@ -1001,30 +1041,33 @@ io.on("connection", (socket) => {
     if (room && seat !== null && room.status === "playing" && room.gameState?.winner == null) {
       if (wantForfeit) {
         // Desistir: vitória imediata do oponente.
-        const result = applyAuthoritativeAction(room, seat, { type: "SURRENDER", playerId: seat }, null);
-        if (result.ok) {
-          room.actionSeq += 1;
-          const envelope = {
-            seq: room.actionSeq,
-            fromSeat: seat,
-            action: { type: "SURRENDER", playerId: seat },
-            snapshot: null,
-            authoritativeState: result.state || null,
-            events: result.events || [],
-            forfeit: true,
-          };
-          if (result.state) {
-            room.lastSnapshot = { state: result.state, full: true };
+        await withRoomLock(room.code, async () => {
+          const result = applyAuthoritativeAction(room, seat, { type: "SURRENDER", playerId: seat }, null);
+          if (result.ok) {
+            room.actionSeq += 1;
+            const envelope = {
+              seq: room.actionSeq,
+              fromSeat: seat,
+              action: { type: "SURRENDER", playerId: seat },
+              snapshot: null,
+              authoritativeState: result.state || null,
+              events: result.events || [],
+              forfeit: true,
+            };
+            if (result.state) {
+              room.lastSnapshot = { state: result.state, full: true };
+            }
+            for (let s = 0; s < 2; s++) {
+              const sid = room.sockets[s];
+              if (!sid || sid === socket.id) continue;
+              io.to(sid).emit("remote_action", envelope);
+            }
+            await mirrorRoomNow(room);
+            maybeFinishMatch(room, result.state);
+            const winner = result.state?.winner ?? ((seat + 1) % 2);
+            forfeitPayload = { forfeit: true, winner, seat };
           }
-          for (let s = 0; s < 2; s++) {
-            const sid = room.sockets[s];
-            if (!sid || sid === socket.id) continue;
-            io.to(sid).emit("remote_action", envelope);
-          }
-          maybeFinishMatch(room, result.state);
-          const winner = result.state?.winner ?? ((seat + 1) % 2);
-          forfeitPayload = { forfeit: true, winner, seat };
-        }
+        });
         leaveSocketRoom(socket, forfeitPayload);
         ack?.({ ok: true });
         return;
@@ -1069,6 +1112,7 @@ io.on("connection", (socket) => {
     }
     leaveSocketRoom(socket, forfeitPayload);
     ack?.({ ok: true });
+    })();
   });
 
   socket.on("disconnect", () => {
@@ -1148,6 +1192,15 @@ try {
   if (n) console.log(`[live-rooms] ${n} sala(s) restaurada(s) do Postgres`);
 } catch (e) {
   console.warn("[live-rooms] restore:", e?.message || e);
+}
+
+// RoomStore Redis (dual-write) — após PG para não duplicar; Redis preenche gaps.
+try {
+  await initRoomStore();
+  await hydrateRoomsFromRedis(importPersistedRoom);
+} catch (e) {
+  console.error("[room-store] init:", e?.message || e);
+  if (process.env.DF_REQUIRE_REDIS === "1") process.exit(1);
 }
 
 // Relógio + IA das salas restauradas (JSON/PG deixam turnTimer:null).

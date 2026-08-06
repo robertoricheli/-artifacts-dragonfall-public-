@@ -3,6 +3,7 @@
  */
 import { MAX_ROOMS } from "./df-mp-limits.mjs";
 import { ensureSeatTokens, seatTokenFor } from "./df-seat-token.mjs";
+import { scheduleRoomMirror, scheduleRoomMirrorDelete } from "./df-room-store.mjs";
 
 const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
 
@@ -49,6 +50,7 @@ export function createRoom() {
   };
   ensureSeatTokens(room);
   rooms.set(code, room);
+  scheduleRoomMirror(room);
   return { ok: true, room };
 }
 
@@ -71,12 +73,16 @@ export function getRoom(code) {
 
 export function deleteRoom(code) {
   rooms.delete(code);
+  scheduleRoomMirrorDelete(code);
 }
 
 export function pruneOldRooms() {
   const now = Date.now();
   for (const [code, room] of rooms) {
-    if (now - room.createdAt > ROOM_TTL_MS) rooms.delete(code);
+    if (now - room.createdAt > ROOM_TTL_MS) {
+      rooms.delete(code);
+      scheduleRoomMirrorDelete(code);
+    }
   }
 }
 
@@ -142,6 +148,7 @@ export function joinRoom(code, socketId, preferSeat = null, seatToken = null) {
 export function touchLastSeen(room, seat) {
   if (!room.lastSeen) room.lastSeen = [0, 0];
   if (seat === 0 || seat === 1) room.lastSeen[seat] = Date.now();
+  scheduleRoomMirror(room);
 }
 
 /** Queda de conexão — preserva partida para reconexão. */
@@ -149,6 +156,7 @@ export function disconnectSocket(room, socketId) {
   const seat = seatForSocket(room, socketId);
   if (seat === null) return null;
   room.sockets[seat] = null;
+  scheduleRoomMirror(room);
   return { deleted: false, seat, disconnected: true };
 }
 
@@ -166,6 +174,7 @@ export function leaveRoom(room, socketId) {
   if (room.status === "playing" && !room.sockets[0] && !room.sockets[1]) {
     room.status = "ended";
   }
+  scheduleRoomMirror(room);
   return { deleted: false, seat };
 }
 
@@ -276,6 +285,7 @@ export function importPersistedRoom(data) {
   };
   ensureSeatTokens(room);
   rooms.set(room.code, room);
+  scheduleRoomMirror(room);
   return room;
 }
 

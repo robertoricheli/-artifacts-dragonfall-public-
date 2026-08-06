@@ -29,6 +29,9 @@ services:
       # Redis — BullMQ ranked + Socket.IO adapter (multi-instância)
       - key: REDIS_URL
         sync: false
+      # RoomStore: memory (default) | redis (dual-write Memory+Redis + lock NX)
+      - key: DF_ROOM_STORE
+        value: "memory"
       - key: DF_AUTH_ENC_KEY
         sync: false
       # Em produção ranked: defina REDIS_URL. DF_REQUIRE_REDIS=1 falha o boot sem Redis.
