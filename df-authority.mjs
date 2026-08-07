@@ -549,6 +549,14 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
   if (!room.eventLog) room.eventLog = [];
 
   if (UI_ONLY_TYPES.has(action.type)) {
+    // Cancel Ultimate: enquanto o defensor responde, barrar ULTIMATE_PLAY do caster.
+    if (action.type === "REACTIVE_CANCEL_QUERY") {
+      const casterSeat = action.attOwner ?? action.casterP ?? action.queryFrom;
+      if (casterSeat != null) {
+        if (!room.mpCancelPending) room.mpCancelPending = Object.create(null);
+        room.mpCancelPending[casterSeat | 0] = Date.now();
+      }
+    }
     const presentationEnvelope = buildPresentationEnvelope([], action);
     return {
       ok: true,
@@ -574,12 +582,33 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
     return applySyncStateCosmetic(room, seat, shaped);
   }
 
-  // Cancelar Ultimate (MP): barrar ULTIMATE_PLAY após REACTIVE_CANCEL_ANSWER.
+  // Cancelar Ultimate (MP): barrar ULTIMATE_PLAY após cancel ou enquanto QUERY pendente.
   if (shaped.type === "ULTIMATE_PLAY") {
+    const pendingAt = room.mpCancelPending?.[seat];
+    if (pendingAt && (Date.now() - pendingAt) < 20000) {
+      return { ok: false, error: "ULTIMATE_CANCEL_PENDING" };
+    }
     const cancelledAt = room.mpUltimateCancelled?.[seat];
     if (cancelledAt && (Date.now() - cancelledAt) < 120000) {
       delete room.mpUltimateCancelled[seat];
+      if (room.mpCancelPending) delete room.mpCancelPending[seat];
       return { ok: false, error: "ULTIMATE_CANCELLED" };
+    }
+  }
+
+  // Proteção Divina: barrar FIELD_COMMIT reducePower no alvo protegido.
+  if (shaped.type === "FIELD_COMMIT" && room.mpProtectedTarget) {
+    const prot = room.mpProtectedTarget;
+    if (prot.until > Date.now() && Array.isArray(shaped.mutations)) {
+      const hitsProt = shaped.mutations.some((m) => {
+        if (!m || m.op !== "reducePower") return false;
+        if (m.targetP !== prot.targetP || m.targetI !== prot.targetI) return false;
+        if (prot.uid && m.uid && String(m.uid) !== String(prot.uid)) return false;
+        return true;
+      });
+      if (hitsProt) {
+        return { ok: false, error: "TARGET_PROTECTED" };
+      }
     }
   }
 
@@ -662,16 +691,42 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
   room.gameState = applied.state;
 
   // Marca ultimate do caster como cancelada — ULTIMATE_PLAY seguinte é rejeitado.
-  if (shaped.type === "REACTIVE_CANCEL_ANSWER"
-      && (shaped.cancelled === true || shaped.use === true)) {
+  if (shaped.type === "REACTIVE_CANCEL_ANSWER") {
     const casterSeat = shaped.queryFrom ?? shaped.attOwner;
-    if (casterSeat != null) {
-      if (!room.mpUltimateCancelled) room.mpUltimateCancelled = Object.create(null);
-      room.mpUltimateCancelled[casterSeat | 0] = Date.now();
+    if (casterSeat != null && room.mpCancelPending) {
+      delete room.mpCancelPending[casterSeat | 0];
+    }
+    if (shaped.cancelled === true || shaped.use === true) {
+      if (casterSeat != null) {
+        if (!room.mpUltimateCancelled) room.mpUltimateCancelled = Object.create(null);
+        room.mpUltimateCancelled[casterSeat | 0] = Date.now();
+      }
+    }
+  }
+  // Proteção Divina: alvo protegido contra próximo reducePower.
+  if (shaped.type === "REACTIVE_PROTECTION_ANSWER"
+      && (shaped.protected === true || shaped.use === true)) {
+    const targetP = shaped.defenderPlayerId ?? shaped.targetP;
+    let targetI = shaped.defenderIdx ?? shaped.targetI;
+    const uid = shaped.defenderUid || null;
+    if ((targetI == null || targetI < 0) && uid != null) {
+      const field = state.players?.[targetP | 0]?.field || [];
+      targetI = field.findIndex((c) => c && String(c.uid) === String(uid));
+    }
+    if (targetP != null && targetI != null && targetI >= 0) {
+      room.mpProtectedTarget = {
+        targetP: targetP | 0,
+        targetI: targetI | 0,
+        uid: uid || state.players?.[targetP | 0]?.field?.[targetI | 0]?.uid || null,
+        until: Date.now() + 30000,
+      };
     }
   }
   if (shaped.type === "ULTIMATE_PLAY" && room.mpUltimateCancelled?.[seat]) {
     delete room.mpUltimateCancelled[seat];
+  }
+  if (shaped.type === "ULTIMATE_PLAY" && room.mpCancelPending?.[seat]) {
+    delete room.mpCancelPending[seat];
   }
 
   const entry = appendEventLogEntry(

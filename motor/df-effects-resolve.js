@@ -806,7 +806,9 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
         default:
             events.push({ type: "ON_ENTER_DELEGATE", onEnter: key, casterIdx, fieldIdx });
     }
-    if (events.length)
+    // Imitar com cópia de onEnter: consumir só após a chain (Roubar etc.).
+    const chainedImitar = events.some((e) => e?.type === "IMITAR" && e.copiedOnEnter && e.copiedOnEnter !== "imitar");
+    if (events.length && !chainedImitar)
         markChampOnEnterConsumed(enteringChamp);
     const winner = R()?.findWinnerIndex(state);
     if (winner != null) {

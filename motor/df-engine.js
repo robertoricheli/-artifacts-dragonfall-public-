@@ -1013,6 +1013,22 @@ export function applyAction(state, action, ctx = {}) {
                 return { ok: false, state, events: res.events || [], error: res.error || "ABILITY_TARGET_FAILED" };
             }
             events.push(...(res.events || []));
+            // Imitar → chain auto (Roubar / Pesadelo / Desacelerar) no mesmo ACK.
+            const imitarEv = (res.events || []).find((e) => e && e.type === "IMITAR" && e.copiedOnEnter);
+            if (imitarEv?.copiedOnEnter && imitarEv.copiedOnEnter !== "imitar") {
+                const plan = ER.planOnEnter?.(next, cIdx, fIdx);
+                if (plan?.ok && (plan.mode === "auto" || plan.mode === "none" || plan.mode === "visual_only"
+                    || (plan.mode === "target" && ["roubar", "pesadelo", "desacelerar"].includes(String(imitarEv.copiedOnEnter))))) {
+                    const chainRes = ER.applyOnEnter(next, cIdx, fIdx, autoOnEnterResolution(next, cIdx, fIdx, {
+                        ok: true,
+                        mode: "auto",
+                        ability: imitarEv.copiedOnEnter,
+                    }, ctx.rng || Math.random));
+                    if (chainRes?.ok) {
+                        events.push(...(chainRes.events || []));
+                    }
+                }
+            }
             break;
         }
         case T.ULTIMATE_TARGET: {
