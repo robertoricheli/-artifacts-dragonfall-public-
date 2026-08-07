@@ -12,6 +12,10 @@ let rejectCount = 0;
 let actionCount = 0;
 let presentationCount = 0;
 let gapFillTotal = 0;
+let stateDiffPatchCount = 0;
+let stateDiffFullCount = 0;
+let stateDiffSavedBytes = 0;
+const stateDiffSamples = [];
 
 function pruneSamples(arr, now = Date.now()) {
   while (arr.length && now - arr[0].t > WINDOW_MS) arr.shift();
@@ -91,6 +95,32 @@ export function recordGapFill(meta = {}) {
   });
 }
 
+/** Telemetria Fase 5 — patch vs full no remote_action. */
+export function recordStateDiff(meta = {}) {
+  const now = Date.now();
+  const mode = meta.mode === "patch" ? "patch" : "full";
+  const fullBytes = Math.max(0, Number(meta.fullBytes) || 0);
+  const patchBytes = Math.max(0, Number(meta.patchBytes) || 0);
+  if (mode === "patch") {
+    stateDiffPatchCount += 1;
+    if (fullBytes > patchBytes) stateDiffSavedBytes += fullBytes - patchBytes;
+  } else {
+    stateDiffFullCount += 1;
+  }
+  stateDiffSamples.push({ t: now, mode, fullBytes, patchBytes });
+  pruneSamples(stateDiffSamples, now);
+  logMp("state_diff", {
+    room: meta.roomCode || null,
+    seat: meta.seat,
+    seq: meta.seq,
+    mode,
+    reason: meta.reason || null,
+    fullBytes,
+    patchBytes,
+    ops: meta.ops != null ? meta.ops : null,
+  });
+}
+
 export function recordReject(error, meta = {}) {
   rejectCount += 1;
   logMp("reject", {
@@ -129,6 +159,9 @@ export function getActionStats() {
   const core = percentileStats(actionSamples);
   const pres = percentileStats(presentationSamples);
   const skew = percentileStats(presentSkewSamples);
+  pruneSamples(stateDiffSamples, now);
+  const diff1m = stateDiffSamples.length;
+  const patch1m = stateDiffSamples.filter((s) => s.mode === "patch").length;
   return {
     avgActionMs: core.avg,
     p95ActionMs: core.p95,
@@ -147,6 +180,11 @@ export function getActionStats() {
     rejectsTotal: rejectCount,
     actionsTotal: actionCount,
     presentationsTotal: presentationCount,
+    stateDiffPatchesTotal: stateDiffPatchCount,
+    stateDiffFullTotal: stateDiffFullCount,
+    stateDiffSavedBytesTotal: stateDiffSavedBytes,
+    stateDiff1m: diff1m,
+    stateDiffPatches1m: patch1m,
   };
 }
 

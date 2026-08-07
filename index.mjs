@@ -55,6 +55,7 @@ import { initAuthStore, getAuthStoreMode } from "./df-auth.mjs";
 import { authPlayerFromToken, startSessionPruneScheduler } from "./df-auth-store.mjs";
 import { recordMatchEnd } from "./df-match-history.mjs";
 import { applyAuthoritativeAction, seedRoomFromSnapshot, buildReplayPayload, getEngineBootStatus, projectStateForSeat } from "./df-authority.mjs";
+import { attachPeerStateDiff } from "./df-state-diff.mjs";
 import { loadPersistedRooms, schedulePersistRooms, flushPersistRooms } from "./room-persist.mjs";
 import {
   initLiveRoomsSchema,
@@ -69,6 +70,7 @@ import {
   recordGapFill,
   recordReject,
   recordDisconnect,
+  recordStateDiff,
   getActionStats,
   logMp,
   startSelfKeepAlive,
@@ -206,6 +208,9 @@ app.get("/health", (_req, res) => {
     actions1m: stats.actions1m,
     redisConfigured: redisConfigured(),
     redisAdapter: isRedisAdapterAttached(),
+    stateDiffPatches1m: stats.stateDiffPatches1m,
+    stateDiff1m: stats.stateDiff1m,
+    stateDiffSavedBytesTotal: stats.stateDiffSavedBytesTotal,
     ...roomStoreHealth(),
   };
   res.status(motor.motorOk ? 200 : 503).json(body);
@@ -440,13 +445,10 @@ function emitActionEnvelope(room, envelope) {
   for (let s = 0; s < 2; s++) {
     const sid = room.sockets[s];
     if (!sid) continue;
-    const projected = envelope.authoritativeState
-      ? {
-          ...envelope,
-          authoritativeState: projectStateForSeat(envelope.authoritativeState, s),
-        }
+    const peerEnv = envelope.authoritativeState
+      ? attachPeerStateDiff(room, envelope, s, projectStateForSeat, recordStateDiff)
       : envelope;
-    io.to(sid).emit("remote_action", projected);
+    io.to(sid).emit("remote_action", peerEnv);
   }
 }
 
@@ -920,10 +922,7 @@ io.on("connection", (socket) => {
           const sid = room.sockets[s];
           if (!sid || sid === socket.id) continue;
           const peerEnv = envelope.authoritativeState
-            ? {
-                ...envelope,
-                authoritativeState: projectStateForSeat(envelope.authoritativeState, s),
-              }
+            ? attachPeerStateDiff(room, envelope, s, projectStateForSeat, recordStateDiff)
             : envelope;
           io.to(sid).emit("remote_action", peerEnv);
         }
@@ -1060,7 +1059,14 @@ io.on("connection", (socket) => {
             for (let s = 0; s < 2; s++) {
               const sid = room.sockets[s];
               if (!sid || sid === socket.id) continue;
-              io.to(sid).emit("remote_action", envelope);
+              const peerEnv = attachPeerStateDiff(
+                room,
+                envelope,
+                s,
+                projectStateForSeat,
+                recordStateDiff,
+              );
+              io.to(sid).emit("remote_action", peerEnv);
             }
             await mirrorRoomNow(room);
             maybeFinishMatch(room, result.state);
