@@ -1215,7 +1215,7 @@ io.on("connection", (socket) => {
             await mirrorRoomNow(room);
             maybeFinishMatch(room, result.state);
             const winner = result.state?.winner ?? ((seat + 1) % 2);
-            forfeitPayload = { forfeit: true, winner, seat };
+            forfeitPayload = { forfeit: true, winner, seat, canReconnect: false };
           }
         });
         leaveSocketRoom(socket, forfeitPayload);
@@ -1249,20 +1249,28 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Lobby / partida já encerrada: saída limpa — NÃO emitir forfeit
-    // (Voltar ao Menu após vitória/derrota não é desistência).
-    if (room && seat !== null && room.status === "ended") {
+    // Voltar ao Menu após vitória/derrota (sem forfeit): saída limpa.
+    if (room && seat !== null && room.status === "ended" && !wantForfeit) {
       leaveSocketRoom(socket, null);
       ack?.({ ok: true });
       return;
     }
-    if (room && seat !== null && wantForfeit && room.gameState?.winner == null) {
+
+    // SURRENDER já aplicado via game_action: peer_left ainda precisa de forfeit+winner.
+    if (room && seat !== null && wantForfeit && room.gameState?.winner != null) {
+      forfeitPayload = {
+        forfeit: true,
+        winner: room.gameState.winner | 0,
+        seat,
+        canReconnect: false,
+      };
+    } else if (room && seat !== null && wantForfeit && room.gameState?.winner == null) {
       const winner = (seat + 1) % 2;
-      forfeitPayload = { forfeit: true, winner, seat };
+      forfeitPayload = { forfeit: true, winner, seat, canReconnect: false };
     }
     leaveSocketRoom(socket, forfeitPayload);
     ack?.({ ok: true });
-    })();
+  })();
   });
 
   socket.on("disconnect", () => {
@@ -1278,7 +1286,20 @@ io.on("connection", (socket) => {
       seat: info?.seat,
       playing: room.status === "playing",
     });
-    emitRoom(room, "peer_disconnected", { seat: info?.seat, canReconnect: room.status === "playing" });
+    const win = room.gameState?.winner;
+    if (win != null && (room.status === "ended" || room.status === "playing")) {
+      emitRoom(room, "peer_disconnected", {
+        seat: info?.seat,
+        forfeit: true,
+        winner: win | 0,
+        canReconnect: false,
+      });
+    } else {
+      emitRoom(room, "peer_disconnected", {
+        seat: info?.seat,
+        canReconnect: room.status === "playing",
+      });
+    }
     if (room.status === "playing" && info?.seat != null) {
       const deadlineExpired = room.turnDeadline && room.turnDeadline <= Date.now();
       const cp = room.gameState?.currentPlayer;

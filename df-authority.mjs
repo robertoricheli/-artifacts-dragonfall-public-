@@ -311,13 +311,13 @@ const PARALLEL_FX_KINDS = new Set([
   "incendiar", "land_impact", "card_draw", "combat_telegraph",
   "misseis_magicos", "divine_protection", "cancel_ultimate",
   "blocked_attack", "vinganca", "necromancia", "thunder_discard",
-  "scare_return", "aceleracao", "rajada_congelante", "rajada_congelante_destroy",
-  "corrupt", "legado",
+  "aceleracao", "rajada_congelante", "rajada_congelante_destroy",
+  "corrupt", "legado", "doppel_cast",
 ]);
 
 const BOARD_SERIAL_KINDS = new Set([
   "talent_cast", "talent_discard", "summon_land", "combat", "destroy",
-  "dragon_token_summon",
+  "dragon_token_summon", "scare_return", "doppel_clone",
 ]);
 
 /**
@@ -467,7 +467,13 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
     visuals.push(action.anim);
     if (Array.isArray(action.anim.fieldPatches)) {
       for (const p of action.anim.fieldPatches) fieldPatches.push(p);
-      if (action.anim.fieldPatches.some((p) => p?.removed)) deferBoardApply = true;
+      if (action.anim.fieldPatches.some((p) => p?.removed || p?.insert)) {
+        deferBoardApply = true;
+      }
+    }
+    // Talentos MP: VFX no peer ANTES do auth (clone/medo).
+    if (action.anim.kind === "doppel_clone" || action.anim.kind === "scare_return") {
+      deferBoardApply = true;
     }
   }
 
@@ -553,6 +559,15 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
     return applySyncStateCosmetic(room, seat, shaped);
   }
 
+  // Cancelar Ultimate (MP): barrar ULTIMATE_PLAY após REACTIVE_CANCEL_ANSWER.
+  if (shaped.type === "ULTIMATE_PLAY") {
+    const cancelledAt = room.mpUltimateCancelled?.[seat];
+    if (cancelledAt && (Date.now() - cancelledAt) < 120000) {
+      delete room.mpUltimateCancelled[seat];
+      return { ok: false, error: "ULTIMATE_CANCELLED" };
+    }
+  }
+
   const v = DfEngine.validateAction(state, shaped);
   if (v.ok === false && v.code && v.code !== "DELEGATE") {
     return { ok: false, error: v.code || v.error || "ILLEGAL" };
@@ -630,6 +645,20 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
   }
 
   room.gameState = applied.state;
+
+  // Marca ultimate do caster como cancelada — ULTIMATE_PLAY seguinte é rejeitado.
+  if (shaped.type === "REACTIVE_CANCEL_ANSWER"
+      && (shaped.cancelled === true || shaped.use === true)) {
+    const casterSeat = shaped.queryFrom ?? shaped.attOwner;
+    if (casterSeat != null) {
+      if (!room.mpUltimateCancelled) room.mpUltimateCancelled = Object.create(null);
+      room.mpUltimateCancelled[casterSeat | 0] = Date.now();
+    }
+  }
+  if (shaped.type === "ULTIMATE_PLAY" && room.mpUltimateCancelled?.[seat]) {
+    delete room.mpUltimateCancelled[seat];
+  }
+
   const entry = appendEventLogEntry(
     room.eventLog,
     room.actionSeq + 1,

@@ -115,10 +115,16 @@ export function createInitialMatchState(opts) {
     }
   }
 
-  // Saque livre do 1º turno do jogador que começa (sem banner de PV no cliente).
+  // Saque livre do 1º turno do jogador que começa (manual: 4 → 5).
+  // runTurnMaintenance NÃO compra carta — draw explícito aqui.
   const { DfRules } = bootDragonfallEngine();
   if (DfRules?.runTurnMaintenance) {
     DfRules.runTurnMaintenance(state, firstPlayer);
+  }
+  const opener = state.players[firstPlayer];
+  if (opener?.deck?.length && (opener.hand?.length || 0) < 8) {
+    const drawn = opener.deck.pop();
+    if (drawn) opener.hand.push(cloneCard(drawn));
   }
 
   return state;
