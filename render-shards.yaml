@@ -1,0 +1,77 @@
+# Blueprint opcional — 2 serviços (Gateway + Game). NÃO substituir render.yaml
+# sem REDIS_URL + DF_GAME_SHARD_URLS / DF_GATEWAY_URL configurados.
+#
+# Uso: deploy manual / segundo blueprint. Produção atual continua em
+# render.yaml com DF_PROCESS_ROLE=all (monolito).
+services:
+  - type: web
+    name: dragonfall-gateway
+    runtime: node
+    rootDir: .
+    buildCommand: npm install
+    startCommand: npm start
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DF_PROCESS_ROLE
+        value: gateway
+      - key: DF_SHARD_COUNT
+        value: "1"
+      - key: DF_ROOM_STORE
+        value: redis
+      - key: DF_STATE_DIFF
+        value: "1"
+      - key: DF_REQUIRE_REDIS
+        value: "0"
+      - key: REDIS_URL
+        sync: false
+      - key: DF_GAME_SHARD_URLS
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: dragonfall-postgres
+          property: connectionString
+      - key: CORS_ORIGIN
+        value: "https://dragonfall.netlify.app,https://artifacts-dragonfall.netlify.app"
+
+  - type: web
+    name: dragonfall-game
+    runtime: node
+    rootDir: .
+    buildCommand: npm install
+    startCommand: npm start
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DF_PROCESS_ROLE
+        value: game
+      - key: DF_SHARD_ID
+        value: "0"
+      - key: DF_SHARD_COUNT
+        value: "1"
+      - key: DF_ROOM_STORE
+        value: redis
+      - key: DF_STATE_DIFF
+        value: "1"
+      - key: DF_REQUIRE_REDIS
+        value: "0"
+      - key: REDIS_URL
+        sync: false
+      - key: DF_GATEWAY_URL
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: dragonfall-postgres
+          property: connectionString
+      - key: CORS_ORIGIN
+        value: "https://dragonfall.netlify.app,https://artifacts-dragonfall.netlify.app"
+
+databases:
+  - name: dragonfall-postgres
+    plan: basic-256mb
+    databaseName: dragonfall
+    user: dragonfall

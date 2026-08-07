@@ -16,21 +16,37 @@ function randomChunk(len = 4) {
   return s;
 }
 
-export function makeRoomCode() {
+export function makeRoomCode(opts = {}) {
+  const preferShard = opts.preferShard;
+  const shardCount = opts.shardCount != null ? opts.shardCount : 1;
   let code;
+  let tries = 0;
   do {
     code = `DRAGON-${randomChunk(4)}`;
-  } while (rooms.has(code));
+    tries += 1;
+    if (preferShard == null || shardCount <= 1) {
+      if (!rooms.has(code)) break;
+    } else {
+      // Import circular avoided — caller passa hashFn
+      const id = typeof opts.shardIdFor === "function" ? opts.shardIdFor(code) : preferShard;
+      if (!rooms.has(code) && id === preferShard) break;
+    }
+  } while (tries < 80);
   return code;
 }
 
 /** @returns {{ ok: true, room: object } | { ok: false, error: string }} */
-export function createRoom() {
+export function createRoom(opts = {}) {
   pruneOldRooms();
   if (rooms.size >= MAX_ROOMS) {
     return { ok: false, error: "SERVER_BUSY" };
   }
-  const code = makeRoomCode();
+  const code = makeRoomCode(opts);
+  if (opts.preferShard != null && opts.shardCount > 1 && typeof opts.shardIdFor === "function") {
+    if (opts.shardIdFor(code) !== opts.preferShard) {
+      return { ok: false, error: "SHARD_CODE_FAIL" };
+    }
+  }
   const room = {
     code,
     createdAt: Date.now(),
@@ -55,8 +71,8 @@ export function createRoom() {
 }
 
 /** Compat: createRoom always returned room before — wrappers use createRoomSafe. */
-export function createRoomOrThrow() {
-  const r = createRoom();
+export function createRoomOrThrow(opts = {}) {
+  const r = createRoom(opts);
   if (!r.ok) {
     const err = new Error(r.error || "SERVER_BUSY");
     err.code = r.error;

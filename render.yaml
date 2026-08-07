@@ -35,6 +35,11 @@ services:
       # StateDiff no remote_action: 1=patches (default) | 0=sempre full
       - key: DF_STATE_DIFF
         value: "1"
+      # Fase 6: all (monolito, default) | gateway | game — ver render-shards.yaml
+      - key: DF_PROCESS_ROLE
+        value: "all"
+      - key: DF_SHARD_COUNT
+        value: "1"
       - key: DF_AUTH_ENC_KEY
         sync: false
       # Em produção ranked: defina REDIS_URL. DF_REQUIRE_REDIS=1 falha o boot sem Redis.

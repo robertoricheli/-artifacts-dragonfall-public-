@@ -90,6 +90,25 @@ import {
   scheduleRoomMirror,
   roomStoreHealth,
 } from "./df-room-store.mjs";
+import {
+  PROCESS_ROLE,
+  isGatewayRole,
+  isGameRole,
+  processRoleHealth,
+} from "./df-process-role.mjs";
+import {
+  getShardCount,
+  getLocalShardId,
+  shardIdForRoom,
+  thisProcessOwnsRoom,
+  rememberRoomShard,
+  lookupRoomShard,
+  buildShardRedirect,
+  shardUrlForRoom,
+  getGatewayUrl,
+  getGameShardUrls,
+  shardHealth,
+} from "./df-shard-affinity.mjs";
 import { createRateLimiter } from "./rate-limit.mjs";
 import { readGameVersion } from "./df-game-version.mjs";
 import { createInitialMatchState } from "./df-match-init.mjs";
@@ -212,8 +231,27 @@ app.get("/health", (_req, res) => {
     stateDiff1m: stats.stateDiff1m,
     stateDiffSavedBytesTotal: stats.stateDiffSavedBytesTotal,
     ...roomStoreHealth(),
+    ...processRoleHealth(),
+    ...shardHealth(),
   };
   res.status(motor.motorOk ? 200 : 503).json(body);
+});
+
+/** Lookup de affinity (gateway / ops). */
+app.get("/shard/lookup", async (req, res) => {
+  const code = String(req.query.code || "").trim().toUpperCase();
+  if (!code) return res.status(400).json({ ok: false, error: "BAD_CODE" });
+  const shardId = await lookupRoomShard(code);
+  res.json({
+    ok: true,
+    roomCode: code,
+    shardId,
+    shardCount: getShardCount(),
+    serverUrl: shardUrlForRoom(code),
+    localShardId: getLocalShardId(),
+    ownsHere: thisProcessOwnsRoom(code),
+    processRole: PROCESS_ROLE,
+  });
 });
 
 app.get("/history/replay/:code", async (req, res) => {
@@ -330,13 +368,34 @@ function startMatchForRoom(room, io) {
 function pairRankedSockets(io, entry0, entry1) {
   const sid0 = entry0.socketId;
   const sid1 = entry1.socketId;
+  // Gateway-only: não hospeda authority — redireciona ambos ao game shard.
+  if (!isGameRole()) {
+    const urls = getGameShardUrls();
+    const serverUrl = urls[0] || getGatewayUrl();
+    const payload = {
+      ok: true,
+      shardRedirect: true,
+      reason: "GATEWAY_TO_GAME",
+      serverUrl,
+      ranked: true,
+      processRole: PROCESS_ROLE,
+    };
+    if (!serverUrl) {
+      logMp("pair_ranked_no_shard_url", {});
+      return;
+    }
+    io.to(sid0).emit("shard_redirect", { ...payload, seatHint: 0 });
+    io.to(sid1).emit("shard_redirect", { ...payload, seatHint: 1 });
+    return;
+  }
   let room;
   try {
-    room = createRoomOrThrow();
+    room = createRoomOrThrow(createRoomOptsForLocalShard());
   } catch (e) {
     logMp("pair_ranked_busy", { error: e?.message });
     return;
   }
+  void rememberRoomShard(room.code);
   room.ranked = true;
   room.rankedPlayerIds = [entry0.playerId, entry1.playerId];
   room.winPoints = 15;
@@ -355,6 +414,7 @@ function pairRankedSockets(io, entry0, entry1) {
     seatToken: seatTokenFor(room, 0),
     mmr: entry0.mmr,
     opponentMmr: entry1.mmr,
+    shardId: shardIdForRoom(room.code),
   });
   io.to(sid1).emit("ranked_match_found", {
     ...roomPublicView(room, 1),
@@ -362,6 +422,7 @@ function pairRankedSockets(io, entry0, entry1) {
     seatToken: seatTokenFor(room, 1),
     mmr: entry1.mmr,
     opponentMmr: entry0.mmr,
+    shardId: shardIdForRoom(room.code),
   });
   broadcastRoomState(room);
 }
@@ -394,13 +455,33 @@ function pairQueueSockets(io) {
   let pair = takePair();
   while (pair) {
     const [sid0, sid1] = pair;
+    if (!isGameRole()) {
+      const urls = getGameShardUrls();
+      const serverUrl = urls[0] || getGatewayUrl();
+      if (serverUrl) {
+        const payload = {
+          ok: true,
+          shardRedirect: true,
+          reason: "GATEWAY_TO_GAME",
+          serverUrl,
+          processRole: PROCESS_ROLE,
+        };
+        io.to(sid0).emit("shard_redirect", { ...payload, seatHint: 0 });
+        io.to(sid1).emit("shard_redirect", { ...payload, seatHint: 1 });
+      } else {
+        logMp("pair_casual_no_shard_url", {});
+      }
+      pair = takePair();
+      continue;
+    }
     let room;
     try {
-      room = createRoomOrThrow();
+      room = createRoomOrThrow(createRoomOptsForLocalShard());
     } catch (e) {
       logMp("pair_casual_busy", { error: e?.message });
       break;
     }
+    void rememberRoomShard(room.code);
     room.winPoints = 15;
     room.sockets[0] = sid0;
     room.sockets[1] = sid1;
@@ -415,11 +496,13 @@ function pairQueueSockets(io) {
       ...roomPublicView(room, 0),
       seat: 0,
       seatToken: seatTokenFor(room, 0),
+      shardId: shardIdForRoom(room.code),
     });
     io.to(sid1).emit("match_found", {
       ...roomPublicView(room, 1),
       seat: 1,
       seatToken: seatTokenFor(room, 1),
+      shardId: shardIdForRoom(room.code),
     });
     broadcastRoomState(room);
     pair = takePair();
@@ -545,6 +628,43 @@ function replayPayload(room) {
   return buildReplayPayload(room);
 }
 
+function createRoomOptsForLocalShard() {
+  if (getShardCount() <= 1) return {};
+  return {
+    preferShard: getLocalShardId(),
+    shardCount: getShardCount(),
+    shardIdFor: shardIdForRoom,
+  };
+}
+
+function rejectUnlessGateway(ack, event) {
+  if (isGatewayRole()) return false;
+  ack?.({
+    ok: false,
+    error: "WRONG_ROLE",
+    reason: "GATEWAY_ONLY",
+    event,
+    processRole: PROCESS_ROLE,
+    serverUrl: getGatewayUrl(),
+  });
+  return true;
+}
+
+function rejectUnlessGame(ack, event) {
+  if (isGameRole()) return false;
+  const urls = shardHealth().gameShardUrls;
+  ack?.({
+    ok: false,
+    error: "WRONG_ROLE",
+    reason: "GAME_ONLY",
+    event,
+    processRole: PROCESS_ROLE,
+    serverUrl: shardUrlForRoom("DRAGON-HOME") || null,
+    gameShardUrls: urls,
+  });
+  return true;
+}
+
 io.on("connection", (socket) => {
   socket.emit("hello", {
     ok: true,
@@ -552,16 +672,21 @@ io.on("connection", (socket) => {
     gameVersion: GAME_VERSION,
     protocolVersion: 2,
     turnTimeoutMs: TURN_TIMEOUT_MS,
+    processRole: PROCESS_ROLE,
+    shardId: getLocalShardId(),
+    shardCount: getShardCount(),
   });
 
   socket.on("create_room", (_payload, ack) => {
+    if (rejectUnlessGame(ack, "create_room")) return;
     let room;
     try {
-      room = createRoomOrThrow();
+      room = createRoomOrThrow(createRoomOptsForLocalShard());
     } catch (e) {
       ack?.({ ok: false, error: e?.code || e?.message || "SERVER_BUSY" });
       return;
     }
+    void rememberRoomShard(room.code);
     const joined = joinRoom(room.code, socket.id, false);
     if (!joined.ok) {
       ack?.({ ok: false, error: joined.error });
@@ -575,20 +700,34 @@ io.on("connection", (socket) => {
       ...view,
       seat: joined.seat,
       seatToken: joined.seatToken || seatTokenFor(room, joined.seat),
+      shardId: shardIdForRoom(room.code),
     });
     broadcastRoomState(room);
   });
 
-  socket.on("join_room", (payload, ack) => {
+  socket.on("join_room", async (payload, ack) => {
+    if (rejectUnlessGame(ack, "join_room")) return;
     const schema = validateJoinRoom(payload);
     if (!schema.ok) return ack?.({ ok: false, error: schema.error });
     const code = payload?.code;
+    if (getShardCount() > 1 && code && !thisProcessOwnsRoom(code)) {
+      void rememberRoomShard(code);
+      return ack?.(buildShardRedirect(code, "WRONG_SHARD"));
+    }
     const seatToken = payload?.seatToken ? String(payload.seatToken) : null;
     const joined = joinRoom(code, socket.id, payload?.preferSeat, seatToken);
     if (!joined.ok) {
+      // Sala inexistente neste processo — pode viver noutro shard.
+      if (joined.error === "ROOM_NOT_FOUND" && getShardCount() > 1 && code) {
+        const id = await lookupRoomShard(code);
+        if (id !== getLocalShardId()) {
+          return ack?.(buildShardRedirect(code, "WRONG_SHARD"));
+        }
+      }
       ack?.({ ok: false, error: joined.error });
       return;
     }
+    void rememberRoomShard(joined.room.code);
     socketRoom.set(socket.id, joined.room.code);
     socket.join(joined.room.code);
     touchLastSeen(joined.room, joined.seat);
@@ -602,6 +741,7 @@ io.on("connection", (socket) => {
       reconnected: !!joined.reconnected,
       replay,
       gameVersion: GAME_VERSION,
+      shardId: shardIdForRoom(joined.room.code),
     });
     broadcastRoomState(joined.room);
     if (joined.reconnected) {
@@ -721,6 +861,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("join_ranked_queue", async (payload, ack) => {
+    if (rejectUnlessGateway(ack, "join_ranked_queue")) return;
     const schema = validateJoinRankedQueue(payload);
     if (!schema.ok) return ack?.({ ok: false, error: schema.error });
     removeFromQueue(socket.id);
@@ -773,6 +914,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("join_queue", (_payload, ack) => {
+    if (rejectUnlessGateway(ack, "join_queue")) return;
     removeFromRankedQueue(socket.id);
     removeFromQueue(socket.id);
     const code = socketRoom.get(socket.id);
@@ -814,6 +956,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("game_action", (payload, ack) => {
+    if (rejectUnlessGame(ack, "game_action")) return;
     void (async () => {
     const t0 = Date.now();
     const actionType = payload?.action?.type || payload?.type;
@@ -979,6 +1122,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("get_replay", (payload, ack) => {
+    if (rejectUnlessGame(ack, "get_replay")) return;
     const schema = validateGetReplay(payload);
     if (!schema.ok) return ack?.({ ok: false, error: schema.error });
     const room = getRoom(socketRoom.get(socket.id));
@@ -1237,9 +1381,12 @@ httpServer.listen(PORT, () => {
   logMp("boot", {
     gameVersion: GAME_VERSION,
     rooms: listRoomsCount(),
+    processRole: PROCESS_ROLE,
+    shardId: getLocalShardId(),
+    shardCount: getShardCount(),
     postgres: isPostgresEnabled(),
     matchmaking: getMatchmakingMode(),
-    motorOk: motor.motorOk,
+    motorOk: !!motor.motorOk,
     redisAdapter: isRedisAdapterAttached(),
   });
 });
