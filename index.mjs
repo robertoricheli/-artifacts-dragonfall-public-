@@ -1232,18 +1232,27 @@ io.on("connection", (socket) => {
         seat: info?.seat ?? seat,
         canReconnect: true,
         abandoned: true,
+        turnDeadline: room.turnDeadline || null,
       });
       markSeatAbandonedForAi(room, seat, io, {
         emitEnvelope: emitActionEnvelope,
         onAfterAction: afterAuthoritativeAction,
         persist: () => touchPersist(room),
+        forceEndTurn: forceServerEndTurn,
         onAiTakeover: () => {
           resetTurnTimer(room);
           emitTurnDeadline(room);
         },
       });
-      resetTurnTimer(room);
-      emitTurnDeadline(room);
+      // Se forceEndTurn não rodou (deadline ok), alinha o timer do peer.
+      {
+        const cp = room.gameState?.currentPlayer;
+        const deadlineExpired = room.turnDeadline && room.turnDeadline <= Date.now();
+        if (!(deadlineExpired && cp === seat)) {
+          resetTurnTimer(room);
+          emitTurnDeadline(room);
+        }
+      }
       touchPersist(room);
       ack?.({ ok: true, abandoned: true });
       return;
@@ -1293,11 +1302,13 @@ io.on("connection", (socket) => {
         forfeit: true,
         winner: win | 0,
         canReconnect: false,
+        turnDeadline: room.turnDeadline || null,
       });
     } else {
       emitRoom(room, "peer_disconnected", {
         seat: info?.seat,
         canReconnect: room.status === "playing",
+        turnDeadline: room.turnDeadline || null,
       });
     }
     if (room.status === "playing" && info?.seat != null) {
@@ -1307,13 +1318,14 @@ io.on("connection", (socket) => {
         emitEnvelope: emitActionEnvelope,
         onAfterAction: afterAuthoritativeAction,
         persist: () => touchPersist(room),
+        forceEndTurn: forceServerEndTurn,
         onAiTakeover: () => {
           resetTurnTimer(room);
           emitTurnDeadline(room);
         },
       });
       if (deadlineExpired && cp === info.seat) {
-        // Tempo esgotado no assento que caiu: encerra o turno (ou IA assume após grace).
+        // Tempo esgotado no assento que caiu: encerra o turno imediatamente.
         forceServerEndTurn(room);
       } else {
         resetTurnTimer(room);

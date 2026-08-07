@@ -174,11 +174,22 @@ export function markSeatDisconnectedForAi(room, seat, io, hooks) {
     if (room.sockets[seat]) return; // reconectou
     room.aiControlled[seat] = true;
     try {
-      io.to(room.code).emit("peer_ai_control", { seat, active: true });
+      io.to(room.code).emit("peer_ai_control", {
+        seat,
+        active: true,
+        turnDeadline: room.turnDeadline || null,
+      });
     } catch (e) { /* */ }
     try { hooks?.onAiTakeover?.(room, seat); } catch (e) { /* */ }
     try { hooks?.persist?.(); } catch (e) { /* */ }
-    scheduleServerAi(room, io, hooks);
+    // Deadline já passou no assento desconectado: força fim de turno imediatamente.
+    const cp = room.gameState?.currentPlayer;
+    const deadlineExpired = room.turnDeadline && room.turnDeadline <= Date.now();
+    if (deadlineExpired && cp === seat && typeof hooks?.forceEndTurn === "function") {
+      try { hooks.forceEndTurn(room); } catch (e) { /* */ }
+    } else {
+      scheduleServerAi(room, io, hooks);
+    }
   }, AI_GRACE_MS);
 }
 
@@ -196,11 +207,21 @@ export function markSeatAbandonedForAi(room, seat, io, hooks) {
   }
   room.aiControlled[seat] = true;
   try {
-    io.to(room.code).emit("peer_ai_control", { seat, active: true });
+    io.to(room.code).emit("peer_ai_control", {
+      seat,
+      active: true,
+      turnDeadline: room.turnDeadline || null,
+    });
   } catch (e) { /* */ }
   try { hooks?.onAiTakeover?.(room, seat); } catch (e) { /* */ }
   try { hooks?.persist?.(); } catch (e) { /* */ }
-  scheduleServerAi(room, io, hooks);
+  const cp = room.gameState?.currentPlayer;
+  const deadlineExpired = room.turnDeadline && room.turnDeadline <= Date.now();
+  if (deadlineExpired && cp === seat && typeof hooks?.forceEndTurn === "function") {
+    try { hooks.forceEndTurn(room); } catch (e) { /* */ }
+  } else {
+    scheduleServerAi(room, io, hooks);
+  }
 }
 
 export function onHumanReconnectedClearAi(room, seat, io) {

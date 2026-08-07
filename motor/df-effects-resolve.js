@@ -19,6 +19,11 @@ function markOnEnterUsed(state, pIdx, key) {
     if (key && !p.onEnterUsedThisTurn.includes(key))
         p.onEnterUsedThisTurn.push(key);
 }
+/** Marca o campeão: instantânea só na 1ª entrada em qualquer campo. */
+function markChampOnEnterConsumed(champ) {
+    if (champ && typeof champ === "object")
+        champ.onEnterConsumed = true;
+}
 function swapFieldChamps(state, casterIdx, casterFieldIdx, enemyP, enemyI) {
     const a = state.players[casterIdx].field[casterFieldIdx];
     const e = state.players[enemyP].field[enemyI];
@@ -33,6 +38,9 @@ function swapFieldChamps(state, casterIdx, casterFieldIdx, enemyP, enemyI) {
         ch.guerraBuff = false;
         ch.guerraBuffTurns = 0;
     }
+    // Troca não é nova entrada — ambos já tiveram (ou terão) onEnter na 1ª invocação.
+    markChampOnEnterConsumed(a);
+    markChampOnEnterConsumed(e);
     state.players[casterIdx].field[casterFieldIdx] = e;
     state.players[enemyP].field[enemyI] = a;
     return true;
@@ -186,6 +194,9 @@ function planOnEnterImpl(state, casterIdx, fieldIdx) {
     const caster = state.players[casterIdx]?.field?.[fieldIdx];
     if (!caster?.onEnter)
         return { ok: true, mode: "none" };
+    // Instantânea só na 1ª entrada em qualquer campo (Troca Injusta não reativa).
+    if (caster.onEnterConsumed)
+        return { ok: true, mode: "none" };
     const key = caster.onEnter;
     const ctx = R()?.summonContextForPlayer(state, casterIdx) || {};
     const leg = getEffectsApi()?.canOnEnter?.(state, casterIdx, caster, ctx);
@@ -227,8 +238,11 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
     const caster = state.players[casterIdx]?.field?.[fieldIdx];
     if (!caster?.onEnter)
         return { ok: true, state, events };
+    if (caster.onEnterConsumed)
+        return { ok: true, state, events };
     if (caster.silenced)
         return { ok: true, state, events };
+    const enteringChamp = caster;
     const key = caster.onEnter;
     const rng = resolution.rng || Math.random;
     switch (key) {
@@ -792,6 +806,8 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
         default:
             events.push({ type: "ON_ENTER_DELEGATE", onEnter: key, casterIdx, fieldIdx });
     }
+    if (events.length)
+        markChampOnEnterConsumed(enteringChamp);
     const winner = R()?.findWinnerIndex(state);
     if (winner != null) {
         state.winner = winner;

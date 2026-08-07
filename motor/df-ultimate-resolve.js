@@ -299,7 +299,20 @@ function summonDragonToken(state, pIdx, events) {
         isToken: true,
     };
     pl.field.push(champ);
-    events.push({ type: "SUMMON", playerId: pIdx, fieldIdx: pl.field.length - 1, card: champ, reason: "summonDragonUlt" });
+    const insertIdx = pl.field.length - 1;
+    // DRAGON_TOKEN_SUMMON: peer/caster deferem paint até animateDragonSummon (MP).
+    events.push({
+        type: "DRAGON_TOKEN_SUMMON",
+        casterIdx: pIdx,
+        playerId: pIdx,
+        insertIdx,
+        fieldIdx: insertIdx,
+        cardName: champ.name,
+        uid: champ.uid,
+        card: champ,
+        visual: "dragon_token_summon",
+        reason: "summonDragonUlt",
+    });
     return true;
 }
 function scareReturn(state, pIdx, targetP, targetI, events) {

@@ -213,11 +213,20 @@ function normalizeOnEnterVisual(ev) {
       out.picks = out.hits.map((h) => ({ p: h.p, i: h.i }));
     }
     if (!out.fieldPatches?.length && Array.isArray(out.hits)) {
-      out.fieldPatches = out.hits.map((h) => (
-        (h.after | 0) <= 0
-          ? { targetP: h.p, targetI: h.i, removed: true }
-          : { targetP: h.p, targetI: h.i, currentPower: h.after | 0 }
-      ));
+      out.fieldPatches = out.hits.map((h) => {
+        if (h.after != null && (h.after | 0) <= 0) {
+          return { targetP: h.p, targetI: h.i, removed: true };
+        }
+        if (h.after != null) {
+          return { targetP: h.p, targetI: h.i, currentPower: h.after | 0 };
+        }
+        const before = h.before != null ? (h.before | 0) : null;
+        return {
+          targetP: h.p,
+          targetI: h.i,
+          currentPower: before != null ? Math.max(0, before - 1) : undefined,
+        };
+      }).filter((p) => p.currentPower != null || p.removed);
     }
   }
   return out;
@@ -304,7 +313,7 @@ function mapEventTypeToVisual(ev) {
 /** Kinds que podem rodar em paralelo no peer (FX). */
 const PARALLEL_FX_KINDS = new Set([
   "pesadelo", "wings", "roubar", "desacelerar", "strong_arm",
-  "bola_de_fogo", "assassinar", "maldicao_sete_mares", "troca_injusta",
+  "bola_de_fogo", "assassinar", "maldicao_sete_mares",
   "devour", "imitar", "ursificacao", "transformar_bichinho", "fury",
   "fire_aura", "guardiao", "guardian", "fumaca_toxica", "raio_duplo",
   "explosao", "zero_absoluto", "barrier_grant", "baforada_venenosa",
@@ -317,7 +326,7 @@ const PARALLEL_FX_KINDS = new Set([
 
 const BOARD_SERIAL_KINDS = new Set([
   "talent_cast", "talent_discard", "summon_land", "combat", "destroy",
-  "dragon_token_summon", "scare_return", "doppel_clone",
+  "dragon_token_summon", "scare_return", "doppel_clone", "troca_injusta",
 ]);
 
 /**
@@ -453,11 +462,17 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
     if (ev.type === "RAIO_DUPLO" && Array.isArray(ev.hits)) {
       for (const h of ev.hits) {
         if (!h || h.p == null) continue;
-        if ((h.after | 0) <= 0) {
+        if (h.after != null && (h.after | 0) <= 0) {
           fieldPatches.push({ targetP: h.p, targetI: h.i, removed: true });
           deferBoardApply = true;
-        } else {
+        } else if (h.after != null) {
           fieldPatches.push({ targetP: h.p, targetI: h.i, currentPower: h.after | 0 });
+        } else if (h.before != null) {
+          fieldPatches.push({
+            targetP: h.p,
+            targetI: h.i,
+            currentPower: Math.max(0, (h.before | 0) - 1),
+          });
         }
       }
     }
