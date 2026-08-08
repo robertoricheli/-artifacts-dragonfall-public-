@@ -541,11 +541,32 @@ function afterAuthoritativeAction(room, state) {
   touchPersist(room);
   maybeFinishMatch(room, state);
   if (room.status === "playing" && state?.winner == null) {
-    scheduleServerAi(room, io, {
-      emitEnvelope: emitActionEnvelope,
-      onAfterAction: afterAuthoritativeAction,
-    });
+    scheduleServerAi(room, io, serverAiHooks(room));
   }
+}
+
+/** Hooks da IA disconnect — sem reentrar schedule a cada passo. */
+function serverAiHooks(room) {
+  return {
+    emitEnvelope: emitActionEnvelope,
+    onAfterAction: afterAuthoritativeAction,
+    onAfterAiStep: (r, state) => {
+      broadcastRoomState(r);
+      touchPersist(r);
+      maybeFinishMatch(r, state);
+    },
+    maybeFinish: (r, state) => maybeFinishMatch(r, state),
+    resetTurnTimer,
+    persist: () => touchPersist(room),
+    onAiTakeover: () => {
+      resetTurnTimer(room);
+      emitTurnDeadline(room);
+    },
+    onExtendDeadline: () => {
+      resetTurnTimer(room);
+      emitTurnDeadline(room);
+    },
+  };
 }
 
 function clearTurnTimer(room) {
@@ -587,10 +608,7 @@ function forceServerEndTurn(room) {
     touchPersist(room);
     maybeFinishMatch(room, result.state);
     if (room.status === "playing" && result.state?.winner == null) {
-      scheduleServerAi(room, io, {
-        emitEnvelope: emitActionEnvelope,
-        onAfterAction: afterAuthoritativeAction,
-      });
+      scheduleServerAi(room, io, serverAiHooks(room));
     }
   }).catch((e) => console.warn("[forceEndTurn]", e?.message || e));
   return true;
@@ -603,6 +621,13 @@ function resetTurnTimer(room) {
   emitTurnDeadline(room);
   room.turnTimer = setTimeout(() => {
     if (room.status !== "playing") return;
+    // IA disconnect: não corta o turno — estende e deixa a IA jogar.
+    const cp = room.gameState?.currentPlayer;
+    if ((cp === 0 || cp === 1) && room.aiControlled?.[cp]) {
+      resetTurnTimer(room);
+      scheduleServerAi(room, io, serverAiHooks(room));
+      return;
+    }
     forceServerEndTurn(room);
   }, TURN_TIMEOUT_MS);
 }
@@ -617,10 +642,7 @@ function revivePlayingRoomTimers() {
     } else {
       resetTurnTimer(room);
     }
-    scheduleServerAi(room, io, {
-      emitEnvelope: emitActionEnvelope,
-      onAfterAction: afterAuthoritativeAction,
-    });
+    scheduleServerAi(room, io, serverAiHooks(room));
   }
 }
 
@@ -749,10 +771,7 @@ io.on("connection", (socket) => {
     }
     if (joined.room.status === "playing") {
       resetTurnTimer(joined.room);
-      scheduleServerAi(joined.room, io, {
-        emitEnvelope: emitActionEnvelope,
-        onAfterAction: afterAuthoritativeAction,
-      });
+      scheduleServerAi(joined.room, io, serverAiHooks(joined.room));
     }
   });
 
@@ -1073,10 +1092,7 @@ io.on("connection", (socket) => {
         touchPersist(room);
         await mirrorRoomNow(room);
         maybeFinishMatch(room, result.state);
-        scheduleServerAi(room, io, {
-          emitEnvelope: emitActionEnvelope,
-          onAfterAction: afterAuthoritativeAction,
-        });
+        scheduleServerAi(room, io, serverAiHooks(room));
 
         recordActionLatency(Date.now() - t0, {
           roomCode: room.code,
@@ -1234,25 +1250,7 @@ io.on("connection", (socket) => {
         abandoned: true,
         turnDeadline: room.turnDeadline || null,
       });
-      markSeatAbandonedForAi(room, seat, io, {
-        emitEnvelope: emitActionEnvelope,
-        onAfterAction: afterAuthoritativeAction,
-        persist: () => touchPersist(room),
-        forceEndTurn: forceServerEndTurn,
-        onAiTakeover: () => {
-          resetTurnTimer(room);
-          emitTurnDeadline(room);
-        },
-      });
-      // Se forceEndTurn não rodou (deadline ok), alinha o timer do peer.
-      {
-        const cp = room.gameState?.currentPlayer;
-        const deadlineExpired = room.turnDeadline && room.turnDeadline <= Date.now();
-        if (!(deadlineExpired && cp === seat)) {
-          resetTurnTimer(room);
-          emitTurnDeadline(room);
-        }
-      }
+      markSeatAbandonedForAi(room, seat, io, serverAiHooks(room));
       touchPersist(room);
       ack?.({ ok: true, abandoned: true });
       return;
@@ -1312,25 +1310,7 @@ io.on("connection", (socket) => {
       });
     }
     if (room.status === "playing" && info?.seat != null) {
-      const deadlineExpired = room.turnDeadline && room.turnDeadline <= Date.now();
-      const cp = room.gameState?.currentPlayer;
-      markSeatDisconnectedForAi(room, info.seat, io, {
-        emitEnvelope: emitActionEnvelope,
-        onAfterAction: afterAuthoritativeAction,
-        persist: () => touchPersist(room),
-        forceEndTurn: forceServerEndTurn,
-        onAiTakeover: () => {
-          resetTurnTimer(room);
-          emitTurnDeadline(room);
-        },
-      });
-      if (deadlineExpired && cp === info.seat) {
-        // Tempo esgotado no assento que caiu: encerra o turno imediatamente.
-        forceServerEndTurn(room);
-      } else {
-        resetTurnTimer(room);
-        emitTurnDeadline(room);
-      }
+      markSeatDisconnectedForAi(room, info.seat, io, serverAiHooks(room));
     }
     broadcastRoomState(room);
     touchPersist(room);

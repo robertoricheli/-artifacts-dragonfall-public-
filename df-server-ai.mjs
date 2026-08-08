@@ -1,23 +1,33 @@
 /**
  * IA no servidor para assentos desconectados (Rankeado / PvP).
- * Usa DfEngine.listLegalActions + scoring estilo vs-IA Difícil (ai-hard.json).
+ * Paridade com vs-IA Difícil: mesmo cérebro + ritmo 1,5s entre ações.
  */
 import { applyAuthoritativeAction } from "./df-authority.mjs";
 import { withRoomLock, mirrorRoomNow } from "./df-room-store.mjs";
 import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
-import { pickBestHardAction, scoreLegalAction } from "./df-server-ai-hard.mjs";
+import {
+  pickBestHardAction,
+  pickNextAction,
+  pickOnEnterResolution,
+  scoreLegalAction,
+  listTalentPlays,
+  pickUltimate,
+} from "./df-ai-hard-brain.mjs";
 
 const AI_GRACE_MS = 8000;
-/** Ritmo pedido pelo autor: ~1,5s entre ações da IA no disconnect. */
+/** Ritmo pedido pelo autor: 1,5s entre ações da IA no disconnect. */
 const AI_STEP_MS = 1500;
-const AI_MAX_STEPS_PER_TURN = 12;
-/** Budget de CPU por tick — cede o event loop (Fase 3). */
+const AI_MAX_STEPS_PER_TURN = 18;
 const AI_TICK_BUDGET_MS = Number(process.env.DF_AI_TICK_BUDGET_MS) || 40;
+/** Renova o relógio do turno quando a IA assume. */
+const AI_TURN_EXTEND_MS = Number(process.env.DF_TURN_TIMEOUT_MS) || 70000;
 
 function ensureAiFlags(room) {
   if (!room.aiControlled) room.aiControlled = [false, false];
   if (!room.aiGraceTimer) room.aiGraceTimer = [null, null];
   if (!room.aiStepTimer) room.aiStepTimer = null;
+  if (!room.aiPhase) room.aiPhase = "talent";
+  if (room.aiMainFloor == null) room.aiMainFloor = 5;
 }
 
 export function clearAiSeat(room, seat) {
@@ -38,15 +48,8 @@ export function clearAllAi(room) {
     clearTimeout(room.aiStepTimer);
     room.aiStepTimer = null;
   }
-}
-
-function listLegal(state, seat) {
-  const { DfEngine } = bootDragonfallEngine();
-  return DfEngine.listLegalActions(state, seat, {
-    strictFumacaToxica: true,
-    avoidEnemyOnEnterWaste: enemyFieldCount(state, seat) === 0,
-    allowWastedOnEnter: false,
-  }) || [];
+  room.aiPhase = "talent";
+  room.aiMainFloor = 5;
 }
 
 function enemyFieldCount(state, seat) {
@@ -58,6 +61,15 @@ function enemyFieldCount(state, seat) {
   return n;
 }
 
+function listLegal(state, seat) {
+  const { DfEngine } = bootDragonfallEngine();
+  return DfEngine.listLegalActions(state, seat, {
+    strictFumacaToxica: true,
+    avoidEnemyOnEnterWaste: enemyFieldCount(state, seat) === 0,
+    allowWastedOnEnter: false,
+  }) || [];
+}
+
 function actionKey(a) {
   if (!a?.type) return "";
   if (a.type === "SUMMON") return `SUMMON:${a.handIdx}`;
@@ -65,46 +77,174 @@ function actionKey(a) {
     return `ATK:${a.attackerIdx}:${a.defenderPlayerId}:${a.defenderIdx}`;
   }
   if (a.type === "TALENT_START") return `TALENT:${a.handIdx}`;
+  if (a.type === "ULTIMATE_PLAY") return `ULT:${a.ultimateType}:${a.targetP}:${a.targetI}`;
+  if (a.type === "TALENT_TARGET") return `TT:${a.targetP}:${a.targetI}`;
   return a.type;
 }
 
-/**
- * Escolhe ação; em falha tenta a próxima melhor (não END_TURN imediato).
- */
-function pickAndApplyAiAction(room, seat) {
-  const tried = new Set();
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const legal = listLegal(room.gameState, seat);
-    const candidates = legal
-      .filter((a) => a?.type && a.type !== "END_TURN" && !tried.has(actionKey(a)))
-      .map((a) => ({ a, s: scoreLegalAction(room.gameState, seat, a) }))
-      .sort((x, y) => y.s - x.s);
+function delayMs() {
+  return Math.max(AI_STEP_MS, AI_TICK_BUDGET_MS);
+}
 
-    let action = null;
-    if (candidates.length && candidates[0].s >= -20) {
-      action = { ...candidates[0].a, playerId: seat };
-    } else {
-      action = pickBestHardAction(room.gameState, seat, legal);
+function extendAiTurnDeadline(room, hooks) {
+  try {
+    room.turnDeadline = Date.now() + AI_TURN_EXTEND_MS;
+    if (typeof hooks?.resetTurnTimer === "function") {
+      hooks.resetTurnTimer(room);
+    } else if (typeof hooks?.onExtendDeadline === "function") {
+      hooks.onExtendDeadline(room);
     }
-    if (!action) action = { type: "END_TURN", playerId: seat };
-
-    tried.add(actionKey(action));
-    const result = applyAuthoritativeAction(room, seat, action, null);
-    if (result.ok) {
-      return { action, result };
-    }
-    if (action.type === "END_TURN") {
-      return { action, result };
-    }
-  }
-  const end = applyAuthoritativeAction(room, seat, { type: "END_TURN", playerId: seat }, null);
-  return { action: { type: "END_TURN", playerId: seat }, result: end };
+  } catch (e) { /* */ }
 }
 
 /**
- * Após SUMMON: resolve on-enter com alvo (ABILITY_TARGET) se ainda pendente.
+ * Escolhe e aplica a próxima ação do turno (fases talent → ult_early → main → ult_end → end).
  */
-function tryResolvePendingOnEnter(room, seat, summonResult) {
+function pickAndApplyAiAction(room, seat) {
+  ensureAiFlags(room);
+  const state = room.gameState;
+  const tried = new Set();
+
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const legal = listLegal(state, seat);
+    const actionsLeft = state.players[seat]?.actions ?? 0;
+    let phase = room.aiPhase || "talent";
+
+    // Avança fases automaticamente.
+    if (phase === "talent") {
+      const talents = listTalentPlays(state, seat);
+      if (!talents.length) {
+        room.aiPhase = "ult_early";
+        phase = "ult_early";
+      }
+    }
+    if (phase === "ult_early") {
+      const ult = pickUltimate(state, seat, false);
+      if (!ult) {
+        room.aiPhase = "main";
+        room.aiMainFloor = enemyFieldCount(state, seat) === 0 ? 1 : 5;
+        phase = "main";
+      }
+    }
+    if (phase === "main" && actionsLeft <= 0) {
+      room.aiPhase = "ult_end";
+      phase = "ult_end";
+    }
+    if (phase === "ult_end") {
+      const ult = pickUltimate(state, seat, true);
+      if (!ult) {
+        room.aiPhase = "end";
+        phase = "end";
+      }
+    }
+
+    let action = null;
+    let score = -9999;
+
+    if (phase === "talent") {
+      action = pickNextAction(state, seat, { phase: "talent" });
+    } else if (phase === "ult_early") {
+      action = pickNextAction(state, seat, { phase: "ult_early" });
+      if (!action) {
+        room.aiPhase = "main";
+        continue;
+      }
+    } else if (phase === "ult_end") {
+      action = pickNextAction(state, seat, { phase: "ult_end" });
+      if (!action) {
+        room.aiPhase = "end";
+        continue;
+      }
+    } else if (phase === "end") {
+      action = { type: "END_TURN", playerId: seat };
+    } else {
+      // main — floor 5 → 0 → força jogada
+      let floor = room.aiMainFloor ?? 5;
+      action = pickBestHardAction(state, seat, legal, { minScore: floor });
+      score = action?._score ?? scoreLegalAction(state, seat, action);
+      if ((!action || action.type === "END_TURN") && floor > 0) {
+        room.aiMainFloor = 0;
+        action = pickBestHardAction(state, seat, legal, { minScore: 0 });
+        score = action?._score ?? -9999;
+      }
+      // Anti-pass: se ainda END_TURN mas há summon/attack legal, força o melhor.
+      if (action?.type === "END_TURN") {
+        const playable = legal.filter((a) => a?.type === "SUMMON" || a?.type === "ATTACK_RESOLVE"
+          || a?.type === "DRAW_CARD");
+        if (playable.length && actionsLeft > 0) {
+          action = pickBestHardAction(state, seat, playable, { minScore: -999 });
+          score = action?._score ?? -9999;
+          if (action?.type === "END_TURN") {
+            const first = playable[0];
+            action = { ...first, playerId: seat };
+          }
+        }
+      }
+    }
+
+    if (!action) action = { type: "END_TURN", playerId: seat };
+    action = { ...action, playerId: seat };
+
+    if (tried.has(actionKey(action))) {
+      if (action.type === "END_TURN") break;
+      tried.add(actionKey(action));
+      // pula para próxima
+      if (phase === "talent") room.aiPhase = "ult_early";
+      else if (phase === "ult_early") room.aiPhase = "main";
+      else if (phase === "main") room.aiMainFloor = Math.min(room.aiMainFloor ?? 5, 0);
+      else if (phase === "ult_end") room.aiPhase = "end";
+      continue;
+    }
+    tried.add(actionKey(action));
+
+    // TALENT_START: só inicia; follow-up via TALENT_TARGET / mutações no tick.
+    const talentMeta = action._talentEffect ? { ...action } : null;
+    const cleanAction = { ...action };
+    delete cleanAction._score;
+    delete cleanAction._talentEffect;
+    delete cleanAction._target;
+    delete cleanAction.card;
+
+    const result = applyAuthoritativeAction(room, seat, cleanAction, null);
+    if (result.ok) {
+      if (phase === "talent") {
+        // Após um talento, tenta mais talentos; senão avança.
+        room.aiPhase = "talent";
+      } else if (phase === "ult_early") {
+        room.aiPhase = "main";
+        room.aiMainFloor = enemyFieldCount(room.gameState, seat) === 0 ? 1 : 5;
+      } else if (phase === "ult_end") {
+        room.aiPhase = "end";
+      } else if (phase === "main") {
+        room.aiMainFloor = enemyFieldCount(room.gameState, seat) === 0 ? 1 : 5;
+      }
+      console.info(
+        `[server-ai] seat=${seat} phase=${phase} action=${cleanAction.type}`
+        + ` score=${score !== -9999 ? score : (action._score ?? "?")}`,
+      );
+      return {
+        action: cleanAction,
+        result,
+        talentMeta,
+        phase,
+      };
+    }
+    console.warn(`[server-ai] reject ${cleanAction.type}`, result?.error || "");
+    if (cleanAction.type === "END_TURN") {
+      return { action: cleanAction, result, phase };
+    }
+    // Talent/ult falhou → avança fase.
+    if (phase === "talent") room.aiPhase = "ult_early";
+    else if (phase === "ult_early") room.aiPhase = "main";
+    else if (phase === "ult_end") room.aiPhase = "end";
+  }
+
+  const end = applyAuthoritativeAction(room, seat, { type: "END_TURN", playerId: seat }, null);
+  room.aiPhase = "talent";
+  return { action: { type: "END_TURN", playerId: seat }, result: end, phase: "end" };
+}
+
+function buildPendingOnEnterAction(room, seat, summonResult) {
   const events = summonResult?.events || [];
   const pending = events.find((e) => e?.type === "ON_ENTER_PENDING");
   if (!pending) return null;
@@ -121,14 +261,19 @@ function tryResolvePendingOnEnter(room, seat, summonResult) {
   } catch (e) { /* */ }
   if (!plan?.ok) return null;
   if (plan.mode === "blocked" || plan.mode === "necromancia_pick") return null;
-  let resolution = {};
-  try {
-    if (typeof DfEngine.autoOnEnterResolution === "function") {
-      resolution = DfEngine.autoOnEnterResolution(state, cIdx, fIdx, plan, Math.random) || {};
-    }
-  } catch (e) { /* */ }
+
   const abilityKey = state.players[cIdx].field[fIdx]?.onEnter || plan.onEnter;
-  const action = {
+  let resolution = pickOnEnterResolution(state, seat, abilityKey, cIdx, fIdx) || {};
+  if (!resolution || (resolution.targetP == null && resolution.targetI == null
+      && resolution.targetPlayerIdx == null && resolution.targetIdx == null)) {
+    try {
+      if (typeof DfEngine.autoOnEnterResolution === "function") {
+        resolution = DfEngine.autoOnEnterResolution(state, cIdx, fIdx, plan, Math.random) || {};
+      }
+    } catch (e) { /* */ }
+  }
+
+  return {
     type: "ABILITY_TARGET",
     playerId: cIdx,
     casterIdx: cIdx,
@@ -139,9 +284,24 @@ function tryResolvePendingOnEnter(room, seat, summonResult) {
     targetPlayerIdx: resolution.targetPlayerIdx ?? resolution.targetIdx,
     resolution,
   };
-  const result = applyAuthoritativeAction(room, seat, action, null);
-  if (!result.ok) return null;
-  return { action, result };
+}
+
+function buildTalentTargetAction(seat, talentMeta) {
+  if (!talentMeta?._talentEffect || !talentMeta._target) return null;
+  const te = talentMeta._talentEffect;
+  const needsTarget = [
+    "bolaDeFogoTalento", "explosao", "zeroAbsoluto", "medoTalento",
+    "baforadaVenenosa", "fortalecerTalento",
+  ].includes(te);
+  if (!needsTarget) return null;
+  return {
+    type: "TALENT_TARGET",
+    playerId: seat,
+    talentEffect: te,
+    targetP: talentMeta._target.targetP,
+    targetI: talentMeta._target.targetI,
+    handIdx: talentMeta.handIdx,
+  };
 }
 
 async function emitAiEnvelope(room, hooks, seat, action, result) {
@@ -158,14 +318,26 @@ async function emitAiEnvelope(room, hooks, seat, action, result) {
   if (result.state) room.lastSnapshot = { state: result.state, full: true };
   await mirrorRoomNow(room);
   hooks.emitEnvelope(room, envelope);
-  hooks.onAfterAction(room, result.state);
+  // Não chamar onAfterAction completo (resetTurnTimer a cada passo) — só finish check.
+  try {
+    hooks.onAfterAiStep?.(room, result.state);
+  } catch (e) { /* */ }
+  try {
+    hooks.maybeFinish?.(room, result.state);
+  } catch (e) {
+    try { hooks.onAfterAction?.(room, result.state); } catch (e2) { /* */ }
+  }
   return envelope;
+}
+
+function scheduleNextTick(room, tickFn) {
+  room.aiStepTimer = setTimeout(() => setImmediate(tickFn), delayMs());
 }
 
 /**
  * @param {object} room
  * @param {import('socket.io').Server} io
- * @param {{ emitEnvelope: Function, onAfterAction: Function }} hooks
+ * @param {{ emitEnvelope: Function, onAfterAction: Function, resetTurnTimer?: Function }} hooks
  */
 export function scheduleServerAi(room, io, hooks) {
   ensureAiFlags(room);
@@ -179,7 +351,14 @@ export function scheduleServerAi(room, io, hooks) {
   if (cp !== 0 && cp !== 1) return;
   if (!room.aiControlled[cp]) return;
 
-  let steps = 0;
+  // Novo turno IA: reinicia fases.
+  if (room.aiTurnSeat !== cp) {
+    room.aiTurnSeat = cp;
+    room.aiPhase = "talent";
+    room.aiMainFloor = enemyFieldCount(room.gameState, cp) === 0 ? 1 : 5;
+    room.aiStepsThisTurn = 0;
+  }
+
   const tick = () => {
     room.aiStepTimer = null;
     void withRoomLock(room.code, async () => {
@@ -188,65 +367,93 @@ export function scheduleServerAi(room, io, hooks) {
       if (seat !== 0 && seat !== 1) return;
       if (!room.aiControlled[seat]) return;
 
-      const { action, result } = pickAndApplyAiAction(room, seat);
+      if (room.aiTurnSeat !== seat) {
+        room.aiTurnSeat = seat;
+        room.aiPhase = "talent";
+        room.aiMainFloor = enemyFieldCount(room.gameState, seat) === 0 ? 1 : 5;
+        room.aiStepsThisTurn = 0;
+      }
+
+      const pack = pickAndApplyAiAction(room, seat);
+      const { action, result, talentMeta } = pack;
       if (!result?.ok) return;
 
       await emitAiEnvelope(room, hooks, seat, action, result);
+      room.aiStepsThisTurn = (room.aiStepsThisTurn || 0) + 1;
 
-      // SUMMON → on-enter com alvo no mesmo “passo lógico”, mas envelope separado
-      // após o delay padrão (humano lê a invocação).
-      let followUp = null;
+      // Follow-ups com delay dedicado (humano lê a jogada) — apply no emit.
+      const followActions = [];
       if (action.type === "SUMMON") {
-        followUp = tryResolvePendingOnEnter(room, seat, result);
+        const fa = buildPendingOnEnterAction(room, seat, result);
+        if (fa) followActions.push(fa);
+      }
+      if (action.type === "TALENT_START" && talentMeta) {
+        const fa = buildTalentTargetAction(seat, talentMeta);
+        if (fa) followActions.push(fa);
       }
 
-      steps += 1;
-      const stillAiTurn =
-        room.status === "playing"
+      const stillAiTurn = () => room.status === "playing"
         && room.gameState?.winner == null
         && room.gameState?.currentPlayer === seat
         && room.aiControlled[seat]
-        && action.type !== "END_TURN"
-        && steps < AI_MAX_STEPS_PER_TURN;
+        && (room.aiStepsThisTurn || 0) < AI_MAX_STEPS_PER_TURN;
 
-      if (followUp?.result?.ok) {
-        const delay = Math.max(AI_STEP_MS, AI_TICK_BUDGET_MS);
-        room.aiStepTimer = setTimeout(() => {
-          void withRoomLock(room.code, async () => {
-            if (room.status !== "playing" || room.gameState?.winner != null) return;
-            if (room.gameState?.currentPlayer !== seat || !room.aiControlled[seat]) return;
-            await emitAiEnvelope(room, hooks, seat, followUp.action, followUp.result);
-            steps += 1;
-            if (
-              room.status === "playing"
-              && room.gameState?.winner == null
-              && room.gameState?.currentPlayer === seat
-              && room.aiControlled[seat]
-              && steps < AI_MAX_STEPS_PER_TURN
-            ) {
-              room.aiStepTimer = setTimeout(() => setImmediate(tick), AI_STEP_MS);
-            }
-          }).catch((e) => console.warn("[server-ai] onEnter", e?.message || e));
-        }, delay);
-        return;
-      }
+      const runFollowUpsThenContinue = async (idx) => {
+        if (idx < followActions.length) {
+          room.aiStepTimer = setTimeout(() => {
+            void withRoomLock(room.code, async () => {
+              if (!stillAiTurn()) return;
+              const fa = followActions[idx];
+              const fuResult = applyAuthoritativeAction(room, seat, fa, null);
+              if (fuResult?.ok) {
+                await emitAiEnvelope(room, hooks, seat, fa, fuResult);
+                room.aiStepsThisTurn = (room.aiStepsThisTurn || 0) + 1;
+              }
+              await runFollowUpsThenContinue(idx + 1);
+            }).catch((e) => console.warn("[server-ai] followUp", e?.message || e));
+          }, delayMs());
+          return;
+        }
+        if (action.type === "END_TURN") {
+          room.aiPhase = "talent";
+          room.aiTurnSeat = null;
+          if (room.aiControlled[room.gameState?.currentPlayer]) {
+            scheduleNextTick(room, tick);
+          }
+          return;
+        }
+        if (stillAiTurn()) {
+          scheduleNextTick(room, tick);
+        } else if (
+          room.status === "playing"
+          && room.gameState?.winner == null
+          && room.aiControlled[room.gameState?.currentPlayer]
+        ) {
+          scheduleNextTick(room, tick);
+        }
+      };
 
-      if (stillAiTurn) {
-        const delay = Math.max(AI_STEP_MS, AI_TICK_BUDGET_MS);
-        room.aiStepTimer = setTimeout(() => {
-          setImmediate(tick);
-        }, delay);
-      } else if (
-        room.status === "playing"
-        && room.gameState?.winner == null
-        && room.aiControlled[room.gameState?.currentPlayer]
-      ) {
-        room.aiStepTimer = setTimeout(() => setImmediate(tick), AI_STEP_MS);
-      }
+      await runFollowUpsThenContinue(0);
     }).catch((e) => console.warn("[server-ai] lock", e?.message || e));
   };
 
-  room.aiStepTimer = setTimeout(() => setImmediate(tick), AI_STEP_MS);
+  room.aiStepTimer = setTimeout(() => setImmediate(tick), delayMs());
+}
+
+function activateAiSeat(room, seat, io, hooks) {
+  room.aiControlled[seat] = true;
+  extendAiTurnDeadline(room, hooks);
+  try {
+    io.to(room.code).emit("peer_ai_control", {
+      seat,
+      active: true,
+      turnDeadline: room.turnDeadline || null,
+    });
+  } catch (e) { /* */ }
+  try { hooks?.onAiTakeover?.(room, seat); } catch (e) { /* */ }
+  try { hooks?.persist?.(); } catch (e) { /* */ }
+  // Sempre joga — NÃO forceEndTurn só porque o humano estourou o relógio.
+  scheduleServerAi(room, io, hooks);
 }
 
 /**
@@ -265,24 +472,8 @@ export function markSeatDisconnectedForAi(room, seat, io, hooks) {
   room.aiGraceTimer[seat] = setTimeout(() => {
     room.aiGraceTimer[seat] = null;
     if (room.status !== "playing" || room.gameState?.winner != null) return;
-    if (room.sockets[seat]) return; // reconectou
-    room.aiControlled[seat] = true;
-    try {
-      io.to(room.code).emit("peer_ai_control", {
-        seat,
-        active: true,
-        turnDeadline: room.turnDeadline || null,
-      });
-    } catch (e) { /* */ }
-    try { hooks?.onAiTakeover?.(room, seat); } catch (e) { /* */ }
-    try { hooks?.persist?.(); } catch (e) { /* */ }
-    const cpNow = room.gameState?.currentPlayer;
-    const deadlineExpired = room.turnDeadline && room.turnDeadline <= Date.now();
-    if (deadlineExpired && cpNow === seat && typeof hooks?.forceEndTurn === "function") {
-      try { hooks.forceEndTurn(room); } catch (e) { /* */ }
-    } else {
-      scheduleServerAi(room, io, hooks);
-    }
+    if (room.sockets[seat]) return;
+    activateAiSeat(room, seat, io, hooks);
   }, AI_GRACE_MS);
 }
 
@@ -295,23 +486,7 @@ export function markSeatAbandonedForAi(room, seat, io, hooks) {
     clearTimeout(room.aiGraceTimer[seat]);
     room.aiGraceTimer[seat] = null;
   }
-  room.aiControlled[seat] = true;
-  try {
-    io.to(room.code).emit("peer_ai_control", {
-      seat,
-      active: true,
-      turnDeadline: room.turnDeadline || null,
-    });
-  } catch (e) { /* */ }
-  try { hooks?.onAiTakeover?.(room, seat); } catch (e) { /* */ }
-  try { hooks?.persist?.(); } catch (e) { /* */ }
-  const cpNow = room.gameState?.currentPlayer;
-  const deadlineExpired = room.turnDeadline && room.turnDeadline <= Date.now();
-  if (deadlineExpired && cpNow === seat && typeof hooks?.forceEndTurn === "function") {
-    try { hooks.forceEndTurn(room); } catch (e) { /* */ }
-  } else {
-    scheduleServerAi(room, io, hooks);
-  }
+  activateAiSeat(room, seat, io, hooks);
 }
 
 export function onHumanReconnectedClearAi(room, seat, io) {
@@ -322,3 +497,4 @@ export function onHumanReconnectedClearAi(room, seat, io) {
 }
 
 export const SERVER_AI_GRACE_MS = AI_GRACE_MS;
+export const SERVER_AI_STEP_MS = AI_STEP_MS;
