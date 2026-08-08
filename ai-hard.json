@@ -1,0 +1,163 @@
+{
+  "version": 2,
+  "profile": "hard",
+  "trainedAt": "2026-06-01T17:35:22.041Z",
+  "sourceGames": 864,
+  "sourceFiles": [
+    "sim-batch-20260531220655.jsonl",
+    "sim-batch-20260531220920.jsonl",
+    "sim-batch-20260601113927.jsonl"
+  ],
+  "note": "Perfil Difícil — pesos ajustados para priorizar ataque/deny VP vs encher campo (1.49.7).",
+  "globals": {
+    "attackScoreMul": 1.08,
+    "summonScoreMul": 0.98,
+    "ultimateBias": 1.1,
+    "tradeAcceptMul": 1.05,
+    "vpRaceMul": 1.12,
+    "drawPenalty": -5,
+    "onEnterMul": 1.0441203703703703
+  },
+  "onEnter": {
+    "invokeDragon": 10,
+    "invokeCubicDragon": 10,
+    "rapidez": 13,
+    "fortalecer": 9,
+    "devourar": 8,
+    "summonRitual": 23,
+    "bolaDeFogo": 14,
+    "fumacaToxica": 15,
+    "raioDuplo": 16,
+    "auraDeFogo": 13,
+    "auraAntiMagia": 10,
+    "assassinar": 16,
+    "pesadelo": 7,
+    "roubar": 10,
+    "desacelerar": 9,
+    "sobrepujar": 6,
+    "fieldSlotBonus": 15,
+    "needPassiveVpBonus": 19
+  },
+  "attack": {
+    "cleanKillBase": 28,
+    "cleanKillPerDefPower": 10,
+    "lastChampionBonus": 45,
+    "growingDragonBonus": 18,
+    "sobrepujarDefBonus": 12,
+    "noHonorPenalty": 18,
+    "winNowBonus": 540,
+    "vpNeedBonus": 38,
+    "freeAttackBonus": 8,
+    "tradeKillPerPower": 5,
+    "tradePenalty": 12
+  },
+  "heroes": {
+    "euravia": {
+      "weight": 0.9744873682633219,
+      "wins": 28,
+      "played": 82
+    },
+    "hercules": {
+      "weight": 1.0036770298329587,
+      "wins": 43,
+      "played": 82
+    },
+    "vaughan": {
+      "weight": 1.0157420899484084,
+      "wins": 48,
+      "played": 80
+    },
+    "jekiro": {
+      "weight": 1.0139690882826973,
+      "wins": 53,
+      "played": 90
+    },
+    "ironGuard": {
+      "weight": 0.9684089218840267,
+      "wins": 27,
+      "played": 89
+    },
+    "paladino": {
+      "weight": 0.9804432386037932,
+      "wins": 25,
+      "played": 66
+    },
+    "iceWitch": {
+      "weight": 0.9622957023868471,
+      "wins": 22,
+      "played": 83
+    },
+    "valmont": {
+      "weight": 1.0190435413259398,
+      "wins": 54,
+      "played": 87
+    },
+    "sangueDragao": {
+      "weight": 1.0137474630744832,
+      "wins": 47,
+      "played": 80
+    },
+    "gancho": {
+      "weight": 1.04240997801623,
+      "wins": 56,
+      "played": 73
+    },
+    "alquimista": {
+      "weight": 0.9970338654757309,
+      "wins": 42,
+      "played": 87
+    },
+    "tecnomago": {
+      "weight": 1.0115181742153905,
+      "wins": 39,
+      "played": 68
+    },
+    "linguarudo": {
+      "weight": 1.0141054730262133,
+      "wins": 46,
+      "played": 78
+    },
+    "pirate": {
+      "weight": 1.0057904031795775,
+      "wins": 50,
+      "played": 93
+    },
+    "quimera": {
+      "weight": 0.9927155113532216,
+      "wins": 36,
+      "played": 79
+    },
+    "sinistrela": {
+      "weight": 1.0123827183712713,
+      "wins": 55,
+      "played": 95
+    },
+    "estrelar": {
+      "weight": 1.0180491282604183,
+      "wins": 51,
+      "played": 83
+    },
+    "princesaSlime": {
+      "weight": 1.026380099942676,
+      "wins": 50,
+      "played": 75
+    },
+    "thor": {
+      "weight": 0.9577929302427928,
+      "wins": 18,
+      "played": 76
+    }
+  },
+  "stats": {
+    "totalLines": 1007,
+    "validGames": 864,
+    "timeouts": 143,
+    "timeoutRate": 0.142,
+    "avgTurns": 6.66,
+    "avgVpMargin": 5.32,
+    "avgWinnerField": 3.49,
+    "avgLoserField": 2.39,
+    "avgDurationMs": 73298,
+    "closeGameRate": 0.2037
+  }
+}
