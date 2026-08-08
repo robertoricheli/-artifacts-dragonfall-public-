@@ -1,13 +1,15 @@
 /**
  * IA no servidor para assentos desconectados (Rankeado / PvP).
- * Usa DfEngine.listLegalActions + política simples (Difícil-lite).
+ * Usa DfEngine.listLegalActions + scoring estilo vs-IA Difícil (ai-hard.json).
  */
 import { applyAuthoritativeAction } from "./df-authority.mjs";
 import { withRoomLock, mirrorRoomNow } from "./df-room-store.mjs";
 import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
+import { pickBestHardAction } from "./df-server-ai-hard.mjs";
 
 const AI_GRACE_MS = 8000;
-const AI_STEP_MS = 900;
+/** Ritmo pedido pelo autor: ~1,5s entre ações da IA no disconnect. */
+const AI_STEP_MS = 1500;
 const AI_MAX_STEPS_PER_TURN = 12;
 /** Budget de CPU por tick — cede o event loop (Fase 3). */
 const AI_TICK_BUDGET_MS = Number(process.env.DF_AI_TICK_BUDGET_MS) || 40;
@@ -40,30 +42,21 @@ export function clearAllAi(room) {
 
 function pickAiAction(state, seat) {
   const { DfEngine } = bootDragonfallEngine();
-  const legal = DfEngine.listLegalActions(state, seat, {}) || [];
-  if (!legal.length) {
-    return { type: "END_TURN", playerId: seat };
+  const legal = DfEngine.listLegalActions(state, seat, {
+    strictFumacaToxica: true,
+    avoidEnemyOnEnterWaste: enemyFieldCount(state, seat) === 0,
+    allowWastedOnEnter: false,
+  }) || [];
+  return pickBestHardAction(state, seat, legal);
+}
+
+function enemyFieldCount(state, seat) {
+  let n = 0;
+  for (let p = 0; p < (state.playersCount || 2); p++) {
+    if (p === seat) continue;
+    n += (state.players[p]?.field || []).filter(Boolean).length;
   }
-  const byType = (t) => legal.filter((a) => a?.type === t);
-  const attacks = byType("ATTACK_RESOLVE");
-  if (attacks.length) {
-    return { ...attacks[Math.floor(Math.random() * attacks.length)], playerId: seat };
-  }
-  const summons = byType("SUMMON");
-  if (summons.length) {
-    return { ...summons[Math.floor(Math.random() * summons.length)], playerId: seat };
-  }
-  const draws = byType("DRAW_CARD");
-  if (draws.length) {
-    return { ...draws[0], playerId: seat };
-  }
-  const talents = byType("TALENT_START");
-  if (talents.length) {
-    return { ...talents[Math.floor(Math.random() * talents.length)], playerId: seat };
-  }
-  const end = byType("END_TURN");
-  if (end.length) return { ...end[0], playerId: seat };
-  return { type: "END_TURN", playerId: seat };
+  return n;
 }
 
 /**

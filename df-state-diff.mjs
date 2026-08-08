@@ -162,6 +162,9 @@ export function attachPeerStateDiff(room, envelope, seat, projectFn, recordFn = 
   const projected = projectFn(auth, seat);
   const seq = envelope.seq | 0;
   const useDiff = String(process.env.DF_STATE_DIFF || "1") !== "0";
+  const actType = envelope?.action?.type;
+  // SUMMON/END_TURN: full state — evita peer sem campo por patch dropado.
+  const forceFull = actType === "SUMMON" || actType === "END_TURN";
 
   if (!room._peerProj) room._peerProj = [null, null];
   if (!room._peerProjSeq) room._peerProjSeq = [0, 0];
@@ -170,6 +173,28 @@ export function attachPeerStateDiff(room, envelope, seat, projectFn, recordFn = 
   const prevSeq = room._peerProjSeq[seat] | 0;
   const fullBytes = estimateJsonBytes(projected);
   let out;
+
+  if (forceFull) {
+    if (typeof recordFn === "function") {
+      recordFn({
+        mode: "full",
+        reason: "force_" + String(actType || "action").toLowerCase(),
+        roomCode: room.code,
+        seat,
+        seq,
+        fullBytes,
+        patchBytes: fullBytes,
+      });
+    }
+    out = {
+      ...envelope,
+      authoritativeState: projected,
+      stateDiff: { seq, full: true, reason: "force_" + String(actType || "action").toLowerCase() },
+    };
+    room._peerProj[seat] = projected;
+    room._peerProjSeq[seat] = seq;
+    return out;
+  }
 
   if (useDiff && prev && prevSeq > 0 && prevSeq === seq - 1) {
     const patches = diffProjectedStates(prev, projected);

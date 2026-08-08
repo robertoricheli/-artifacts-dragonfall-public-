@@ -296,7 +296,13 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
                 break;
             state.players[t].skipNextAction = true;
             markOnEnterUsed(state, casterIdx, key);
-            events.push({ type: "DESACELERAR", casterIdx, targetIdx: t, visual: "desacelerar" });
+            events.push({
+                type: "DESACELERAR",
+                casterIdx,
+                fieldIdx,
+                targetIdx: t,
+                visual: "desacelerar",
+            });
             break;
         }
         case "roubar": {
@@ -319,7 +325,19 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             const stolen = targetP.hand.splice(idx, 1)[0];
             casterP.hand.push(stolen);
             markOnEnterUsed(state, casterIdx, key);
-            events.push({ type: "ROUBAR", casterIdx, targetIdx: t, card: stolen.name, visual: "roubar" });
+            const cardPow = stolen.currentPower ?? stolen.power ?? 0;
+            events.push({
+                type: "ROUBAR",
+                casterIdx,
+                targetIdx: t,
+                card: stolen.name,
+                cardSnap: {
+                    name: stolen.name,
+                    power: stolen.power ?? cardPow,
+                    currentPower: cardPow,
+                },
+                visual: "roubar",
+            });
             break;
         }
         case "maldicaoSeteMares": {
@@ -411,7 +429,7 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
                 targetI: ti,
                 targetName: target.name,
                 applied: !alreadyPoisoned,
-                visual: "poison",
+                visual: "mordida_venenosa",
             });
             break;
         }

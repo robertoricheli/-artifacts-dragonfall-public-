@@ -207,6 +207,7 @@ function normalizeOnEnterVisual(ev) {
   }
   if (kind === "em_chamas") out.kind = "incendiar";
   if (kind === "freeze") out.kind = "zero_absoluto";
+  if (kind === "poison") out.kind = "mordida_venenosa";
   // Raio Duplo: motor emite hits[]; peer/replay esperam picks[].
   if (kind === "raio_duplo") {
     if (!out.picks?.length && Array.isArray(out.hits)) {
@@ -236,6 +237,7 @@ function mapEventTypeToVisual(ev) {
   const TYPE_KIND = {
     ROUBAR: "roubar",
     DESACELERAR: "desacelerar",
+    MORDIDA_VENENOSA: "mordida_venenosa",
     PESADELO: "pesadelo",
     MALDICAO_SETE_MARES: "maldicao_sete_mares",
     FUMACA_TOXICA: "fumaca_toxica",
@@ -317,7 +319,8 @@ const PARALLEL_FX_KINDS = new Set([
   "devour", "imitar", "ursificacao", "transformar_bichinho", "fury",
   "fire_aura", "guardiao", "guardian", "fumaca_toxica", "raio_duplo",
   "explosao", "zero_absoluto", "barrier_grant", "baforada_venenosa",
-  "incendiar", "land_impact", "card_draw", "combat_telegraph",
+  "incendiar", "mordida_venenosa", "poison", "land_impact", "card_draw",
+  "combat_telegraph",
   "misseis_magicos", "divine_protection", "cancel_ultimate",
   "blocked_attack", "vinganca", "necromancia", "thunder_discard",
   "aceleracao", "rajada_congelante", "rajada_congelante_destroy",
