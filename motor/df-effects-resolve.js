@@ -594,7 +594,6 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
                 copiedOnEnter: caster.onEnter, copiedConstantEffect: copiedConstant,
                 casterUid: caster.uid,
                 mimicName: ally.name, abilityName: ally.abilityName,
-                visual: "imitar",
             });
             break;
         }
