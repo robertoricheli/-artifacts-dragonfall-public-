@@ -206,8 +206,12 @@ function normalizeOnEnterVisual(ev) {
     if (out.casterP == null && out.casterIdx != null) out.casterP = out.casterIdx;
   }
   if (kind === "em_chamas") out.kind = "incendiar";
-  if (kind === "freeze") out.kind = "zero_absoluto";
+  // Rajada Congelante emite freeze/freeze_shatter — não confundir com Zero Absoluto.
+  if (kind === "freeze") out.kind = "rajada_congelante";
+  if (kind === "freeze_shatter") out.kind = "rajada_congelante_destroy";
   if (kind === "poison") out.kind = "mordida_venenosa";
+  if (kind === "shield") out.kind = "shield";
+  if (kind === "barrier_block") out.kind = "barrier_block";
   // Raio Duplo: motor emite hits[]; peer/replay esperam picks[].
   if (kind === "raio_duplo") {
     if (!out.picks?.length && Array.isArray(out.hits)) {
@@ -282,6 +286,12 @@ function mapEventTypeToVisual(ev) {
     RAJADA_CONGELANTE_DESTROY: "rajada_congelante_destroy",
     CORROMPER: "corrupt",
     LEGADO: "legado",
+    DEFENSOR: "shield",
+    FURIA: "fury",
+    GRITO_DE_GUERRA: "fury",
+    BARRIER_BLOCKED: "barrier_block",
+    BOLA_DE_FOGO: "bola_de_fogo",
+    TRANSFORM_VULN_DESTROY: "transformar_bichinho",
   };
   const kind = TYPE_KIND[ev.type];
   if (!kind) return null;
@@ -325,6 +335,7 @@ const PARALLEL_FX_KINDS = new Set([
   "blocked_attack", "vinganca", "necromancia", "thunder_discard",
   "aceleracao", "rajada_congelante", "rajada_congelante_destroy",
   "corrupt", "legado", "doppel_cast",
+  "shield", "barrier_block",
 ]);
 
 const BOARD_SERIAL_KINDS = new Set([
@@ -384,9 +395,24 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
           if (n.ownerP == null && n.casterIdx != null) n.ownerP = n.casterIdx;
           if (n.fieldIdx == null && n.insertIdx != null) n.fieldIdx = n.insertIdx;
         }
+        if (n.kind === "shield") {
+          if (n.ownerP == null && n.casterIdx != null) n.ownerP = n.casterIdx;
+          if (n.fieldIdx == null && ev.fieldIdx != null) n.fieldIdx = ev.fieldIdx;
+          if (!n.indices?.length && n.fieldIdx != null) n.indices = [n.fieldIdx];
+        }
+        if (n.kind === "fury" && n.ownerP == null && n.casterIdx != null) {
+          n.ownerP = n.casterIdx;
+        }
+        if (n.kind === "barrier_block") {
+          if (n.targetP == null && ev.targetP != null) n.targetP = ev.targetP;
+          if (n.targetI == null && ev.targetI != null) n.targetI = ev.targetI;
+        }
         visuals.push(n);
         if (n.kind === "combat" || n.kind === "destroy" || n.kind === "dragon_token_summon"
-            || n.kind === "blocked_attack" || n.killA || n.killD) {
+            || n.kind === "blocked_attack" || n.killA || n.killD
+            || n.kind === "devour" || n.kind === "scare_return"
+            || n.kind === "assassinar" || n.kind === "rajada_congelante_destroy"
+            || n.kind === "transformar_bichinho") {
           deferBoardApply = true;
         }
       }
@@ -450,6 +476,183 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
       if (last && last.kind === "incendiar" && !last.fieldPatches?.length) {
         last.fieldPatches = [fieldPatches[fieldPatches.length - 1]];
       }
+    }
+    // DEFENSOR: escudo permanente no caster.
+    if (ev.type === "DEFENSOR" && ev.casterIdx != null) {
+      const fi = ev.fieldIdx != null ? (ev.fieldIdx | 0) : null;
+      if (fi != null) {
+        const patch = {
+          targetP: ev.casterIdx,
+          targetI: fi,
+          shielded: true,
+          shieldedPermanent: true,
+          shieldedTurns: 0,
+        };
+        fieldPatches.push(patch);
+        deferBoardApply = true;
+        const last = visuals[visuals.length - 1];
+        if (last && last.kind === "shield") {
+          last.ownerP = ev.casterIdx;
+          last.fieldIdx = fi;
+          last.indices = [fi];
+          if (!last.fieldPatches?.length) last.fieldPatches = [patch];
+        }
+      }
+    }
+    // FURIA (single): stacks no caster.
+    if (ev.type === "FURIA" && ev.casterIdx != null) {
+      const fi = ev.fieldIdx != null ? (ev.fieldIdx | 0) : null;
+      if (fi != null) {
+        const patch = {
+          targetP: ev.casterIdx,
+          targetI: fi,
+          fury: true,
+          furyStacks: ev.furyStacks ?? 1,
+        };
+        fieldPatches.push(patch);
+        deferBoardApply = true;
+        const last = visuals[visuals.length - 1];
+        if (last && last.kind === "fury") {
+          last.ownerP = ev.casterIdx;
+          last.fieldIdx = fi;
+          last.furyStacks = ev.furyStacks ?? 1;
+          if (!last.fieldPatches?.length) last.fieldPatches = [patch];
+        }
+      }
+    }
+    // BARRIER_BLOCKED: remove barreira no alvo (após VFX).
+    if (ev.type === "BARRIER_BLOCKED" && ev.targetP != null && ev.targetI != null) {
+      const patch = {
+        targetP: ev.targetP,
+        targetI: ev.targetI,
+        barrier: false,
+        barrierTurns: 0,
+      };
+      fieldPatches.push(patch);
+      deferBoardApply = true;
+      const last = visuals[visuals.length - 1];
+      if (last && last.kind === "barrier_block" && !last.fieldPatches?.length) {
+        last.fieldPatches = [patch];
+      }
+    }
+    // RAJADA freeze: status gelo.
+    if (ev.type === "RAJADA_CONGELANTE_FREEZE" && ev.targetP != null && ev.targetI != null) {
+      const patch = {
+        targetP: ev.targetP,
+        targetI: ev.targetI,
+        frozen: true,
+        frozenTurns: 2,
+      };
+      fieldPatches.push(patch);
+      deferBoardApply = true;
+      const last = visuals[visuals.length - 1];
+      if (last && (last.kind === "rajada_congelante" || last.kind === "freeze")
+          && !last.fieldPatches?.length) {
+        last.fieldPatches = [patch];
+      }
+    }
+    // MORDIDA: veneno no alvo.
+    if (ev.type === "MORDIDA_VENENOSA" && ev.applied && ev.targetP != null && ev.targetI != null) {
+      const patch = {
+        targetP: ev.targetP,
+        targetI: ev.targetI,
+        poisoned: true,
+        poisonTurns: ev.poisonTurns ?? 2,
+        poisonedByP: ev.poisonedByP ?? ev.casterIdx,
+      };
+      fieldPatches.push(patch);
+      deferBoardApply = true;
+      const last = visuals[visuals.length - 1];
+      if (last && (last.kind === "mordida_venenosa" || last.kind === "poison")
+          && !last.fieldPatches?.length) {
+        last.fieldPatches = [patch];
+      }
+    }
+    // FORTALECER / TALENT_FORTALECER: poder no alvo.
+    if ((ev.type === "FORTALECER" || ev.type === "TALENT_FORTALECER" || ev.type === "STRONG_ARM")
+        && ev.targetP != null && ev.targetI != null) {
+      const patch = {
+        targetP: ev.targetP,
+        targetI: ev.targetI,
+        currentPower: ev.powerAfter ?? ev.currentPower,
+      };
+      if (patch.currentPower != null) {
+        fieldPatches.push(patch);
+        deferBoardApply = true;
+        const last = visuals[visuals.length - 1];
+        if (last && last.kind === "strong_arm" && !last.fieldPatches?.length) {
+          last.fieldPatches = [patch];
+        }
+      }
+    }
+    // GUARDIÃO: escudo temporário nos picks.
+    if (ev.type === "GUARDIAO" && Array.isArray(ev.picks)) {
+      for (const pk of ev.picks) {
+        if (pk?.p == null || pk?.i == null) continue;
+        fieldPatches.push({
+          targetP: pk.p,
+          targetI: pk.i,
+          shielded: true,
+          shieldedTurns: 1,
+        });
+      }
+      deferBoardApply = true;
+      const last = visuals[visuals.length - 1];
+      if (last && last.kind === "guardian" && !last.fieldPatches?.length) {
+        last.fieldPatches = fieldPatches.filter((p) => p.shielded);
+      }
+    }
+    // AURA ANTI-MAGIA: barreira permanente.
+    if (ev.type === "AURA_ANTI_MAGIA" && ev.casterIdx != null && ev.fieldIdx != null) {
+      const patch = {
+        targetP: ev.casterIdx,
+        targetI: ev.fieldIdx,
+        barrier: true,
+        barrierPermanent: true,
+        barrierTurns: 0,
+      };
+      fieldPatches.push(patch);
+      deferBoardApply = true;
+      const last = visuals[visuals.length - 1];
+      if (last && last.kind === "barrier_grant") {
+        last.ownerP = ev.casterIdx;
+        last.indices = [ev.fieldIdx];
+        if (!last.fieldPatches?.length) last.fieldPatches = [patch];
+      }
+    }
+    // CORROMPER: Sem Honra no alvo.
+    if (ev.type === "CORROMPER" && !ev.alreadyNoHonor && ev.targetP != null && ev.targetI != null) {
+      const patch = {
+        targetP: ev.targetP,
+        targetI: ev.targetI,
+        corruptedNoHonor: true,
+      };
+      fieldPatches.push(patch);
+      deferBoardApply = true;
+      const last = visuals[visuals.length - 1];
+      if (last && last.kind === "corrupt" && !last.fieldPatches?.length) {
+        last.fieldPatches = [patch];
+      }
+    }
+    // FUMACA: vulnerável.
+    if (ev.type === "FUMACA_TOXICA" && Array.isArray(ev.picks)) {
+      for (const pk of ev.picks) {
+        if (pk?.p == null || pk?.i == null) continue;
+        fieldPatches.push({ targetP: pk.p, targetI: pk.i, vulnerable: true });
+      }
+      deferBoardApply = true;
+    }
+    // AURA DE FOGO.
+    if (ev.type === "AURA_DE_FOGO" && Array.isArray(ev.indices) && ev.casterIdx != null) {
+      for (const i of ev.indices) {
+        fieldPatches.push({
+          targetP: ev.casterIdx,
+          targetI: i,
+          fireAura: true,
+          fireAuraTurns: 3,
+        });
+      }
+      deferBoardApply = true;
     }
     // DEVORAR: buff no caster + remoção da presa (VFX antes do remove no peer).
     if (ev.type === "DEVOUR" && ev.casterIdx != null && ev.devouredI != null) {
@@ -561,8 +764,10 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
         deferBoardApply = true;
       }
     }
-    // Talentos MP: VFX no peer ANTES do auth (clone/medo).
-    if (action.anim.kind === "doppel_clone" || action.anim.kind === "scare_return") {
+    // Talentos MP: VFX no peer ANTES do auth (clone/medo/destrutivos).
+    if (action.anim.kind === "doppel_clone" || action.anim.kind === "scare_return"
+        || action.anim.kind === "misseis_magicos" || action.anim.kind === "devour"
+        || action.anim.kind === "assassinar" || action.anim.kind === "transformar_bichinho") {
       deferBoardApply = true;
     }
   }
