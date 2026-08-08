@@ -408,6 +408,78 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
         ...(ev.flags || {}),
       });
     }
+    // IMITAR: identidade mimética no caster (ícone + nome no peer).
+    if (ev.type === "IMITAR" && ev.casterIdx != null && ev.fieldIdx != null) {
+      fieldPatches.push({
+        targetP: ev.casterIdx,
+        targetI: ev.fieldIdx,
+        mimico: true,
+        mimicAbilityName: ev.abilityName || "Habilidade",
+        mimicAbilityDesc: ev.mimicAbilityDesc || "",
+        mimicSourceName: ev.mimicName || "",
+        mimicOnEnter: ev.copiedOnEnter ?? null,
+        mimicOnDestroy: ev.mimicOnDestroy ?? null,
+        mimicConstantEffect: ev.copiedConstantEffect ?? null,
+        abilityName: ev.abilityName || null,
+        onEnter: ev.copiedOnEnter ?? null,
+      });
+      deferBoardApply = true;
+      // Anexa patches ao visual já empurrado.
+      const last = visuals[visuals.length - 1];
+      if (last && last.kind === "imitar" && !last.fieldPatches?.length) {
+        last.fieldPatches = [fieldPatches[fieldPatches.length - 1]];
+        last.mimicAbilityName = ev.abilityName || "Habilidade";
+        last.mimicSourceName = ev.mimicName || "";
+        last.allyP = ev.allyP ?? ev.casterIdx;
+        last.allyI = ev.allyI;
+        last.casterP = ev.casterIdx;
+        last.casterFieldIdx = ev.fieldIdx;
+      }
+    }
+    // INCENDIAR: status Em Chamas nos dois clientes.
+    if (ev.type === "INCENDIAR" && ev.targetP != null && ev.targetI != null) {
+      fieldPatches.push({
+        targetP: ev.targetP,
+        targetI: ev.targetI,
+        burning: true,
+        burningTurns: ev.burningTurns ?? 4,
+        burningByP: ev.burningByP ?? ev.casterIdx,
+      });
+      deferBoardApply = true;
+      const last = visuals[visuals.length - 1];
+      if (last && last.kind === "incendiar" && !last.fieldPatches?.length) {
+        last.fieldPatches = [fieldPatches[fieldPatches.length - 1]];
+      }
+    }
+    // DEVORAR: buff no caster + remoção da presa (VFX antes do remove no peer).
+    if (ev.type === "DEVOUR" && ev.casterIdx != null && ev.devouredI != null) {
+      const preyI = ev.devouredI | 0;
+      let casterI = ev.fieldIdx != null ? (ev.fieldIdx | 0) : null;
+      if (casterI == null && ev.casterFieldIdx != null) casterI = ev.casterFieldIdx | 0;
+      const devourPatches = [];
+      if (casterI != null) {
+        devourPatches.push({
+          targetP: ev.casterIdx,
+          targetI: casterI,
+          currentPower: ev.powerAfter ?? undefined,
+        });
+      }
+      devourPatches.push({
+        targetP: ev.casterIdx,
+        targetI: preyI,
+        removed: true,
+      });
+      for (const p of devourPatches) fieldPatches.push(p);
+      deferBoardApply = true;
+      const last = visuals[visuals.length - 1];
+      if (last && last.kind === "devour") {
+        last.fieldPatches = devourPatches;
+        last.targetP = ev.casterIdx;
+        last.targetI = preyI;
+        last.casterFieldIdx = casterI;
+        last.deferBoardApply = true;
+      }
+    }
     if (ev.type === "DESTROY" && (ev.p != null || ev.targetP != null)) {
       fieldPatches.push({
         targetP: ev.targetP ?? ev.p,

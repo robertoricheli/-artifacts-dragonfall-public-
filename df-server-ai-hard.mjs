@@ -175,7 +175,8 @@ function scoreAttack(state, seat, action) {
   if (killD && killA) {
     return (ap * atkW("tradeKillPerPower", 5) - atkW("tradePenalty", 12)) * atkMul + 40;
   }
-  return (ap - dp) * 2;
+  // Troca / pressão: ainda vale tentar (evita END_TURN com campo cheio).
+  return 25 + (ap - dp) * 3;
 }
 
 function scoreDraw(state, seat) {
@@ -189,8 +190,19 @@ function scoreDraw(state, seat) {
   return 10;
 }
 
+/** Score de uma ação legal (exportado para retries da IA). */
+export function scoreLegalAction(state, seat, action) {
+  if (!action?.type || action.type === "END_TURN") return -9999;
+  if (action.type === "SUMMON") return scoreSummon(state, seat, action);
+  if (action.type === "ATTACK_RESOLVE") return scoreAttack(state, seat, action);
+  if (action.type === "DRAW_CARD") return scoreDraw(state, seat);
+  if (action.type === "TALENT_START") return 12;
+  return 1;
+}
+
 /**
  * Escolhe a melhor ação legal (estilo Difícil).
+ * Nunca passa a vez se houver SUMMON/ATTACK/DRAW/TALENT com score ≥ −20.
  * @param {object} state
  * @param {number} seat
  * @param {Array<object>} legal
@@ -203,18 +215,14 @@ export function pickBestHardAction(state, seat, legal) {
   let bestScore = -Infinity;
   for (const a of legal) {
     if (!a?.type || a.type === "END_TURN") continue;
-    let s = 0;
-    if (a.type === "SUMMON") s = scoreSummon(state, seat, a);
-    else if (a.type === "ATTACK_RESOLVE") s = scoreAttack(state, seat, a);
-    else if (a.type === "DRAW_CARD") s = scoreDraw(state, seat);
-    else if (a.type === "TALENT_START") s = 12;
-    else s = 1;
+    const s = scoreLegalAction(state, seat, a);
     if (s > bestScore) {
       bestScore = s;
       best = a;
     }
   }
-  if (!best || bestScore < 1) {
+  // Limiar baixo: ataques/summons “ok” não devem virar END_TURN.
+  if (!best || bestScore < -20) {
     const end = legal.find((a) => a?.type === "END_TURN");
     return end ? { ...end, playerId: seat } : { type: "END_TURN", playerId: seat };
   }

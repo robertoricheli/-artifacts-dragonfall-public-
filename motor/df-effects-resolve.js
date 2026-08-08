@@ -467,7 +467,14 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             if (c2)
                 c2.currentPower = (c2.currentPower ?? 0) + pow;
             markOnEnterUsed(state, casterIdx, key);
-            events.push({ type: "DEVOUR", casterIdx, devouredI: ti, visual: "devour" });
+            events.push({
+                type: "DEVOUR",
+                casterIdx,
+                fieldIdx: newIdx,
+                devouredI: ti,
+                powerAfter: c2?.currentPower,
+                visual: "devour",
+            });
             break;
         }
         case "bolaDeFogo": {
