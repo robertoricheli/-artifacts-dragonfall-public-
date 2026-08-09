@@ -410,7 +410,11 @@ export function pickOnEnterResolution(state, seat, ability, casterIdx, fieldIdx)
   if (ability === "bolaDeFogo" || ability === "assassinar" || ability === "incendiar"
       || ability === "mordidaVenenosa" || ability === "corromper"
       || ability === "rajadaCongelante" || ability === "transformarBichinho") {
-    let pool = gatherEnemy((c) => !c.shielded);
+    // Proteção bloqueia ataques/efeitos ofensivos típicos — EXCETO Transformar
+    // (manual: só Barreira bloqueia Transformar em Bichinho).
+    let pool = ability === "transformarBichinho"
+      ? gatherEnemy(() => true)
+      : gatherEnemy((c) => !c.shielded);
     if (ability === "assassinar") {
       pool = pool.filter((t) => (t.c.currentPower ?? t.c.power ?? 0) === 1);
     }
