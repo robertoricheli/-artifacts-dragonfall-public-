@@ -331,6 +331,9 @@ function gatherImitableAllies(state, casterIdx, excludeFieldIdx) {
             return false;
         if (c.onEnter === "desacelerar" && !hasDesacelerarTarget(state, casterIdx))
             return false;
+        // Assassinar sem P1 no oponente: Imitar gastaria a entrada em vão.
+        if (c.onEnter === "assassinar" && !hasAssassinarTarget(state, casterIdx))
+            return false;
         return true;
     });
 }
