@@ -356,6 +356,7 @@ function scareReturn(state, pIdx, targetP, targetI, events) {
     champ.foreverGrowth = false;
     champ.guerraBuff = false;
     champ.guerraBuffTurns = 0;
+    champ.onEnterConsumed = false;
     owner.hand.push(champ);
     events.push({ type: "SCARE_RETURN", playerId: pIdx, targetP, targetI, card: champ.name });
 }
