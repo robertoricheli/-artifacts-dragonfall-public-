@@ -237,12 +237,17 @@ function pickPaladinoPower2Discard(state, pIdx, rng) {
     const pl = state.players[pIdx];
     const pool = [];
     (pl.discard || []).forEach((ref) => {
-        if (!ref || ref.category !== "champion")
+        if (!ref)
+            return;
+        // Descarte de combate MP às vezes chega sem category — resolve via defs.
+        if (ref.category && ref.category !== "champion" && ref.category !== "hidden")
             return;
         let baseDef = data().cardDefs.find((d) => d.name === ref.name);
         if (!baseDef)
             baseDef = data().dragonTokenDef(String(ref.name));
-        if (!baseDef || baseDef.power !== 2)
+        if (!baseDef || baseDef.category === "talent" || baseDef.category === "reaction")
+            return;
+        if (baseDef.power !== 2)
             return;
         pool.push({ ref, baseDef });
     });

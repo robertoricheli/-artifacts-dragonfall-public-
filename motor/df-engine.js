@@ -317,6 +317,9 @@ export function applyAction(state, action, ctx = {}) {
             const card = deck.pop();
             if (!card)
                 return { ok: false, state, events: [], error: "DECK_EMPTY" };
+            if (p.maldicaoForgetNext && card?.category === "champion") {
+                card.silencedInHand = true;
+            }
             p.hand.push(card);
             p.actions = p.actions - 1;
             events.push({ type: "DRAW", playerId: pid, card });
@@ -354,6 +357,9 @@ export function applyAction(state, action, ctx = {}) {
                     return { ok: false, state, events: [], error: "BAD_RITUAL_UID" };
                 }
                 const removed = fieldNow.splice(sacIdx, 1)[0];
+                const sacDiscard = p.discard || [];
+                sacDiscard.push(removed);
+                p.discard = sacDiscard;
                 events.push({
                     type: "DESTROY",
                     p: pid,
@@ -372,6 +378,26 @@ export function applyAction(state, action, ctx = {}) {
                 frozen: false,
                 isToken: false,
             };
+            // Maldição dos Sete Mares: o próximo campeão deste jogador entra sem habilidade.
+            if (p.maldicaoForgetNext) {
+                champ.silenced = true;
+                champ.onEnter = null;
+                champ.onDestroy = null;
+                champ.talentEffect = null;
+                champ.constantEffect = null;
+                champ.silencedInHand = false;
+                p.maldicaoForgetNext = false;
+                for (const hc of p.hand || []) {
+                    if (hc)
+                        hc.silencedInHand = false;
+                }
+                events.push({
+                    type: "MALDICAO_CONSUMED",
+                    playerId: pid,
+                    cardName: champ.name,
+                    visual: "maldicao_sete_mares",
+                });
+            }
             const field = p.field;
             const insertIdx = a.insertIdx != null
                 ? a.insertIdx
@@ -421,7 +447,19 @@ export function applyAction(state, action, ctx = {}) {
             });
             if (out.killD) {
                 defField.splice(a.defenderIdx, 1);
-                events.push({ type: "DESTROY", p: a.defenderPlayerId, i: a.defenderIdx, reason: "combat" });
+                // Paridade com destroyChampion do cliente: mortos em combate vão ao descarte
+                // (Paladino / Necromancia / etc. no servidor MP).
+                const defDiscard = defP.discard || [];
+                defDiscard.push(def);
+                defP.discard = defDiscard;
+                events.push({
+                    type: "DESTROY",
+                    p: a.defenderPlayerId,
+                    i: a.defenderIdx,
+                    reason: "combat",
+                    card: def.name,
+                    uid: def.uid,
+                });
                 const noHonor = R.hasNoHonor(def);
                 if (out.pvTo === "attacker" && !noHonor) {
                     const amount = R.combatVictoryPointReward(att);
@@ -441,7 +479,17 @@ export function applyAction(state, action, ctx = {}) {
             }
             if (out.killA) {
                 field.splice(a.attackerIdx, 1);
-                events.push({ type: "DESTROY", p: pid, i: a.attackerIdx, reason: "combat" });
+                const attDiscard = p.discard || [];
+                attDiscard.push(att);
+                p.discard = attDiscard;
+                events.push({
+                    type: "DESTROY",
+                    p: pid,
+                    i: a.attackerIdx,
+                    reason: "combat",
+                    card: att.name,
+                    uid: att.uid,
+                });
                 const noHonor = R.hasNoHonor(att);
                 if (out.pvTo === "defender" && !noHonor) {
                     const amount = R.combatVictoryPointReward(def);
@@ -509,8 +557,14 @@ export function applyAction(state, action, ctx = {}) {
             const np = next.players[nextPid];
             const maxHand = R.LIMITS?.MAX_HAND ?? 8;
             if (!maint.skipDraw && np.hand.length < maxHand && np.deck.length > 0) {
-                np.hand.push(np.deck.pop());
-                events.push({ type: "DRAW", playerId: nextPid, reason: "upkeep" });
+                const drawn = np.deck.pop();
+                if (drawn) {
+                    if (np.maldicaoForgetNext && drawn?.category === "champion") {
+                        drawn.silencedInHand = true;
+                    }
+                    np.hand.push(drawn);
+                    events.push({ type: "DRAW", playerId: nextPid, reason: "upkeep" });
+                }
             }
             events.push({ type: "TURN_START", playerId: nextPid });
             break;
