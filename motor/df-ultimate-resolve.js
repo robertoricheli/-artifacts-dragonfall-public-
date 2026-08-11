@@ -584,10 +584,28 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
                 const b = arr[bi];
                 if (!b)
                     continue;
-                if (consumeBarrier(b))
+                if (consumeBarrier(b)) {
+                    events.push({
+                        type: "FIRE_AND_ICE_BURN",
+                        targetP: bSlot.p,
+                        targetI: bi,
+                        uid: bSlot.uid,
+                        blocked: true,
+                        source: "fireAndIce",
+                    });
                     continue;
+                }
                 reducePower(b, 1);
-                if (b.currentPower <= 0)
+                const destroyed = (b.currentPower ?? 0) <= 0;
+                events.push({
+                    type: "FIRE_AND_ICE_BURN",
+                    targetP: bSlot.p,
+                    targetI: bi,
+                    uid: bSlot.uid,
+                    destroyed,
+                    source: "fireAndIce",
+                });
+                if (destroyed)
                     destroyChampion(next, bSlot.p, bi, pid, { reason: "fireAndIce" }, events, rng);
             }
             break;
