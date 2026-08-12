@@ -2,7 +2,7 @@
  * IA no servidor para assentos desconectados (Rankeado / PvP).
  * Paridade com vs-IA Difícil: mesmo cérebro + ritmo 1,5s entre ações.
  */
-import { applyAuthoritativeAction } from "./df-authority.mjs";
+import { applyAuthoritativeAction, buildPresentationEnvelope } from "./df-authority.mjs";
 import { withRoomLock, mirrorRoomNow } from "./df-room-store.mjs";
 import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
 import {
@@ -28,22 +28,41 @@ function ensureAiFlags(room) {
   if (!room.aiStepTimer) room.aiStepTimer = null;
   if (!room.aiPhase) room.aiPhase = "talent";
   if (room.aiMainFloor == null) room.aiMainFloor = 5;
+  if (room.aiGeneration == null) room.aiGeneration = 0;
 }
 
 export function clearAiSeat(room, seat) {
   ensureAiFlags(room);
   if (seat !== 0 && seat !== 1) return;
+  // Nova geração: ticks/follow-ups em voo abortam no check.
+  room.aiGeneration = (room.aiGeneration | 0) + 1;
   room.aiControlled[seat] = false;
   if (room.aiGraceTimer[seat]) {
     clearTimeout(room.aiGraceTimer[seat]);
     room.aiGraceTimer[seat] = null;
   }
+  // Cancela o próximo passo imediatamente se era a vez deste assento
+  // ou se ninguém mais está sob IA.
+  const otherAi = room.aiControlled[seat === 0 ? 1 : 0];
+  if (room.aiStepTimer && (room.gameState?.currentPlayer === seat || !otherAi)) {
+    clearTimeout(room.aiStepTimer);
+    room.aiStepTimer = null;
+  }
 }
 
 export function clearAllAi(room) {
   ensureAiFlags(room);
-  clearAiSeat(room, 0);
-  clearAiSeat(room, 1);
+  room.aiGeneration = (room.aiGeneration | 0) + 1;
+  room.aiControlled[0] = false;
+  room.aiControlled[1] = false;
+  if (room.aiGraceTimer[0]) {
+    clearTimeout(room.aiGraceTimer[0]);
+    room.aiGraceTimer[0] = null;
+  }
+  if (room.aiGraceTimer[1]) {
+    clearTimeout(room.aiGraceTimer[1]);
+    room.aiGraceTimer[1] = null;
+  }
   if (room.aiStepTimer) {
     clearTimeout(room.aiStepTimer);
     room.aiStepTimer = null;
@@ -306,6 +325,16 @@ function buildTalentTargetAction(seat, talentMeta) {
 
 async function emitAiEnvelope(room, hooks, seat, action, result) {
   room.actionSeq += 1;
+  let presentationEnvelope = result.presentationEnvelope || null;
+  if (!presentationEnvelope?.visuals?.length) {
+    try {
+      presentationEnvelope = buildPresentationEnvelope(
+        result.events || [],
+        action,
+        { causeActionType: action?.type },
+      ) || presentationEnvelope;
+    } catch (e) { /* */ }
+  }
   const envelope = {
     seq: room.actionSeq,
     fromSeat: seat,
@@ -313,7 +342,7 @@ async function emitAiEnvelope(room, hooks, seat, action, result) {
     authoritativeState: result.state || null,
     events: result.events || [],
     serverAi: true,
-    presentationEnvelope: result.presentationEnvelope || undefined,
+    presentationEnvelope: presentationEnvelope || undefined,
   };
   if (result.state) room.lastSnapshot = { state: result.state, full: true };
   await mirrorRoomNow(room);
@@ -359,9 +388,12 @@ export function scheduleServerAi(room, io, hooks) {
     room.aiStepsThisTurn = 0;
   }
 
+  const genAtSchedule = room.aiGeneration | 0;
+
   const tick = () => {
     room.aiStepTimer = null;
     void withRoomLock(room.code, async () => {
+      if ((room.aiGeneration | 0) !== genAtSchedule) return;
       if (room.status !== "playing" || room.gameState?.winner != null) return;
       const seat = room.gameState?.currentPlayer;
       if (seat !== 0 && seat !== 1) return;
@@ -377,6 +409,7 @@ export function scheduleServerAi(room, io, hooks) {
       const pack = pickAndApplyAiAction(room, seat);
       const { action, result, talentMeta } = pack;
       if (!result?.ok) return;
+      if ((room.aiGeneration | 0) !== genAtSchedule || !room.aiControlled[seat]) return;
 
       await emitAiEnvelope(room, hooks, seat, action, result);
       room.aiStepsThisTurn = (room.aiStepsThisTurn || 0) + 1;
@@ -396,9 +429,11 @@ export function scheduleServerAi(room, io, hooks) {
         && room.gameState?.winner == null
         && room.gameState?.currentPlayer === seat
         && room.aiControlled[seat]
+        && (room.aiGeneration | 0) === genAtSchedule
         && (room.aiStepsThisTurn || 0) < AI_MAX_STEPS_PER_TURN;
 
       const runFollowUpsThenContinue = async (idx) => {
+        if ((room.aiGeneration | 0) !== genAtSchedule) return;
         if (idx < followActions.length) {
           room.aiStepTimer = setTimeout(() => {
             void withRoomLock(room.code, async () => {
@@ -417,7 +452,8 @@ export function scheduleServerAi(room, io, hooks) {
         if (action.type === "END_TURN") {
           room.aiPhase = "talent";
           room.aiTurnSeat = null;
-          if (room.aiControlled[room.gameState?.currentPlayer]) {
+          if (room.aiControlled[room.gameState?.currentPlayer]
+              && (room.aiGeneration | 0) === genAtSchedule) {
             scheduleNextTick(room, tick);
           }
           return;
@@ -428,6 +464,7 @@ export function scheduleServerAi(room, io, hooks) {
           room.status === "playing"
           && room.gameState?.winner == null
           && room.aiControlled[room.gameState?.currentPlayer]
+          && (room.aiGeneration | 0) === genAtSchedule
         ) {
           scheduleNextTick(room, tick);
         }

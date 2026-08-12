@@ -419,7 +419,10 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
             || n.kind === "blocked_attack" || n.killA || n.killD
             || n.kind === "devour" || n.kind === "scare_return"
             || n.kind === "assassinar" || n.kind === "rajada_congelante_destroy"
-            || n.kind === "transformar_bichinho") {
+            || n.kind === "transformar_bichinho"
+            || n.kind === "bola_de_fogo" || n.kind === "incendiar"
+            || n.kind === "explosao" || n.kind === "misseis_magicos"
+            || n.kind === "poison_kill" || n.kind === "vinganca") {
           deferBoardApply = true;
         }
       }
@@ -429,7 +432,13 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
         visuals.push(mapped);
         if (mapped.kind === "combat" || mapped.kind === "destroy"
             || mapped.kind === "dragon_token_summon" || mapped.kind === "blocked_attack"
-            || mapped.killA || mapped.killD) {
+            || mapped.killA || mapped.killD
+            || mapped.kind === "devour" || mapped.kind === "scare_return"
+            || mapped.kind === "assassinar" || mapped.kind === "bola_de_fogo"
+            || mapped.kind === "incendiar" || mapped.kind === "explosao"
+            || mapped.kind === "misseis_magicos" || mapped.kind === "poison_kill"
+            || mapped.kind === "rajada_congelante_destroy"
+            || mapped.kind === "transformar_bichinho" || mapped.kind === "vinganca") {
           deferBoardApply = true;
         }
       }
@@ -774,7 +783,11 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
     // Talentos MP: VFX no peer ANTES do auth (clone/medo/destrutivos).
     if (action.anim.kind === "doppel_clone" || action.anim.kind === "scare_return"
         || action.anim.kind === "misseis_magicos" || action.anim.kind === "devour"
-        || action.anim.kind === "assassinar" || action.anim.kind === "transformar_bichinho") {
+        || action.anim.kind === "assassinar" || action.anim.kind === "transformar_bichinho"
+        || action.anim.kind === "combat" || action.anim.kind === "destroy"
+        || action.anim.kind === "bola_de_fogo" || action.anim.kind === "incendiar"
+        || action.anim.kind === "explosao" || action.anim.kind === "poison_kill"
+        || action.anim.kind === "vinganca" || action.anim.kind === "blocked_attack") {
       deferBoardApply = true;
     }
   }
