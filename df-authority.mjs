@@ -320,6 +320,11 @@ function mapEventTypeToVisual(ev) {
     if (out.ownerP == null && out.casterIdx != null) out.ownerP = out.casterIdx;
     if (out.fieldIdx == null && out.insertIdx != null) out.fieldIdx = out.insertIdx;
   }
+  // Ursificação: motor emite casterIdx+targetI; cliente espera allyP/allyI.
+  if (kind === "ursificacao") {
+    if (out.allyP == null) out.allyP = out.casterIdx ?? out.casterP ?? out.ownerP;
+    if (out.allyI == null && out.targetI != null) out.allyI = out.targetI;
+  }
   // Veneno: indices p/i → ownerIdx/fieldIdx para o VFX no cliente.
   if (kind === "poison_kill") {
     if (out.ownerIdx == null && out.p != null) out.ownerIdx = out.p;
