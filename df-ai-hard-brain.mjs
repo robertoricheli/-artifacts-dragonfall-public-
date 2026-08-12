@@ -410,9 +410,9 @@ export function pickOnEnterResolution(state, seat, ability, casterIdx, fieldIdx)
   if (ability === "bolaDeFogo" || ability === "assassinar" || ability === "incendiar"
       || ability === "mordidaVenenosa" || ability === "corromper"
       || ability === "rajadaCongelante" || ability === "transformarBichinho") {
-    // Proteção bloqueia ataques/efeitos ofensivos típicos — EXCETO Transformar
-    // (manual: só Barreira bloqueia Transformar em Bichinho).
-    let pool = ability === "transformarBichinho"
+    // Proteção bloqueia ataques; Assassinar/Transformar ignoram Proteção
+    // (Transformar: só Barreira; Assassinar: destruição, não ataque).
+    let pool = (ability === "transformarBichinho" || ability === "assassinar")
       ? gatherEnemy(() => true)
       : gatherEnemy((c) => !c.shielded);
     if (ability === "assassinar") {
@@ -579,8 +579,23 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     return null;
   }
   // Ultimates sem alvo / auto.
+  if (ultType === "fireAndIce") {
+    const hs = humanSeat(state, seat);
+    const humanChamps = (state.players[hs]?.field || []).filter(Boolean).length;
+    if (humanChamps <= 1) return null;
+    let anyNonPoison = false;
+    for (let p = 0; p < (state.playersCount || 2); p++) {
+      if (p === seat) continue;
+      for (const c of (state.players[p]?.field || [])) {
+        if (c && !c.poisoned) { anyNonPoison = true; break; }
+      }
+      if (anyNonPoison) break;
+    }
+    if (!anyNonPoison) return null;
+    return { ...base, targetP: null, targetI: null };
+  }
   if (["summonDragon", "thunderDiscard", "wallProtect", "poison", "warOverpower",
-    "fireAndIce", "cometStarfall", "banish", "hook", "potion", "vampirism",
+    "cometStarfall", "banish", "hook", "potion", "vampirism",
     "scareReturn", "resurrect"].includes(ultType)) {
     if (!forceEndOfTurn && ["scareReturn", "banish"].includes(ultType)) {
       // precisa de inimigo

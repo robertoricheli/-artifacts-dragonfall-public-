@@ -264,30 +264,6 @@ function applyOnDestroyBurst(state, ownerIdx, champ, reason, rng = Math.random) 
     }
     return { ability, targets, applied };
 }
-/**
- * LEGADO (onDestroy): +1 Poder a um aliado aleatório restante.
- * Dispara em qualquer destruição (combate, Ritual, Devorar, etc.).
- */
-function applyLegado(state, ownerIdx, rng = Math.random) {
-    const field = state.players[ownerIdx]?.field || [];
-    const indices = [];
-    for (let i = 0; i < field.length; i++) {
-        if (field[i])
-            indices.push(i);
-    }
-    if (!indices.length)
-        return null;
-    const pick = indices[Math.floor(rng() * indices.length)];
-    const beneficiary = field[pick];
-    beneficiary.currentPower = (beneficiary.currentPower ?? beneficiary.power ?? 0) + 1;
-    return {
-        targetP: ownerIdx,
-        targetI: pick,
-        name: beneficiary.name,
-        currentPower: beneficiary.currentPower,
-        uid: beneficiary.uid,
-    };
-}
 function hasNecromanciaTarget(state, pIdx) {
     return (state.players[pIdx]?.discard?.length ?? 0) > 0;
 }
@@ -544,15 +520,10 @@ function canSummon(state, pIdx, handIdx, opts = {}) {
     if (card.category === "talent") {
         return { ok: false, code: "NOT_CHAMPION", reason: "Não é campeão." };
     }
-    const freeAction = !!opts.freeAction;
-    // Ritual (ação livre): o sacrifício libera 1 slot — campo cheio ainda é legal.
     if ((p.field?.length ?? 0) >= limits.MAX_FIELD) {
-        const ritualFree = !!(freeAction && card.summonRitual
-            && hasRitualSacrifice(state, pIdx, card.summonRitual));
-        if (!ritualFree) {
-            return { ok: false, code: "FIELD_FULL", reason: "Campo cheio." };
-        }
+        return { ok: false, code: "FIELD_FULL", reason: "Campo cheio." };
     }
+    const freeAction = !!opts.freeAction;
     if (card.summonRitual && !freeAction) {
         if (!hasRitualSacrifice(state, pIdx, card.summonRitual)) {
             return {
@@ -1232,7 +1203,6 @@ const DfRules = {
     POWER_REDUCTION_DESTROY_REASONS,
     isCombatOrPowerReductionDestroy,
     applyOnDestroyBurst,
-    applyLegado,
     gatherImitableAllies,
     hasNecromanciaTarget,
     hasTrocaInjustaTarget,

@@ -56,52 +56,6 @@ function resolveSummonHandIdx(hand, handIdx, cardName, uid) {
     }
     return idx;
 }
-/** Ritual: resolve índice do sacrifício por uid (índice do cliente pode estar stale). */
-function resolveRitualSacrificeIdx(field, sacIdx, sacrificeUid, reqPow) {
-    if (!Array.isArray(field))
-        return { ok: false, code: "NO_RITUAL_SACRIFICE" };
-    let idx = sacIdx != null ? sacIdx | 0 : -1;
-    const wantUid = sacrificeUid != null ? String(sacrificeUid) : "";
-    if (wantUid) {
-        const byUid = field.findIndex((c) => c && String(c.uid || "") === wantUid);
-        if (byUid >= 0)
-            idx = byUid;
-    }
-    const sac = field[idx];
-    if (idx < 0 || !sac)
-        return { ok: false, code: "NO_RITUAL_SACRIFICE" };
-    if (wantUid && String(sac.uid || "") !== wantUid) {
-        return { ok: false, code: "BAD_RITUAL_UID" };
-    }
-    const sacPow = Number(sac.currentPower ?? sac.power ?? 0);
-    if (sacPow !== Number(reqPow))
-        return { ok: false, code: "BAD_RITUAL_POWER" };
-    return { ok: true, idx, sac };
-}
-function emitLegadoIfAny(R, state, ownerIdx, champ, events, rng) {
-    if (!champ || champ.silenced)
-        return;
-    const eff = typeof R.resolveOnDestroyAbility === "function"
-        ? R.resolveOnDestroyAbility(champ)
-        : champ.onDestroy || null;
-    if (eff !== "legado")
-        return;
-    if (typeof R.applyLegado !== "function")
-        return;
-    const applied = R.applyLegado(state, ownerIdx, rng || Math.random);
-    if (!applied)
-        return;
-    events.push({
-        type: "LEGADO",
-        ownerIdx,
-        targetP: applied.targetP,
-        targetI: applied.targetI,
-        name: applied.name,
-        currentPower: applied.currentPower,
-        uid: applied.uid,
-        visual: "legado",
-    });
-}
 export function cloneState(state) {
     return JSON.parse(JSON.stringify(state));
 }
@@ -125,10 +79,19 @@ export function validateAction(state, action, ctx = {}) {
             const idx = resolveSummonHandIdx(hand, a.handIdx, a.cardName, a.uid);
             const card = hand?.[idx];
             if (card?.summonRitual && a.freeAction) {
+                const sacIdx = a.sacrificeIdx;
                 const field = state.players[pid]?.field;
-                const resolved = resolveRitualSacrificeIdx(field, a.sacrificeIdx, a.sacrificeUid, card.summonRitual);
-                if (!resolved.ok)
-                    return { ok: false, code: resolved.code };
+                const sac = field?.[sacIdx];
+                const req = card.summonRitual;
+                if (sacIdx == null || sacIdx < 0 || !sac) {
+                    return { ok: false, code: "NO_RITUAL_SACRIFICE" };
+                }
+                const sacPow = sac.currentPower ?? sac.power ?? 0;
+                if (sacPow !== req)
+                    return { ok: false, code: "BAD_RITUAL_POWER" };
+                if (a.sacrificeUid != null && String(sac.uid || "") !== String(a.sacrificeUid)) {
+                    return { ok: false, code: "BAD_RITUAL_UID" };
+                }
             }
             return R.canSummon(state, pid, idx, {
                 freeAction: !!a.freeAction,
@@ -380,12 +343,19 @@ export function applyAction(state, action, ctx = {}) {
             }
             // Ritual: sacrifica o aliado no servidor ANTES de invocar (evita Gamer+Tiamat).
             if (handCard?.summonRitual && a.freeAction) {
+                const sacIdx = a.sacrificeIdx;
                 const fieldNow = p.field;
-                const resolved = resolveRitualSacrificeIdx(fieldNow, a.sacrificeIdx, a.sacrificeUid, handCard.summonRitual);
-                if (!resolved.ok) {
-                    return { ok: false, state, events: [], error: resolved.code };
+                const sac = fieldNow?.[sacIdx];
+                const req = handCard.summonRitual;
+                if (sacIdx == null || sacIdx < 0 || !sac) {
+                    return { ok: false, state, events: [], error: "NO_RITUAL_SACRIFICE" };
                 }
-                const sacIdx = resolved.idx;
+                const sacPow = sac.currentPower ?? sac.power ?? 0;
+                if (sacPow !== req)
+                    return { ok: false, state, events: [], error: "BAD_RITUAL_POWER" };
+                if (a.sacrificeUid != null && String(sac.uid || "") !== String(a.sacrificeUid)) {
+                    return { ok: false, state, events: [], error: "BAD_RITUAL_UID" };
+                }
                 const removed = fieldNow.splice(sacIdx, 1)[0];
                 const sacDiscard = p.discard || [];
                 sacDiscard.push(removed);
@@ -397,7 +367,6 @@ export function applyAction(state, action, ctx = {}) {
                     reason: "ritualSacrifice",
                     card: removed,
                 });
-                emitLegadoIfAny(R, next, pid, removed, events, ctx.rng);
             }
             const card = hand.splice(summonIdx, 1)[0];
             const champ = {
@@ -837,7 +806,6 @@ export function applyAction(state, action, ctx = {}) {
                                 ...burst,
                             });
                         }
-                        emitLegadoIfAny(R, next, tp, card, events, ctx.rng);
                     }
                 }
                 else if (op === "destroy") {
@@ -875,7 +843,6 @@ export function applyAction(state, action, ctx = {}) {
                             ...burst,
                         });
                     }
-                    emitLegadoIfAny(R, next, tp, card, events, ctx.rng);
                 }
                 else if (op === "setStatus") {
                     const STATUS_BOOL = [
@@ -1100,25 +1067,16 @@ export function applyAction(state, action, ctx = {}) {
                 return { ok: false, state, events: res.events || [], error: res.error || "ABILITY_TARGET_FAILED" };
             }
             events.push(...(res.events || []));
-            // Imitar → chain auto (Roubar / Pesadelo / Maldição / Rapidez…) no mesmo ACK.
+            // Imitar → chain auto (Roubar / Pesadelo / Desacelerar) no mesmo ACK.
             const imitarEv = (res.events || []).find((e) => e && e.type === "IMITAR" && e.copiedOnEnter);
             if (imitarEv?.copiedOnEnter && imitarEv.copiedOnEnter !== "imitar") {
-                const copied = String(imitarEv.copiedOnEnter);
                 const plan = ER.planOnEnter?.(next, cIdx, fIdx);
-                const autoChain = new Set([
-                    "roubar", "pesadelo", "desacelerar", "maldicaoSeteMares",
-                    "rapidez", "fumacaToxica", "raioDuplo", "defensor", "gritoDeGuerra",
-                ]);
-                const canChain = plan?.ok && (plan.mode === "auto"
-                    || plan.mode === "none"
-                    || plan.mode === "visual_only"
-                    || (plan.mode === "target" && ["roubar", "pesadelo", "desacelerar"].includes(copied))
-                    || autoChain.has(copied));
-                if (canChain) {
+                if (plan?.ok && (plan.mode === "auto" || plan.mode === "none" || plan.mode === "visual_only"
+                    || (plan.mode === "target" && ["roubar", "pesadelo", "desacelerar"].includes(String(imitarEv.copiedOnEnter))))) {
                     const chainRes = ER.applyOnEnter(next, cIdx, fIdx, autoOnEnterResolution(next, cIdx, fIdx, {
                         ok: true,
                         mode: "auto",
-                        ability: copied,
+                        ability: imitarEv.copiedOnEnter,
                     }, ctx.rng || Math.random));
                     if (chainRes?.ok) {
                         events.push(...(chainRes.events || []));
