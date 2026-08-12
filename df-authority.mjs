@@ -292,6 +292,7 @@ function mapEventTypeToVisual(ev) {
     BARRIER_BLOCKED: "barrier_block",
     BOLA_DE_FOGO: "bola_de_fogo",
     TRANSFORM_VULN_DESTROY: "transformar_bichinho",
+    POISON_KILL: "poison_kill",
   };
   const kind = TYPE_KIND[ev.type];
   if (!kind) return null;
@@ -319,6 +320,11 @@ function mapEventTypeToVisual(ev) {
     if (out.ownerP == null && out.casterIdx != null) out.ownerP = out.casterIdx;
     if (out.fieldIdx == null && out.insertIdx != null) out.fieldIdx = out.insertIdx;
   }
+  // Veneno: indices p/i → ownerIdx/fieldIdx para o VFX no cliente.
+  if (kind === "poison_kill") {
+    if (out.ownerIdx == null && out.p != null) out.ownerIdx = out.p;
+    if (out.fieldIdx == null && out.i != null) out.fieldIdx = out.i;
+  }
   return out;
 }
 
@@ -341,6 +347,7 @@ const PARALLEL_FX_KINDS = new Set([
 const BOARD_SERIAL_KINDS = new Set([
   "talent_cast", "talent_discard", "summon_land", "combat", "destroy",
   "dragon_token_summon", "scare_return", "doppel_clone", "troca_injusta",
+  "poison_kill",
 ]);
 
 /**
