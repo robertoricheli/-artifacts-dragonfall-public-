@@ -579,8 +579,52 @@ function clearTurnTimer(room) {
 
 function emitTurnDeadline(room) {
   try {
-    emitRoom(room, "turn_deadline", { turnDeadline: room.turnDeadline || null });
+    emitRoom(room, "turn_deadline", {
+      turnDeadline: room.turnDeadline || null,
+      serverNow: Date.now(),
+      serverTime: Date.now(),
+    });
   } catch (e) { /* */ }
+}
+
+function onTurnTimerExpired(room) {
+  if (room.status !== "playing") return;
+  const cp = room.gameState?.currentPlayer;
+  if ((cp === 0 || cp === 1) && room.aiControlled?.[cp]) {
+    resetTurnTimer(room);
+    scheduleServerAi(room, io, serverAiHooks(room));
+    return;
+  }
+  forceServerEndTurn(room);
+}
+
+function armTurnTimer(room, ms) {
+  if (room.turnTimer) {
+    clearTimeout(room.turnTimer);
+    room.turnTimer = null;
+  }
+  const delay = Math.max(0, ms | 0);
+  room.turnTimer = setTimeout(() => onTurnTimerExpired(room), delay);
+}
+
+/** Reconexão: mantém turnDeadline existente — não reinicia 70s para os dois peers. */
+function rearmTurnTimerPreserveDeadline(room) {
+  if (room.turnTimer) {
+    clearTimeout(room.turnTimer);
+    room.turnTimer = null;
+  }
+  if (room.status !== "playing" || !room.gameState?.players) return;
+  if (!room.turnDeadline) {
+    resetTurnTimer(room);
+    return;
+  }
+  emitTurnDeadline(room);
+  const remaining = room.turnDeadline - Date.now();
+  if (remaining <= 0) {
+    onTurnTimerExpired(room);
+    return;
+  }
+  armTurnTimer(room, remaining);
 }
 
 /** END_TURN forçado (timer esgotado / disconnect com deadline passado). */
@@ -615,21 +659,17 @@ function forceServerEndTurn(room) {
 }
 
 function resetTurnTimer(room) {
-  clearTurnTimer(room);
-  if (room.status !== "playing" || !room.gameState?.players) return;
+  if (room.turnTimer) {
+    clearTimeout(room.turnTimer);
+    room.turnTimer = null;
+  }
+  if (room.status !== "playing" || !room.gameState?.players) {
+    room.turnDeadline = null;
+    return;
+  }
   room.turnDeadline = Date.now() + TURN_TIMEOUT_MS;
   emitTurnDeadline(room);
-  room.turnTimer = setTimeout(() => {
-    if (room.status !== "playing") return;
-    // IA disconnect: não corta o turno — estende e deixa a IA jogar.
-    const cp = room.gameState?.currentPlayer;
-    if ((cp === 0 || cp === 1) && room.aiControlled?.[cp]) {
-      resetTurnTimer(room);
-      scheduleServerAi(room, io, serverAiHooks(room));
-      return;
-    }
-    forceServerEndTurn(room);
-  }, TURN_TIMEOUT_MS);
+  armTurnTimer(room, TURN_TIMEOUT_MS);
 }
 
 /** Pós-boot: salas restauradas vêm com turnTimer:null — reativa relógio + IA. */
@@ -770,7 +810,11 @@ io.on("connection", (socket) => {
       onHumanReconnectedClearAi(joined.room, joined.seat, io);
     }
     if (joined.room.status === "playing") {
-      resetTurnTimer(joined.room);
+      if (joined.reconnected) {
+        rearmTurnTimerPreserveDeadline(joined.room);
+      } else {
+        resetTurnTimer(joined.room);
+      }
       scheduleServerAi(joined.room, io, serverAiHooks(joined.room));
     }
   });

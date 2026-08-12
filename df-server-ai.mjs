@@ -492,7 +492,12 @@ export function markSeatAbandonedForAi(room, seat, io, hooks) {
 export function onHumanReconnectedClearAi(room, seat, io) {
   clearAiSeat(room, seat);
   try {
-    io.to(room.code).emit("peer_ai_control", { seat, active: false });
+    io.to(room.code).emit("peer_ai_control", {
+      seat,
+      active: false,
+      turnDeadline: room.turnDeadline || null,
+      serverNow: Date.now(),
+    });
   } catch (e) { /* */ }
 }
 

@@ -1073,6 +1073,8 @@ export function buildReplayPayload(room) {
     heroIds: room.heroes || [null, null],
     arenaScenarioId: room.arenaScenarioId || null,
     deckSeed: room.deckSeed != null ? room.deckSeed : null,
+    turnDeadline: room.turnDeadline || null,
+    serverNow: Date.now(),
     reconnected: true,
   };
 }
