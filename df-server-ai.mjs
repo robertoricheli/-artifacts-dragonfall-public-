@@ -16,8 +16,8 @@ import {
 } from "./df-ai-hard-brain.mjs";
 
 const AI_GRACE_MS = 8000;
-/** Ritmo pedido pelo autor: ~1,6s entre ações da IA no disconnect (próximo do vs-IA). */
-const AI_STEP_MS = 1600;
+/** Ritmo pedido pelo autor: ~2,5s entre ações da IA no disconnect (paridade vs-IA + VFX no cliente). */
+const AI_STEP_MS = 2500;
 const AI_MAX_STEPS_PER_TURN = 18;
 const AI_TICK_BUDGET_MS = Number(process.env.DF_AI_TICK_BUDGET_MS) || 40;
 /** Renova o relógio do turno quando a IA assume. */
