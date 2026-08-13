@@ -384,20 +384,11 @@ export function pickBestHardAction(state, seat, legal, opts = {}) {
   if (best && bestScore >= 0) {
     return { ...best, playerId: seat, _score: bestScore };
   }
-  // Ainda assim: se há SUMMON/ATTACK legal, pega o menos pior (não passa).
-  if (best && bestScore > -9999) {
-    const hasPlay = legal.some((a) => a?.type === "SUMMON" || a?.type === "ATTACK_RESOLVE");
-    if (hasPlay && bestScore >= -20) {
-      return { ...best, playerId: seat, _score: bestScore };
-    }
-    // Campo vazio + summon possível: força plain.
-    if (plainIdx != null && fieldCount(state, seat) < MAX_FIELD) {
-      return { type: "SUMMON", playerId: seat, handIdx: plainIdx, _score: plainScore };
-    }
-    if (hasPlay) {
-      return { ...best, playerId: seat, _score: bestScore };
-    }
+  // Campo vazio: força o melhor summon "plain" (paridade vs-IA), não qualquer carta.
+  if (plainIdx != null && fieldCount(state, seat) === 0) {
+    return { type: "SUMMON", playerId: seat, handIdx: plainIdx, _score: plainScore };
   }
+  // Sem forçar jogadas ruins (score << 0) — vs-IA também passa nesses casos.
   const end = legal.find((a) => a?.type === "END_TURN");
   return end
     ? { ...end, playerId: seat, _score: -9999 }

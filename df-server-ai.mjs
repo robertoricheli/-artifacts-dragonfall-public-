@@ -187,17 +187,23 @@ function pickAndApplyAiAction(room, seat) {
         action = pickBestHardAction(state, seat, legal, { minScore: 0 });
         score = action?._score ?? -9999;
       }
-      // Anti-pass: se ainda END_TURN mas há summon legal (com ações), joga.
-      // NÃO força ATTACK_RESOLVE bobo (atacar poder maior) — paridade vs-IA.
+      // Anti-pass: paridade vs-IA — NÃO forçar summons[0] (isso invocava
+      // sem estratégia). Só joga se o score for aceitável; com campo vazio
+      // prefere o melhor summon (plain), senão compra, senão passa.
       if (action?.type === "END_TURN") {
+        const fc = (state.players[seat]?.field || []).filter(Boolean).length;
         const summons = legal.filter((a) => a?.type === "SUMMON");
         const draws = legal.filter((a) => a?.type === "DRAW_CARD");
-        const playable = [...summons, ...draws];
-        if (playable.length && actionsLeft > 0) {
-          action = pickBestHardAction(state, seat, playable, { minScore: -999 });
-          score = action?._score ?? -9999;
-          if (action?.type === "END_TURN" && summons.length) {
-            action = { ...summons[0], playerId: seat };
+        if (actionsLeft > 0 && (summons.length || draws.length)) {
+          const pool = fc === 0 && summons.length
+            ? summons
+            : [...summons, ...draws];
+          const picked = pickBestHardAction(state, seat, pool, {
+            minScore: fc === 0 ? -5 : 0,
+          });
+          if (picked && picked.type !== "END_TURN") {
+            action = picked;
+            score = picked._score ?? scoreLegalAction(state, seat, picked);
           }
         }
       }
