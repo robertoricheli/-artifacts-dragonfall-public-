@@ -333,6 +333,7 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
                 card: stolen.name,
                 cardSnap: {
                     name: stolen.name,
+                    cardName: stolen.name,
                     power: stolen.power ?? cardPow,
                     currentPower: cardPow,
                 },
