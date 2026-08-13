@@ -12,11 +12,12 @@ import {
   scoreLegalAction,
   listTalentPlays,
   pickUltimate,
+  championSummonCost,
 } from "./df-ai-hard-brain.mjs";
 
 const AI_GRACE_MS = 8000;
-/** Ritmo pedido pelo autor: 2s entre ações da IA no disconnect (paridade vs-IA). */
-const AI_STEP_MS = 2000;
+/** Ritmo pedido pelo autor: 1,5s entre ações da IA no disconnect (paridade vs-IA). */
+const AI_STEP_MS = 1500;
 const AI_MAX_STEPS_PER_TURN = 18;
 const AI_TICK_BUDGET_MS = Number(process.env.DF_AI_TICK_BUDGET_MS) || 40;
 /** Renova o relógio do turno quando a IA assume. */
@@ -186,16 +187,17 @@ function pickAndApplyAiAction(room, seat) {
         action = pickBestHardAction(state, seat, legal, { minScore: 0 });
         score = action?._score ?? -9999;
       }
-      // Anti-pass: se ainda END_TURN mas há summon/attack legal, força o melhor.
+      // Anti-pass: se ainda END_TURN mas há summon legal (com ações), joga.
+      // NÃO força ATTACK_RESOLVE bobo (atacar poder maior) — paridade vs-IA.
       if (action?.type === "END_TURN") {
-        const playable = legal.filter((a) => a?.type === "SUMMON" || a?.type === "ATTACK_RESOLVE"
-          || a?.type === "DRAW_CARD");
+        const summons = legal.filter((a) => a?.type === "SUMMON");
+        const draws = legal.filter((a) => a?.type === "DRAW_CARD");
+        const playable = [...summons, ...draws];
         if (playable.length && actionsLeft > 0) {
           action = pickBestHardAction(state, seat, playable, { minScore: -999 });
           score = action?._score ?? -9999;
-          if (action?.type === "END_TURN") {
-            const first = playable[0];
-            action = { ...first, playerId: seat };
+          if (action?.type === "END_TURN" && summons.length) {
+            action = { ...summons[0], playerId: seat };
           }
         }
       }
@@ -215,6 +217,17 @@ function pickAndApplyAiAction(room, seat) {
       continue;
     }
     tried.add(actionKey(action));
+
+    // Não invoca campeão pago sem ações (paridade vs-IA).
+    if (action.type === "SUMMON") {
+      const card = state.players[seat]?.hand?.[action.handIdx];
+      const acts = state.players[seat]?.actions ?? 0;
+      const ritual = !!card?.summonRitual;
+      const cost = championSummonCost(card);
+      if (!card || (!ritual && acts < cost)) {
+        continue;
+      }
+    }
 
     // TALENT_START: só inicia; follow-up via TALENT_TARGET / mutações no tick.
     const talentMeta = action._talentEffect ? { ...action } : null;

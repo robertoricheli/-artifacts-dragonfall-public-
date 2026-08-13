@@ -360,6 +360,9 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             const ei = resolution.enemyI ?? resolution.targetI;
             if (ep == null || ei == null)
                 break;
+            const enemy = state.players[ep]?.field?.[ei];
+            if (!enemy || Number(enemy.currentPower ?? enemy.power) !== 2)
+                break;
             if (swapFieldChamps(state, casterIdx, fieldIdx, ep, ei)) {
                 markOnEnterUsed(state, casterIdx, key);
                 events.push({

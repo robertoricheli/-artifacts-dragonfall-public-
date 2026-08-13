@@ -113,7 +113,7 @@ function isOverpower(c) {
   return !!(c && (c.abilityName === "Sobrepujar" || c.constantEffect === "sobrepujar"));
 }
 
-function championSummonCost(c) {
+export function championSummonCost(c) {
   const p = c?.currentPower ?? c?.power ?? 0;
   if (p <= 1) return 1;
   if (p === 2) return 1;
@@ -229,12 +229,34 @@ export function scoreSummonCard(state, seat, card, handIdx, opts = {}) {
   return score;
 }
 
+/**
+ * Espelha aiShouldAttack do vs-IA: jamais ataca campeão de Poder maior.
+ * Sobrepujar no defensor com poder igual também é recusado (manual §17).
+ */
+export function shouldAttack(attacker, defender) {
+  if (!attacker || !defender) return false;
+  if (defender.shielded || defender.pulled) return false;
+  if (attacker.tapped || attacker.frozen || attacker.pulled) return false;
+  const aPow = attacker.currentPower ?? attacker.power ?? 0;
+  const dPow = defender.currentPower ?? defender.power ?? 0;
+  const overA = isOverpower(attacker);
+  const overD = isOverpower(defender);
+  if (aPow < dPow) return false;
+  if (overD && aPow <= dPow) return false;
+  if (aPow === dPow && overA && overD) return false;
+  if (aPow > dPow) return true;
+  if (aPow === dPow && overA && !overD) return true;
+  if (aPow === dPow && !overA && !overD) return true;
+  return false;
+}
+
 export function scoreAttackAction(state, seat, action) {
   const pl = state.players[seat];
   const att = pl?.field?.[action.attackerIdx];
   const def = state.players[action.defenderPlayerId]?.field?.[action.defenderIdx];
   if (!att || !def || def.shielded || def.pulled) return -9999;
   if (att.tapped || att.frozen || att.pulled) return -9999;
+  if (!shouldAttack(att, def)) return -9999;
   const { killD, killA, ap, dp } = combatOutcome(att, def);
   const atkMul = g("attackScoreMul", 1);
   // Não suicidar sem necessidade.
@@ -406,6 +428,12 @@ export function pickOnEnterResolution(state, seat, ability, casterIdx, fieldIdx)
   if (ability === "pesadelo" || ability === "roubar" || ability === "desacelerar") {
     const hs = humanSeat(state, seat);
     return { targetPlayerIdx: hs, targetIdx: hs };
+  }
+  if (ability === "trocaInjusta") {
+    const pool = gatherEnemy((c) => Number(c.currentPower ?? c.power) === 2);
+    if (!pool.length) return {};
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    return { targetP: pick.p, targetI: pick.i, enemyP: pick.p, enemyI: pick.i };
   }
   if (ability === "bolaDeFogo" || ability === "assassinar" || ability === "incendiar"
       || ability === "mordidaVenenosa" || ability === "corromper"
@@ -643,6 +671,7 @@ export const DfAiHardBrain = {
   fieldCount,
   enemyFieldCount,
   scoreSummonCard,
+  shouldAttack,
   scoreAttackAction,
   scoreDrawAction,
   scoreLegalAction,

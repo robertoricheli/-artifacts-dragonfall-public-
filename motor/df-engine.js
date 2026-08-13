@@ -1199,6 +1199,28 @@ export function autoOnEnterResolution(state, casterIdx, fieldIdx, plan, rng = Ma
         }
         return resolution;
     }
+    // Troca Injusta: só Campeão adversário de Poder 2 (manual). Nunca o 1º inimigo.
+    if (ability === "trocaInjusta") {
+        const pool = [];
+        const count = state.playersCount ?? state.players.length;
+        for (let ep = 0; ep < count; ep++) {
+            if (ep === casterIdx)
+                continue;
+            const field = (state.players[ep]?.field || []);
+            field.forEach((c, i) => {
+                if (c && Number(c.currentPower ?? c.power) === 2)
+                    pool.push({ p: ep, i });
+            });
+        }
+        if (pool.length) {
+            const pick = pool[Math.floor(rng() * pool.length)];
+            resolution.targetP = pick.p;
+            resolution.targetI = pick.i;
+            resolution.enemyP = pick.p;
+            resolution.enemyI = pick.i;
+        }
+        return resolution;
+    }
     if (plan.targetKind === "enemy" || mode === "auto") {
         const targets = R.gatherEnemyTargets(state, casterIdx);
         if (targets.length) {
