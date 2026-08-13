@@ -673,7 +673,7 @@ export const DfAiHardBrain = {
   pickNextAction,
   MAX_FIELD,
   MAX_HAND,
-  AI_STEP_MS: 1500,
+  AI_STEP_MS: 2200,
 };
 
 export default DfAiHardBrain;
