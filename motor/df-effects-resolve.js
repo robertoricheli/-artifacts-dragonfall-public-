@@ -757,16 +757,24 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             if (!picks.length)
                 break;
             const names = [];
+            // Manual §6: Barreira dá imunidade a Vulnerável. O alvo é
+            // escolhido normalmente, mas o status não adere e o jogador
+            // recebe o aviso de imunidade.
+            const immune = [];
             for (const { p, i } of picks) {
                 const ch = state.players[p]?.field[i];
                 if (!ch)
                     continue;
+                if (ch.barrier || ch.barrierPermanent) {
+                    immune.push({ p, i, name: ch.name });
+                    continue;
+                }
                 ch.vulnerable = true;
                 names.push(ch.name);
             }
             markOnEnterUsed(state, casterIdx, key);
             events.push({
-                type: "FUMACA_TOXICA", casterIdx, fieldIdx, picks, names,
+                type: "FUMACA_TOXICA", casterIdx, fieldIdx, picks, names, immune,
                 visual: "fumaca_toxica",
             });
             break;

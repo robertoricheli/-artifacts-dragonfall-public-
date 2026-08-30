@@ -264,14 +264,26 @@ function paladinoRevive(state, pIdx, pick, events) {
     if (dIdx >= 0)
         pl.discard.splice(dIdx, 1);
     const isConstant = pick.baseDef.abilityType === "constant" || !!pick.baseDef.constantEffect;
+    // Zerar TODOS os status: flag residual (ex.: barrier) vinda do cardDef fazia a
+    // Barreira fantasma absorver a Ultimate do Rei Bomba no campeão revivido.
     const revived = {
         ...pick.baseDef,
         uid: newUid(),
         currentPower: pick.baseDef.power,
         basePower: pick.baseDef.power,
         tapped: false,
-        frozen: false,
         isToken: false,
+        frozen: false, frozenTurns: 0, freeAttack: false,
+        shielded: false, shieldedTurns: 0, shieldedPermanent: false,
+        barrier: false, barrierTurns: 0, barrierPermanent: false,
+        poisoned: false, poisonTurns: 0, poisonedByP: -1,
+        burning: false, burningTurns: 0, burningByP: undefined,
+        fireAura: false, fireAuraTurns: 0,
+        vulnerable: false, wallBuff: false,
+        guerraBuff: false, guerraBuffTurns: 0,
+        fury: false, furyTurns: 0, furyStacks: 0, furyBonusActive: false,
+        pulled: false, pulledFromOwner: -1, pulledTurns: 0,
+        tiroDuploUsedThisTurn: false,
         silenced: !isConstant,
     };
     pl.field.push(revived);

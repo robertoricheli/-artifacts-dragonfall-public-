@@ -6,14 +6,14 @@ const LIMITS = Object.freeze({
     MAX_FIELD: 6,
     MAX_HAND: 8,
     PASSIVE_VP_PER_TURN_CAP: 2,
-    /** Manual §3: invocar dragão bloqueado com 4+ aliados em campo. */
-    INVOKE_DRAGON_MAX_FIELD: 4,
+    /** Manual §3: invocar dragão usa o mesmo teto de campo (6). */
+    INVOKE_DRAGON_MAX_FIELD: 6,
 });
-/** Invocar dragão/filhote bloqueado com 4+ aliados (manual), independente do teto de campo. */
+/** Invocar dragão/filhote só é bloqueado quando o campo já está no teto (6). */
 function invokeDragonBlocked(state, pIdx, card, limits = LIMITS) {
     const p = state.players[pIdx];
     const fcSelf = p?.field?.length ?? 0;
-    const maxAllies = limits.INVOKE_DRAGON_MAX_FIELD ?? 4;
+    const maxAllies = limits.INVOKE_DRAGON_MAX_FIELD ?? limits.MAX_FIELD ?? 6;
     return fcSelf >= maxAllies;
 }
 /** Exige campeão adversário no campo — NÃO inclui Pesadelo/Roubar/Desacelerar (alvo = jogador). */
