@@ -707,6 +707,21 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
       });
       deferBoardApply = true;
     }
+    if (ev.type === "ON_DESTROY_BURST" && ev.ability === "legado") {
+      for (const t of ev.applied || []) {
+        if (t?.p == null) continue;
+        if (t.currentPower != null) {
+          fieldPatches.push({ targetP: t.p, targetI: t.i, currentPower: t.currentPower });
+        }
+        visuals.push({
+          kind: "legado",
+          ownerP: ev.ownerIdx,
+          targetP: t.p,
+          targetI: t.i,
+          powerAfter: t.currentPower,
+        });
+      }
+    }
     if (ev.type === "ON_DESTROY_BURST" && ev.ability === "vinganca") {
       for (const t of ev.applied || []) {
         if (t?.p == null) continue;

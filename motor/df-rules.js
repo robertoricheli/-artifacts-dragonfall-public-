@@ -197,8 +197,25 @@ function isCombatOrPowerReductionDestroy(reason) {
 function applyOnDestroyBurst(state, ownerIdx, champ, reason, rng = Math.random) {
     const ability = resolveOnDestroyAbility(champ);
     if (ability !== "explosaoGelo" && ability !== "explosaoVenenosa"
-        && ability !== "furiaLegado" && ability !== "vinganca")
+        && ability !== "furiaLegado" && ability !== "vinganca"
+        && ability !== "legado")
         return { ability: null, targets: [], applied: [] };
+    // Legado: aliado aleatório ganha +1 Poder permanente (manual §Legado).
+    if (ability === "legado") {
+        const allies = gatherAllyTargets(state, ownerIdx, -1, () => true);
+        if (!allies.length)
+            return { ability, targets: [], applied: [] };
+        const pick = allies[Math.floor(rng() * allies.length)];
+        const ben = state.players[pick.p]?.field?.[pick.i];
+        if (!ben)
+            return { ability, targets: [pick], applied: [] };
+        ben.currentPower = (ben.currentPower ?? 0) + 1;
+        return {
+            ability,
+            targets: [pick],
+            applied: [{ ...pick, name: ben.name, currentPower: ben.currentPower }],
+        };
+    }
     if (ability === "explosaoVenenosa" && !isCombatOrPowerReductionDestroy(reason))
         return { ability, targets: [], applied: [] };
     if (ability === "furiaLegado") {
