@@ -122,6 +122,10 @@ import {
   clearAllAi,
 } from "./df-server-ai.mjs";
 import {
+  buildAiReactiveAnswer,
+  consumeAiReactiveCard,
+} from "./df-server-ai-reactive.mjs";
+import {
   validateJoinRoom,
   validateSetHero,
   validateSetWinPoints,
@@ -533,6 +537,102 @@ function emitActionEnvelope(room, envelope) {
       : envelope;
     io.to(sid).emit("remote_action", peerEnv);
   }
+}
+
+/**
+ * Responde no lugar de um assento sob IA a uma pergunta reativa (MP apenas).
+ *
+ * Sem isto o atacante espera o timeout inteiro (10–11s) porque não existe
+ * navegador no assento desconectado para responder — era a causa do
+ * "jogo congelou depois de escolher o alvo".
+ *
+ * @returns {boolean} true se respondeu (a pergunta foi consumida pela IA).
+ */
+function maybeAnswerReactiveForAi(room, action, askerSeat) {
+  let answer = null;
+  const defSeat = action?.defenderPlayerId;
+  const seatOffline = (defSeat === 0 || defSeat === 1) && !room.sockets?.[defSeat];
+  try {
+    answer = buildAiReactiveAnswer(room, action, askerSeat, { seatOffline });
+  } catch (e) {
+    console.warn("[DF ai-reactive] build", e?.message || e);
+  }
+  if (!answer) return false;
+
+  const askerSid = room.sockets[askerSeat];
+
+  // Usar a carta consome-a de fato: o estado do servidor é a fonte da verdade.
+  if (answer.payload.use) {
+    try { consumeAiReactiveCard(room, defSeat, action.type); } catch (e) { /* */ }
+  }
+
+  room.actionSeq += 1;
+  // Sem authoritativeState: a ANSWER percorre o mesmo caminho "só-UI" do
+  // envelope enviado por um humano (REACTIVE_*_ANSWER está em
+  // DF_MP_NOSNAP_TYPES). Anexar estado aqui arriscaria o cliente descartar o
+  // envelope no materialize do state diff — e o atacante voltaria a travar.
+  const envelope = {
+    seq: room.actionSeq,
+    fromSeat: defSeat,
+    action: answer.payload,
+    authoritativeState: null,
+    events: [],
+    serverAi: true,
+    serverAiReactive: true,
+  };
+  if (askerSid) io.to(askerSid).emit("remote_action", envelope);
+
+  // Quando a IA usa a Reação, o humano precisa VER a carta sendo jogada.
+  if (answer.payload.use) {
+    const anim = buildAiReactiveVisual(action, answer.payload, askerSeat);
+    if (anim && askerSid) {
+      room.actionSeq += 1;
+      io.to(askerSid).emit("remote_action", {
+        seq: room.actionSeq,
+        fromSeat: defSeat,
+        action: { type: "PRESENT", playerId: defSeat, anim },
+        events: [],
+        serverAi: true,
+        serverAiReactive: true,
+      });
+    }
+  }
+  return true;
+}
+
+/** Visual da carta de Reação jogada pela IA, para o cliente do humano. */
+function buildAiReactiveVisual(action, payload, askerSeat) {
+  const defOwner = payload.defenderPlayerId;
+  if (action.type === "REACTIVE_BLOCK_QUERY") {
+    return {
+      kind: "blocked_attack",
+      defOwner,
+      defIdx: payload.defenderIdx,
+      cardName: "BLOQUEAR ATAQUE",
+      talentEffect: "bloquearAtaque",
+    };
+  }
+  if (action.type === "REACTIVE_PROTECTION_QUERY") {
+    return {
+      kind: "divine_protection",
+      defOwner,
+      defenderPlayerId: defOwner,
+      defenderName: payload.defenderName,
+      defenderUid: payload.defenderUid,
+      cardName: "PROTEÇÃO DIVINA",
+      talentEffect: "protecaoDivina",
+    };
+  }
+  if (action.type === "REACTIVE_CANCEL_QUERY") {
+    return {
+      kind: "cancel_ultimate",
+      casterP: askerSeat,
+      ultimateName: payload.ultimateName,
+      cardName: "CANCELAR ULTIMATE",
+      talentEffect: "cancelarUltimate",
+    };
+  }
+  return null;
 }
 
 function afterAuthoritativeAction(room, state) {
@@ -1132,6 +1232,10 @@ io.on("connection", (socket) => {
             : envelope;
           io.to(sid).emit("remote_action", peerEnv);
         }
+
+        // Pergunta reativa para assento sob IA: responder já, senão o atacante
+        // fica preso no timeout de 10s (jogo "congelado" após escolher o alvo).
+        maybeAnswerReactiveForAi(room, action, seat);
 
         touchPersist(room);
         await mirrorRoomNow(room);

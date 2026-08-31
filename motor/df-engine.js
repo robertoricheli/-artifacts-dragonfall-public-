@@ -1016,6 +1016,11 @@ export function applyAction(state, action, ctx = {}) {
             handCard.burning = false;
             handCard.vulnerable = false;
             handCard.corruptedNoHonor = false;
+            // A carta volta como compra fresca: `onEnterConsumed` marca "já entrou em
+            // campo" e bloquearia a Habilidade Instantânea na nova invocação.
+            handCard.onEnterConsumed = false;
+            handCard.hasUsedOnEnter = false;
+            handCard._necromanciaFresh = true;
             delete handCard._summoning;
             const hand = owner.hand || [];
             hand.push(handCard);

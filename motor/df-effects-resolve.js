@@ -565,6 +565,10 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             const di = discard.findIndex((c) => c.uid === card.uid || c.name === card.name);
             if (di >= 0)
                 discard.splice(di, 1);
+            // Volta como compra fresca: sem limpar `onEnterConsumed`, o
+            // campeão ressuscitado entraria MUDO na próxima invocação.
+            card.onEnterConsumed = false;
+            card.hasUsedOnEnter = false;
             state.players[casterIdx].hand.push(card);
             markOnEnterUsed(state, casterIdx, key);
             events.push({ type: "NECROMANCIA", casterIdx, card: card.name, visual: "necromancia" });

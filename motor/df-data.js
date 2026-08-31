@@ -248,7 +248,7 @@ const cardDefs = [
         onDestroy: null, onEnter: null, talentEffect: "doppelganger", composedFace: true },
     { name: "BARREIRA", power: 0, category: "talent", abilityType: "talent",
         abilityName: "Barreira (Talento)",
-        abilityDesc: "Campeões aliados ganham Barreira durante 2 rodadas, ficando resistentes a redução de Poder.",
+        abilityDesc: "TODOS os Campeões aliados ganham Barreira durante 2 rodadas, ficando resistentes a redução de Poder.",
         onDestroy: null, onEnter: null, talentEffect: "barreira", composedFace: true },
     { name: "BAFORADA VENENOSA", power: 0, category: "talent", abilityType: "talent",
         abilityName: "Baforada Venenosa (Talento)",
