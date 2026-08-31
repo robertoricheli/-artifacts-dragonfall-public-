@@ -443,6 +443,23 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             const target = state.players[tp]?.field?.[ti];
             if (!target || tp === casterIdx)
                 break;
+            // Manual §6: Barreira dá imunidade a Em Chamas. A habilidade é
+            // consumida (o alvo foi escolhido), mas o status não adere.
+            if (target.barrier || target.barrierPermanent) {
+                markOnEnterUsed(state, casterIdx, key);
+                events.push({
+                    type: "INCENDIAR",
+                    casterIdx,
+                    fieldIdx,
+                    targetP: tp,
+                    targetI: ti,
+                    targetName: target.name,
+                    immune: true,
+                    applied: false,
+                    visual: "em_chamas",
+                });
+                break;
+            }
             target.burning = true;
             target.burningTurns = 4;
             target.burningByP = casterIdx;
@@ -455,6 +472,7 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
                 targetI: ti,
                 targetName: target.name,
                 turns: 4,
+                applied: true,
                 visual: "em_chamas",
             });
             break;

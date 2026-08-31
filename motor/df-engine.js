@@ -740,13 +740,19 @@ export function applyAction(state, action, ctx = {}) {
                         : { ...card, tapped: false, freeAttack: false };
                     delete handCard._summoning;
                     const hand = owner.hand || [];
-                    hand.push(handCard);
+                    // Manual §9: mão cheia (8) → a carta NÃO volta, sai do jogo
+                    // (nem mão, nem descarte).
+                    const maxHand = R.LIMITS?.MAX_HAND ?? 8;
+                    const exiled = hand.length >= maxHand;
+                    if (!exiled)
+                        hand.push(handCard);
                     owner.hand = hand;
                     events.push({
                         type: "SCARE_RETURN",
                         targetP: tp,
                         targetI: ti,
                         cardName: handCard.name,
+                        exiled,
                         visual: "scare_return",
                     });
                     continue;

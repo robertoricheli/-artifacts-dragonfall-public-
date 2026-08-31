@@ -374,8 +374,15 @@ function scareReturn(state, pIdx, targetP, targetI, events) {
     champ.guerraBuff = false;
     champ.guerraBuffTurns = 0;
     champ.onEnterConsumed = false;
-    owner.hand.push(champ);
-    events.push({ type: "SCARE_RETURN", playerId: pIdx, targetP, targetI, card: champ.name });
+    // Manual §9: mão cheia (8) → a carta não volta e sai do jogo.
+    const maxHand = rules().LIMITS?.MAX_HAND ?? 8;
+    const exiled = (owner.hand.length ?? 0) >= maxHand;
+    if (!exiled)
+        owner.hand.push(champ);
+    events.push({
+        type: "SCARE_RETURN", playerId: pIdx, targetP, targetI,
+        card: champ.name, exiled,
+    });
 }
 export function validateUltimatePlay(state, action) {
     const pid = (action.playerId ?? state.currentPlayer);
