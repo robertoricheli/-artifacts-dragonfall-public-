@@ -204,7 +204,7 @@ function planOnEnterImpl(state, casterIdx, fieldIdx) {
         return { ok: false, code: leg.code, mode: "blocked" };
     const instantAuto = new Set([
         "fumacaToxica", "raioDuplo", "pesadelo", "roubar", "desacelerar",
-        "defensor", "gritoDeGuerra",
+        "defensor", "gritoDeGuerra", "forja",
     ]);
     const targetEnemy = new Set([
         "bolaDeFogo", "assassinar", "transformarBichinho", "rajadaCongelante",
@@ -250,6 +250,46 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             state.players[casterIdx].actions = (state.players[casterIdx].actions ?? 0) + 1;
             markOnEnterUsed(state, casterIdx, key);
             events.push({ type: "RAPIDEZ", casterIdx, visual: "wings" });
+            break;
+        }
+        case "forja": {
+            const owner = state.players[casterIdx];
+            if (!owner)
+                break;
+            const maxHand = R()?.LIMITS?.MAX_HAND ?? 8;
+            const hand = owner.hand || [];
+            markOnEnterUsed(state, casterIdx, key);
+            if (hand.length >= maxHand) {
+                events.push({
+                    type: "FORJA", casterIdx, fieldIdx,
+                    fizzled: true, reason: "hand_full",
+                });
+                break;
+            }
+            const deck = owner.deck;
+            if (!deck?.length) {
+                events.push({
+                    type: "FORJA", casterIdx, fieldIdx,
+                    fizzled: true, reason: "deck_empty",
+                });
+                break;
+            }
+            const card = deck.pop();
+            if (owner.maldicaoForgetNext && card?.category === "champion") {
+                card.silencedInHand = true;
+            }
+            hand.push(card);
+            owner.hand = hand;
+            events.push({
+                type: "FORJA",
+                casterIdx,
+                fieldIdx,
+                playerId: casterIdx,
+                card,
+                cardName: card?.name,
+                drawn: true,
+                visual: "card_draw",
+            });
             break;
         }
         case "defensor": {
@@ -1073,7 +1113,7 @@ const ON_ENTER_RESOLVE_KEYS = [
     "ursificacao", "transformarBichinho", "furia", "guardiao", "auraAntiMagia",
     "auraDeFogo", "fumacaToxica", "raioDuplo", "defensor",
     "rajadaCongelante", "corromper", "mordidaVenenosa", "incendiar", "gritoDeGuerra",
-    "invokeDragon", "invokeCubicDragon",
+    "invokeDragon", "invokeCubicDragon", "forja",
 ];
 /** Registra plan + resolve por string no DfEffects (registry unificado). */
 function bootstrapResolveRegistry(E) {

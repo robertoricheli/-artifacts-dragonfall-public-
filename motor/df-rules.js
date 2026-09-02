@@ -61,8 +61,7 @@ function isPesadoDemais(c) {
     return !!(c && c.abilityName === "Pesado Demais" && !c.silenced);
 }
 function isCrescimentoDragon(c) {
-    return !!(c && !c.silenced &&
-        (c.name === "FILHOTE DE DRAGÃO" || c.name === "DRAGÃO AZUL" || c.name === "DRAGÃO CÚBICO"));
+    return !!(c && !c.silenced && c.abilityName === "Crescimento");
 }
 function isImitatorChamp(c) {
     return !!(c && IMITATOR_NAMES.has(c.name));

@@ -247,6 +247,7 @@ function mapEventTypeToVisual(ev) {
     FUMACA_TOXICA: "fumaca_toxica",
     NECROMANCIA: "necromancia",
     RAPIDEZ: "wings",
+    FORJA: "card_draw",
     FORTALECER: "strong_arm",
     GUARDIAO: "guardian",
     AURA_DE_FOGO: "fire_aura",
