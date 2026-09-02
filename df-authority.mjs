@@ -290,6 +290,10 @@ function mapEventTypeToVisual(ev) {
     DEFENSOR: "shield",
     FURIA: "fury",
     GRITO_DE_GUERRA: "fury",
+    TECNICAS_DE_COMBATE: "tecnicas_combate",
+    ROLETA_RUSSA: "roleta_russa",
+    PODRIDAO: "podridao",
+    PODRIDAO_FIZZLE: "podridao_fizzle",
     BARRIER_BLOCKED: "barrier_block",
     BOLA_DE_FOGO: "bola_de_fogo",
     TRANSFORM_VULN_DESTROY: "transformar_bichinho",
@@ -381,6 +385,38 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
         });
         deferBoardApply = true;
       }
+      continue;
+    }
+    if (ev.type === "TECNICAS_DE_COMBATE" && Array.isArray(ev.applied)) {
+      for (const t of ev.applied) {
+        if (t?.p == null || t?.i == null) continue;
+        visuals.push({
+          kind: "tecnicas_combate",
+          casterIdx: ev.casterIdx,
+          ownerP: t.p,
+          fieldIdx: t.i,
+          fieldPatches: [{
+            targetP: t.p,
+            targetI: t.i,
+            tecnicasSobrepujar: true,
+            tecnicasSobrepujarTurns: 1,
+          }],
+        });
+        deferBoardApply = true;
+      }
+      continue;
+    }
+    if (ev.type === "ROLETA_RUSSA") {
+      visuals.push({
+        kind: "roleta_russa",
+        casterIdx: ev.casterIdx,
+        pickIndex: ev.pickIndex,
+        candidates: ev.candidates,
+        targetP: ev.targetP,
+        targetUid: ev.targetUid,
+        targetName: ev.targetName,
+        vpGain: ev.vpGain,
+      });
       continue;
     }
     if (ev.visual) {

@@ -407,6 +407,30 @@ export function applyAction(state, action, ctx = {}) {
                 p.actions = p.actions - R.championSummonCost(card);
             const fIdx = field.indexOf(champ);
             events.push({ type: "SUMMON", playerId: pid, fieldIdx: fIdx, card: champ, cardName: champ.name });
+            if (card.podridao) {
+                const podChamp = field.splice(fIdx, 1)[0];
+                delete podChamp.podridao;
+                const discard = p.discard || [];
+                discard.push(podChamp);
+                p.discard = discard;
+                events.push({
+                    type: "DESTROY",
+                    p: pid,
+                    i: fIdx,
+                    reason: "podridaoFizzle",
+                    name: podChamp.name,
+                    uid: podChamp.uid,
+                    noVpOnKill: true,
+                });
+                events.push({
+                    type: "PODRIDAO_FIZZLE",
+                    playerId: pid,
+                    category: "champion",
+                    cardName: podChamp.name,
+                    visual: "podridao_fizzle",
+                });
+                break;
+            }
             if (champ.onEnter) {
                 events.push({ type: "ON_ENTER_PENDING", playerId: pid, fieldIdx: fIdx, onEnter: champ.onEnter });
             }
@@ -855,12 +879,13 @@ export function applyAction(state, action, ctx = {}) {
                         "frozen", "tapped", "freeAttack", "shielded", "shieldedPermanent",
                         "barrier", "barrierPermanent", "vulnerable", "silenced", "poisoned",
                         "fury", "pulled", "inspiracao", "mimico", "wallBuff", "guerraBuff",
-                        "foreverGrowth", "fireAura", "burning", "corruptedNoHonor", "furyBonusActive",
+                        "tecnicasSobrepujar", "foreverGrowth", "fireAura", "burning",
+                        "corruptedNoHonor", "furyBonusActive", "podridao", "silencedInHand",
                     ];
                     const STATUS_NUM = [
                         "frozenTurns", "shieldedTurns", "barrierTurns", "poisonTurns",
-                        "furyTurns", "furyStacks", "guerraBuffTurns", "burningTurns",
-                        "fireAuraTurns", "currentPower", "poisonedByP", "burningByP",
+                        "furyTurns", "furyStacks", "guerraBuffTurns", "tecnicasSobrepujarTurns",
+                        "burningTurns", "fireAuraTurns", "currentPower", "poisonedByP", "burningByP",
                     ];
                     const STATUS_ANY = [
                         "abilityType", "abilityName", "abilityDesc", "onEnter", "onDestroy",

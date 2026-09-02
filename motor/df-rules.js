@@ -38,6 +38,8 @@ function hasIniciativa(c) {
         || normalizeAbilityName(c.mimicAbilityName) === "iniciativa";
 }
 function championSummonCost(c) {
+    if (c?.podridao)
+        return 0;
     if (hasIniciativa(c))
         return 1;
     return c?.currentPower ?? c?.power ?? 0;
@@ -49,10 +51,18 @@ function championSummonCost(c) {
  * jogados mesmo sem ações restantes.
  */
 function talentPlayCost(c) {
+    if (c?.podridao)
+        return 0;
     return c?.currentPower ?? c?.power ?? 0;
 }
 function isOverpower(c) {
-    return !!(c && ((c.abilityName === "Sobrepujar" && !c.silenced) || c.guerraBuff));
+    if (!c || c.silenced)
+        return false;
+    if (c.abilityName === "Sobrepujar")
+        return true;
+    if (c.guerraBuff)
+        return true;
+    return !!(c.tecnicasSobrepujar && (c.tecnicasSobrepujarTurns ?? 0) > 0);
 }
 function isResistente(c) {
     return !!(c && c.abilityName === "Resistente" && !c.silenced);
@@ -194,6 +204,8 @@ function isCombatOrPowerReductionDestroy(reason) {
  * Retorna alvos escolhidos sem repetição; não concede PV imediato.
  */
 function applyOnDestroyBurst(state, ownerIdx, champ, reason, rng = Math.random) {
+    if (reason === "podridaoFizzle")
+        return { ability: null, targets: [], applied: [] };
     const ability = resolveOnDestroyAbility(champ);
     if (ability !== "explosaoGelo" && ability !== "explosaoVenenosa"
         && ability !== "furiaLegado" && ability !== "vinganca"
@@ -405,6 +417,8 @@ function canOnEnterResolve(state, pIdx, card, ctx) {
             return { ok: false, code: "NO_ALLY_AURA_FOGO" };
         if (onEnter === "gritoDeGuerra" && otherAllies === 0)
             return { ok: false, code: "NO_ALLY_GRITO_GUERRA" };
+        if (onEnter === "tecnicasDeCombate" && otherAllies === 0)
+            return { ok: false, code: "NO_ALLY_TECNICAS" };
         if (onEnter === "imitar") {
             const ex = (ctx && ctx.fieldIdx != null) ? (ctx.fieldIdx | 0) : -1;
             if (gatherImitableAllies(state, pIdx, ex).length === 0) {
@@ -462,6 +476,8 @@ function canOnEnterResolve(state, pIdx, card, ctx) {
         return { ok: false, code: "NO_ALLY_AURA_FOGO" };
     if (onEnter === "gritoDeGuerra" && otherAllies === 0)
         return { ok: false, code: "NO_ALLY_GRITO_GUERRA" };
+    if (onEnter === "tecnicasDeCombate" && otherAllies === 0)
+        return { ok: false, code: "NO_ALLY_TECNICAS" };
     if (onEnter === "transformarBichinho" && !hasTransformarBichinhoTarget(state, pIdx)) {
         return { ok: false, code: "NO_TRANSFORM_TARGET" };
     }
@@ -1068,6 +1084,15 @@ function applyTurnStartStatusTicks(state, pIdx) {
                 if (expired > 0)
                     logs.push(`${c.name}: Fúria expirou (-${expired} Poder).`);
                 changed = true;
+            }
+        }
+        if (c.tecnicasSobrepujar && (c.tecnicasSobrepujarTurns ?? 0) > 0) {
+            c.tecnicasSobrepujarTurns -= 1;
+            if (c.tecnicasSobrepujarTurns <= 0) {
+                c.tecnicasSobrepujar = false;
+                c.tecnicasSobrepujarTurns = 0;
+                changed = true;
+                logs.push(`${c.name}: Sobrepujar (Técnicas de Combate) expirou.`);
             }
         }
     });

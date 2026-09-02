@@ -98,6 +98,8 @@ function clearChampionFieldStatuses(c) {
     c.foreverGrowth = false;
     c.guerraBuff = false;
     c.guerraBuffTurns = 0;
+    c.tecnicasSobrepujar = false;
+    c.tecnicasSobrepujarTurns = 0;
     c.barrier = false;
     c.barrierTurns = 0;
     c.barrierPermanent = false;
@@ -204,7 +206,7 @@ function planOnEnterImpl(state, casterIdx, fieldIdx) {
         return { ok: false, code: leg.code, mode: "blocked" };
     const instantAuto = new Set([
         "fumacaToxica", "raioDuplo", "pesadelo", "roubar", "desacelerar",
-        "defensor", "gritoDeGuerra", "forja",
+        "defensor", "gritoDeGuerra", "forja", "tecnicasDeCombate", "roletaRussa", "podridao",
     ]);
     const targetEnemy = new Set([
         "bolaDeFogo", "assassinar", "transformarBichinho", "rajadaCongelante",
@@ -772,6 +774,131 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             events.push({ type: "GUARDIAO", casterIdx, picks, names, visual: "guardian" });
             break;
         }
+        case "tecnicasDeCombate": {
+            const applied = [];
+            state.players[casterIdx].field.forEach((ally, i) => {
+                if (!ally || i === fieldIdx)
+                    return;
+                ally.tecnicasSobrepujar = true;
+                ally.tecnicasSobrepujarTurns = 1;
+                applied.push({
+                    p: casterIdx,
+                    i,
+                    name: ally.name,
+                    uid: ally.uid,
+                });
+            });
+            if (!applied.length)
+                break;
+            markOnEnterUsed(state, casterIdx, key);
+            events.push({
+                type: "TECNICAS_DE_COMBATE",
+                casterIdx,
+                fieldIdx,
+                applied,
+                visual: "tecnicas_combate",
+            });
+            break;
+        }
+        case "roletaRussa": {
+            const candidates = [];
+            const count = state.playersCount ?? state.players?.length ?? 0;
+            for (let ep = 0; ep < count; ep++) {
+                (state.players[ep]?.field || []).forEach((ch, i) => {
+                    if (ch)
+                        candidates.push({ p: ep, i, name: ch.name, uid: ch.uid });
+                });
+            }
+            if (!candidates.length)
+                break;
+            const pickIndex = Math.floor(rng() * candidates.length);
+            const pick = candidates[pickIndex];
+            const target = state.players[pick.p]?.field?.[pick.i];
+            if (!target)
+                break;
+            const targetName = target.name;
+            const targetUid = target.uid;
+            const noHonor = !!R()?.hasNoHonor?.(target);
+            markOnEnterUsed(state, casterIdx, key);
+            destroyAtField(state, pick.p, pick.i, events, "roletaRussa");
+            let vpGain = 0;
+            if (pick.p !== casterIdx && !noHonor) {
+                state.players[casterIdx].vp = (state.players[casterIdx].vp ?? 0) + 1;
+                vpGain = 1;
+            }
+            events.push({
+                type: "ROLETA_RUSSA",
+                casterIdx,
+                fieldIdx,
+                pickIndex,
+                candidates,
+                targetP: pick.p,
+                targetI: pick.i,
+                targetUid,
+                targetName,
+                vpGain,
+                visual: "roleta_russa",
+            });
+            break;
+        }
+        case "podridao": {
+            let enemyIdx = -1;
+            const pCount = state.playersCount ?? state.players?.length ?? 0;
+            for (let ep = 0; ep < pCount; ep++) {
+                if (ep !== casterIdx) {
+                    enemyIdx = ep;
+                    break;
+                }
+            }
+            if (enemyIdx < 0)
+                break;
+            const deck = state.players[enemyIdx]?.deck || [];
+            const MAX_PODRIDAO = 12;
+            const currentPodre = deck.filter((c) => c?.podridao).length;
+            const slots = Math.max(0, MAX_PODRIDAO - currentPodre);
+            const eligibleIdx = [];
+            deck.forEach((c, di) => {
+                if (c && !c.podridao)
+                    eligibleIdx.push(di);
+            });
+            markOnEnterUsed(state, casterIdx, key);
+            if (!slots || !eligibleIdx.length) {
+                events.push({
+                    type: "PODRIDAO",
+                    casterIdx,
+                    fieldIdx,
+                    enemyIdx,
+                    count: 0,
+                    fizzled: true,
+                    visual: "podridao",
+                });
+                break;
+            }
+            const pickCount = Math.min(4, slots, eligibleIdx.length);
+            for (let k = eligibleIdx.length - 1; k > 0; k--) {
+                const j = Math.floor(rng() * (k + 1));
+                [eligibleIdx[k], eligibleIdx[j]] = [eligibleIdx[j], eligibleIdx[k]];
+            }
+            const pickedIdx = eligibleIdx.slice(0, pickCount);
+            const contaminated = [];
+            for (const di of pickedIdx) {
+                const card = deck[di];
+                if (!card || card.podridao)
+                    continue;
+                card.podridao = true;
+                contaminated.push(card.name);
+            }
+            events.push({
+                type: "PODRIDAO",
+                casterIdx,
+                fieldIdx,
+                enemyIdx,
+                count: contaminated.length,
+                names: contaminated,
+                visual: "podridao",
+            });
+            break;
+        }
         case "auraAntiMagia": {
             caster.barrier = true;
             caster.barrierPermanent = true;
@@ -927,6 +1054,18 @@ function applyReactiveUse(state, defOwner, talentEffect, use) {
     const handIdx = leg.handIdx;
     const card = state.players[defOwner].hand.splice(handIdx, 1)[0];
     state.players[defOwner].discard = state.players[defOwner].discard || [];
+    if (card?.podridao) {
+        delete card.podridao;
+        state.players[defOwner].discard.push(card);
+        events.push({
+            type: "PODRIDAO_FIZZLE",
+            defOwner,
+            category: "reaction",
+            cardName: card?.name,
+            visual: "podridao_fizzle",
+        });
+        return { ok: true, state, events, blocked: false, protected: false, cancelled: false };
+    }
     state.players[defOwner].discard.push(card);
     events.push({
         type: "REACTIVE_USED",
@@ -952,12 +1091,29 @@ function applyTalentFromHand(state, pIdx, handIdx) {
     if (!card || card.category !== "talent") {
         return { ok: false, state, events: [], error: "NOT_TALENT" };
     }
-    // Custo por carta (manual §9.1): talento Custo 0 é jogável com 0 ações.
     const cost = R()?.talentPlayCost?.(card) ?? card.currentPower ?? card.power ?? 0;
     if ((p.actions ?? 0) < cost)
         return { ok: false, state, events: [], error: "INSUFFICIENT_ACTIONS" };
-    p.actions = Math.max(0, (p.actions ?? 0) - cost);
+    if (cost > 0)
+        p.actions = Math.max(0, (p.actions ?? 0) - cost);
     const [removed] = p.hand.splice(handIdx, 1);
+    if (removed.podridao) {
+        delete removed.podridao;
+        p.discard = p.discard || [];
+        p.discard.push(removed);
+        return {
+            ok: true,
+            state,
+            events: [{
+                    type: "PODRIDAO_FIZZLE",
+                    playerId: pIdx,
+                    category: "talent",
+                    cardName: removed.name,
+                    visual: "podridao_fizzle",
+                }],
+            card: removed,
+        };
+    }
     state.activeTalent = { ownerP: pIdx, card: removed, spentActions: cost > 0 ? cost : 0 };
     return {
         ok: true,
@@ -1114,6 +1270,7 @@ const ON_ENTER_RESOLVE_KEYS = [
     "auraDeFogo", "fumacaToxica", "raioDuplo", "defensor",
     "rajadaCongelante", "corromper", "mordidaVenenosa", "incendiar", "gritoDeGuerra",
     "invokeDragon", "invokeCubicDragon", "forja",
+    "tecnicasDeCombate", "roletaRussa", "podridao",
 ];
 /** Registra plan + resolve por string no DfEffects (registry unificado). */
 function bootstrapResolveRegistry(E) {
