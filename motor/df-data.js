@@ -335,7 +335,7 @@ const cardDefs = [
         onDestroy: null, onEnter: null, talentEffect: "enfraquecerTalento", composedFace: true },
     { name: "TERREMOTO", power: 0, category: "talent", abilityType: "talent",
         abilityName: "Terremoto (Talento)",
-        abilityDesc: "Reduza em 2 espaços o campo do adversário.",
+        abilityDesc: "Destrua 3 espaços do Campo do adversário, durante 3 rodadas.",
         onDestroy: null, onEnter: null, talentEffect: "terremotoTalento", composedFace: true },
     { name: "INVOCAR DRAGÃO", power: 0, category: "talent", abilityType: "talent",
         abilityName: "Invocar Dragão (Talento)",
@@ -595,14 +595,14 @@ const cardDefs = [
         abilityName: "Energizar",
         abilityDesc: "Ao entrar em campo, você ganha 1 Energia: +1 uso de Ultimate nesta partida.",
         onDestroy: null, onEnter: "energizar", composedFace: true },
-    // TERREMOTO: 2 Buracos no campo adversário por 4 rodadas.
+    // TERREMOTO: 3 Buracos no campo adversário por 3 rodadas.
     { name: "ELEFANTO", power: 1, category: "champion", abilityType: "instant",
         abilityName: "Terremoto",
-        abilityDesc: "Destrua 2 espaços do Campo do adversário, durante 4 rodadas.",
+        abilityDesc: "Destrua 3 espaços do Campo do adversário, durante 3 rodadas.",
         onDestroy: null, onEnter: "terremoto", composedFace: true },
     { name: "MECHA", power: 2, category: "champion", abilityType: "instant",
         abilityName: "Terremoto",
-        abilityDesc: "Destrua 2 espaços do Campo do adversário, durante 4 rodadas.",
+        abilityDesc: "Destrua 3 espaços do Campo do adversário, durante 3 rodadas.",
         onDestroy: null, onEnter: "terremoto", composedFace: true },
     // LAÇO DE SANGUE: ao destruir em combate, aliado aleatório +1 Poder.
     { name: "CAVALEIRO SANGUINÁRIO", power: 1, category: "champion", abilityType: "constant",

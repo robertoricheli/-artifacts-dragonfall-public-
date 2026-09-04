@@ -106,7 +106,7 @@ function recalcDesafiante(state) {
 function isCrescimentoDragon(c) {
     return !!(c && !c.silenced && c.abilityName === "Crescimento");
 }
-/** Buracos de Terremoto: reduzem o teto invocável (máx. 2). */
+/** Buracos de Terremoto: reduzem o teto invocável (máx. 3). */
 function fieldHolesCount(p) {
     return Array.isArray(p?.fieldHoles) ? p.fieldHoles.length : 0;
 }

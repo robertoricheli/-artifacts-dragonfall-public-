@@ -1275,6 +1275,10 @@ export function applyAction(state, action, ctx = {}) {
     else if (next.winner == null) {
         next.winner = null;
     }
+    try {
+        R.recalcDesafiante?.(next);
+    }
+    catch (eDes) { /* */ }
     return { ok: true, state: next, events };
 }
 /** Resolução automática de onEnter para simulador / IA (modos auto). */

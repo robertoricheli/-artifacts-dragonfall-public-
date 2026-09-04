@@ -1156,13 +1156,13 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
                 break;
             const victim = state.players[opp];
             const field = victim.field || [];
-            // Sorteia 2 slots distintos 0..5
+            // Sorteia 3 slots distintos 0..5
             const slots = [0, 1, 2, 3, 4, 5];
             for (let i = slots.length - 1; i > 0; i--) {
                 const j = Math.floor(rng() * (i + 1));
                 [slots[i], slots[j]] = [slots[j], slots[i]];
             }
-            const picked = slots.slice(0, 2).sort((a, b) => b - a); // alto→baixo p/ bounce
+            const picked = slots.slice(0, 3).sort((a, b) => b - a); // alto→baixo p/ bounce
             const bounced = [];
             for (const slot of picked) {
                 if (slot < field.length) {
@@ -1174,7 +1174,7 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             victim.fieldHoles = picked
                 .slice()
                 .sort((a, b) => a - b)
-                .map((slot) => ({ slot, turns: 4 }));
+                .map((slot) => ({ slot, turns: 3 }));
             markOnEnterUsed(state, casterIdx, key);
             if (R()?.recalcDesafiante)
                 R().recalcDesafiante(state);
@@ -1961,7 +1961,7 @@ function applyTalentAuto(state, pIdx) {
                 const j = Math.floor(Math.random() * (i + 1));
                 [slots[i], slots[j]] = [slots[j], slots[i]];
             }
-            const picked = slots.slice(0, 2).sort((a, b) => b - a);
+            const picked = slots.slice(0, 3).sort((a, b) => b - a);
             const bounced = [];
             for (const slot of picked) {
                 if (slot < field.length) {
@@ -1973,7 +1973,7 @@ function applyTalentAuto(state, pIdx) {
             victim.fieldHoles = picked
                 .slice()
                 .sort((a, b) => a - b)
-                .map((slot) => ({ slot, turns: 4 }));
+                .map((slot) => ({ slot, turns: 3 }));
             if (R()?.recalcDesafiante)
                 R().recalcDesafiante(state);
             events.push({
