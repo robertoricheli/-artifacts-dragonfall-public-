@@ -13,14 +13,13 @@ const LIMITS = Object.freeze({
 function invokeDragonBlocked(state, pIdx, card, limits = LIMITS) {
     const p = state.players[pIdx];
     const fcSelf = p?.field?.length ?? 0;
-    const maxAllies = limits.INVOKE_DRAGON_MAX_FIELD ?? limits.MAX_FIELD ?? 6;
-    return fcSelf >= maxAllies;
+    return fcSelf >= effectiveMaxField(p, limits);
 }
 /** Exige campeão adversário no campo — NÃO inclui Pesadelo/Roubar/Desacelerar (alvo = jogador). */
 const ON_ENTER_NEEDS_ENEMY = Object.freeze([
     "bolaDeFogo", "fumacaToxica", "raioDuplo", "transformarBichinho",
     "assassinar", "trocaInjusta", "rajadaCongelante", "mordidaVenenosa",
-    "incendiar",
+    "incendiar", "separar", "prisaoPrismatica", "charme",
 ]);
 const IMITATOR_NAMES = new Set(["WU-KONG", "ENIGMA"]);
 function championPrintedPower(c) {
@@ -70,8 +69,140 @@ function isResistente(c) {
 function isPesadoDemais(c) {
     return !!(c && c.abilityName === "Pesado Demais" && !c.silenced);
 }
+function hasMuralhaNativa(c) {
+    return !!(c && !c.silenced && (c.muralhaNativa || c.constantEffect === "muralha"));
+}
+function hasDesafiante(c) {
+    return !!(c && !c.silenced && (c.constantEffect === "desafiante" || c.abilityName === "Desafiante"));
+}
+function hasPrisaoPrismatica(c) {
+    return !!(c && c.prisaoPrismatica && !c.silenced);
+}
+function syncWallActive(p) {
+    if (!p)
+        return;
+    p.wallActive = (p.field || []).some((c) => c && c.wallBuff);
+}
+/** Desafiante: +2 só se o portador for o único Campeão do dono. */
+function recalcDesafiante(state) {
+    const count = state.playersCount ?? state.players?.length ?? 0;
+    for (let p = 0; p < count; p++) {
+        const field = state.players[p]?.field || [];
+        field.forEach((c) => {
+            if (!c)
+                return;
+            const alone = field.length === 1 && hasDesafiante(c);
+            if (alone && !c.desafianteAtivo) {
+                c.currentPower = (c.currentPower ?? 0) + 2;
+                c.desafianteAtivo = true;
+            }
+            else if (!alone && c.desafianteAtivo) {
+                c.currentPower = Math.max(0, (c.currentPower ?? 0) - 2);
+                c.desafianteAtivo = false;
+            }
+        });
+    }
+}
 function isCrescimentoDragon(c) {
     return !!(c && !c.silenced && c.abilityName === "Crescimento");
+}
+/** Buracos de Terremoto: reduzem o teto invocável (máx. 2). */
+function fieldHolesCount(p) {
+    return Array.isArray(p?.fieldHoles) ? p.fieldHoles.length : 0;
+}
+function effectiveMaxField(p, limits = LIMITS) {
+    return Math.max(0, (limits.MAX_FIELD ?? 6) - fieldHolesCount(p));
+}
+function tickFieldHoles(state, pIdx) {
+    const p = state.players[pIdx];
+    if (!p || !Array.isArray(p.fieldHoles) || !p.fieldHoles.length)
+        return [];
+    const expired = [];
+    p.fieldHoles = p.fieldHoles.filter((h) => {
+        h.turns = (h.turns ?? 0) - 1;
+        if (h.turns <= 0) {
+            expired.push({ slot: h.slot });
+            return false;
+        }
+        return true;
+    });
+    return expired;
+}
+/**
+ * Devolve campeão do campo à mão do dono (paridade Amedrontar: mão cheia → exile).
+ * @returns {{ name: string, exiled: boolean }|null}
+ */
+function bounceChampionToHand(state, ownerP, fieldIdx) {
+    const owner = state.players[ownerP];
+    const champ = owner?.field?.[fieldIdx];
+    if (!champ)
+        return null;
+    owner.field.splice(fieldIdx, 1);
+    const base = champ.basePower ?? champ.power ?? champ.currentPower ?? 0;
+    champ.currentPower = base;
+    champ.basePower = base;
+    champ.power = base;
+    champ.tapped = false;
+    champ.frozen = false;
+    champ.frozenTurns = 0;
+    champ.freeAttack = false;
+    champ.shielded = false;
+    champ.shieldedTurns = 0;
+    champ.shieldedPermanent = false;
+    champ.silenced = false;
+    champ.pulled = false;
+    champ.pulledFromOwner = -1;
+    champ.pulledTurns = 0;
+    champ.charme = false;
+    champ.charmeTurns = 0;
+    champ.charmeOriginalOwner = -1;
+    champ.prisaoPrismatica = false;
+    champ.desafianteAtivo = false;
+    champ.poisoned = false;
+    champ.poisonTurns = 0;
+    champ.poisonedByP = -1;
+    champ.vulnerable = false;
+    champ.corruptedNoHonor = false;
+    champ.barrier = false;
+    champ.barrierTurns = 0;
+    champ.barrierPermanent = false;
+    champ.fireAura = false;
+    champ.fireAuraTurns = 0;
+    champ.burning = false;
+    champ.burningTurns = 0;
+    champ.wallBuff = false;
+    champ.wallBuffApplied = false;
+    champ.foreverGrowth = false;
+    champ.guerraBuff = false;
+    champ.fury = false;
+    champ.furyStacks = 0;
+    champ.onEnterConsumed = false;
+    const maxHand = LIMITS.MAX_HAND ?? 8;
+    const exiled = (owner.hand?.length ?? 0) >= maxHand;
+    if (!exiled) {
+        owner.hand = owner.hand || [];
+        owner.hand.push(champ);
+    }
+    return { name: champ.name, exiled, uid: champ.uid };
+}
+/** Laço de Sangue: constante de kill em combate (atacante). */
+function hasLacoDeSangue(c) {
+    return !!(c && !c.silenced && (c.constantEffect === "lacoDeSangue"
+        || c.abilityName === "Laço de Sangue"));
+}
+/**
+ * Aplica Laço de Sangue: +1 Poder em aliado aleatório (inclui o matador se ainda em campo).
+ * @returns {{ targetI: number, targetName: string }|null}
+ */
+function applyLacoDeSangue(state, killerP, rng = Math.random) {
+    const field = state.players[killerP]?.field || [];
+    const allies = field.filter((c) => c);
+    if (!allies.length)
+        return null;
+    const pick = allies[Math.floor(rng() * allies.length)];
+    const targetI = field.indexOf(pick);
+    pick.currentPower = (pick.currentPower ?? 0) + 1;
+    return { targetI, targetName: pick.name, targetUid: pick.uid };
 }
 function isImitatorChamp(c) {
     return !!(c && IMITATOR_NAMES.has(c.name));
@@ -381,11 +512,30 @@ function listRitualSacrificeIndices(state, pIdx, reqPow) {
  * @param {object} state
  * @param {number} pIdx
  */
+/** Existe alvo P2 inimigo + espaço no campo adversário para Separar. */
+function hasSepararTarget(state, pIdx) {
+    const enemies = gatherEnemyTargets(state, pIdx, (c) => (c.currentPower ?? c.power) === 2);
+    if (!enemies.length)
+        return false;
+    return enemies.some(({ p }) => {
+        const pl = state.players[p];
+        return (pl?.field?.length ?? 0) < effectiveMaxField(pl);
+    });
+}
+/** Espaço para receber 1 charmed após o invocador estar no campo. */
+function hasCharmeSpace(state, pIdx, cardOnField) {
+    const p = state.players[pIdx];
+    const max = effectiveMaxField(p);
+    const len = p?.field?.length ?? 0;
+    const afterCaster = cardOnField ? len : len + 1;
+    return afterCaster < max;
+}
 function summonContextForPlayer(state, pIdx, extra = {}) {
-    const fcSelf = state.players[pIdx]?.field?.length ?? 0;
+    const p = state.players[pIdx];
+    const fcSelf = p?.field?.length ?? 0;
     const enemyFc = totalEnemyFieldCount(state, pIdx);
     return {
-        passiveBoardFill: enemyFc === 0 && fcSelf < LIMITS.MAX_FIELD,
+        passiveBoardFill: enemyFc === 0 && fcSelf < effectiveMaxField(p),
         ...extra,
     };
 }
@@ -440,6 +590,16 @@ function canOnEnterResolve(state, pIdx, card, ctx) {
         if (onEnter === "guardiao") {
             if ((p.field || []).filter((c) => c && !c.shielded).length === 0) {
                 return { ok: false, code: "NO_GUARDIAO" };
+            }
+        }
+        if (onEnter === "separar" && !hasSepararTarget(state, pIdx)) {
+            return { ok: false, code: "NO_SEPARAR_TARGET" };
+        }
+        if (onEnter === "charme") {
+            if (enemyFc === 0)
+                return { ok: false, code: "NO_ENEMY" };
+            if (!hasCharmeSpace(state, pIdx, cardOnField)) {
+                return { ok: false, code: "NO_CHARME_SPACE" };
             }
         }
         if (enemyFc === 0 && onEnterNeedsEnemy(onEnter)) {
@@ -516,6 +676,16 @@ function canOnEnterResolve(state, pIdx, card, ctx) {
             return { ok: false, code: "NO_GUARDIAO" };
         }
     }
+    if (onEnter === "separar" && !hasSepararTarget(state, pIdx)) {
+        return { ok: false, code: "NO_SEPARAR_TARGET" };
+    }
+    if (onEnter === "charme") {
+        if (enemyFc === 0)
+            return { ok: false, code: "NO_ENEMY" };
+        if (!hasCharmeSpace(state, pIdx, cardOnField)) {
+            return { ok: false, code: "NO_CHARME_SPACE" };
+        }
+    }
     return { ok: true };
 }
 /** Índice padrão ao inserir no campo (fileira simétrica: centro → esq → dir…). */
@@ -552,7 +722,7 @@ function canSummon(state, pIdx, handIdx, opts = {}) {
     if (card.category === "talent") {
         return { ok: false, code: "NOT_CHAMPION", reason: "Não é campeão." };
     }
-    if ((p.field?.length ?? 0) >= limits.MAX_FIELD) {
+    if ((p.field?.length ?? 0) >= effectiveMaxField(p, limits)) {
         return { ok: false, code: "FIELD_FULL", reason: "Campo cheio." };
     }
     const freeAction = !!opts.freeAction;
@@ -635,12 +805,19 @@ function canDraw(state, pIdx, limits = LIMITS) {
     return { ok: true, code: "OK" };
 }
 function attackIsFree(attacker) {
-    return !!(attacker && attacker.freeAttack && !isPesadoDemais(attacker));
+    return !!(attacker && attacker.freeAttack && !isPesadoDemais(attacker) && !hasPrisaoPrismatica(attacker));
 }
 function cannotHitResistente(attacker) {
     return !!(attacker && attacker.freeAttack);
 }
+/** Atacante com custo fixo ≥2 (Pesado Demais OU Prisão Prismática). */
+function isFixedCostTwo(attacker) {
+    return isPesadoDemais(attacker) || hasPrisaoPrismatica(attacker);
+}
 function getAttackActionCost(attacker, defender) {
+    // Prisão Prismática: piso fixo 2 — anula Investida/freeAttack.
+    if (hasPrisaoPrismatica(attacker))
+        return 2;
     if (attackIsFree(attacker))
         return 0;
     let cost = 1;
@@ -653,7 +830,7 @@ function getAttackActionCost(attacker, defender) {
 function canAttackerTargetDefender(attacker, defender, opts = {}) {
     if (!defender || defender.shielded || defender.pulled)
         return false;
-    if (isPesadoDemais(attacker) && isResistente(defender))
+    if (isFixedCostTwo(attacker) && isResistente(defender))
         return false;
     if (isResistente(defender) && cannotHitResistente(attacker))
         return false;
@@ -680,6 +857,8 @@ function canAttack(state, attOwner, attIdx, defOwner, defIdx, opts = {}) {
         return { ok: false, code: "INVALID_UNITS" };
     if (att.tapped || att.frozen)
         return { ok: false, code: "ATTACKER_EXHAUSTED" };
+    if (att.charme)
+        return { ok: false, code: "CHARMED" };
     const requireAttackerPowerGte = opts.requireAttackerPowerGte
         ?? !!state.players[attOwner]?.isAI;
     if (!canAttackerTargetDefender(att, def, { requireAttackerPowerGte })) {
@@ -722,7 +901,7 @@ function listLegalAttacks(state, attOwner) {
     if (!p)
         return moves;
     (p.field || []).forEach((att, attIdx) => {
-        if (att.tapped || att.frozen)
+        if (att.tapped || att.frozen || att.charme)
             return;
         const count = state.playersCount ?? state.players?.length ?? 0;
         for (let ep = 0; ep < count; ep++) {
@@ -741,6 +920,8 @@ const REACTIVE_TALENTS = Object.freeze({
     BLOCK: "bloquearAtaque",
     PROTECTION: "protecaoDivina",
     CANCEL_ULT: "cancelarUltimate",
+    EXHAUSTION: "exaustao",
+    COUNTER: "contramagica",
 });
 function findReactiveTalentHandIndex(state, pIdx, talentEffect) {
     const hand = state.players[pIdx]?.hand;
@@ -770,6 +951,22 @@ function canOfferCancelUltimate(state, defOwner, attOwner) {
     if (defOwner === attOwner)
         return { ok: false, code: "SAME_PLAYER" };
     const idx = findReactiveTalentHandIndex(state, defOwner, REACTIVE_TALENTS.CANCEL_ULT);
+    if (idx < 0)
+        return { ok: false, code: "NO_CARD" };
+    return { ok: true, code: "OK", handIdx: idx };
+}
+function canOfferExaustao(state, defOwner, attOwner) {
+    if (defOwner === attOwner)
+        return { ok: false, code: "SAME_PLAYER" };
+    const idx = findReactiveTalentHandIndex(state, defOwner, REACTIVE_TALENTS.EXHAUSTION);
+    if (idx < 0)
+        return { ok: false, code: "NO_CARD" };
+    return { ok: true, code: "OK", handIdx: idx };
+}
+function canOfferContramagica(state, defOwner, attOwner) {
+    if (defOwner === attOwner)
+        return { ok: false, code: "SAME_PLAYER" };
+    const idx = findReactiveTalentHandIndex(state, defOwner, REACTIVE_TALENTS.COUNTER);
     if (idx < 0)
         return { ok: false, code: "NO_CARD" };
     return { ok: true, code: "OK", handIdx: idx };
@@ -870,20 +1067,34 @@ function expireWallBonusOnTurnStart(state, pIdx) {
     if (!p?.wallActive)
         return;
     (p.field || []).forEach((c) => {
-        if (c.wallBuff && c.wallBuffApplied) {
+        if (c && c.wallBuff && c.wallBuffApplied) {
             c.currentPower = Math.max(0, (c.currentPower ?? 0) - 1);
             c.wallBuffApplied = false;
             c.wallBuffSnapshot = null;
         }
     });
+    syncWallActive(p);
 }
-/** Fim do turno do dono da Muralha: +1 Poder fora do turno (só aliados com wallBuff). */
+/** Fim do turno do dono da Muralha: +1 Poder fora do turno (aliados com wallBuff + muralhaNativa que regeneram). */
 function applyWallBonusOnTurnEnd(state, endingPIdx) {
     const endingP = state.players[endingPIdx];
-    if (!endingP?.wallActive)
+    if (!endingP)
+        return;
+    // Muralha nativa: regenera wallBuff para campeões com constante muralha
+    (endingP.field || []).forEach((c) => {
+        if (!c)
+            return;
+        if (hasMuralhaNativa(c) && !c.wallBuff) {
+            c.wallBuff = true;
+            c.wallBuffApplied = false;
+            c.wallBuffSnapshot = null;
+        }
+    });
+    syncWallActive(endingP);
+    if (!endingP.wallActive)
         return;
     (endingP.field || []).forEach((c) => {
-        if (c.wallBuff && !c.wallBuffApplied) {
+        if (c && c.wallBuff && !c.wallBuffApplied) {
             c.currentPower = (c.currentPower ?? 0) + 1;
             c.wallBuffApplied = true;
             c.wallBuffSnapshot = c.currentPower;
@@ -1131,6 +1342,57 @@ function returnPulledChampions(state, pIdx) {
     p.field = stillHere;
     return returned;
 }
+/** Tick Charme: devolve ao dono original após 2 manutenções do controlador. */
+function returnCharmedChampions(state, pIdx) {
+    const p = state.players[pIdx];
+    const returned = [];
+    if (!p?.field)
+        return returned;
+    const stillHere = [];
+    for (const c of p.field) {
+        if (c?.charme) {
+            c.charmeTurns = (c.charmeTurns ?? 0) - 1;
+            if (c.charmeTurns <= 0) {
+                const ownerIdx = c.charmeOriginalOwner;
+                c.charme = false;
+                c.charmeTurns = 0;
+                c.charmeOriginalOwner = -1;
+                if (ownerIdx >= 0 && state.players[ownerIdx]) {
+                    const owner = state.players[ownerIdx];
+                    const max = effectiveMaxField(owner);
+                    if ((owner.field?.length ?? 0) < max) {
+                        owner.field.push(c);
+                        returned.push({ name: c.name, ownerIdx, mode: "field" });
+                    }
+                    else {
+                        const base = c.basePower ?? c.power ?? c.currentPower ?? 0;
+                        c.currentPower = base;
+                        c.basePower = base;
+                        c.power = base;
+                        c.onEnterConsumed = false;
+                        const maxHand = LIMITS.MAX_HAND ?? 8;
+                        const exiled = (owner.hand?.length ?? 0) >= maxHand;
+                        if (!exiled) {
+                            owner.hand = owner.hand || [];
+                            owner.hand.push(c);
+                        }
+                        returned.push({
+                            name: c.name, ownerIdx,
+                            mode: exiled ? "exiled" : "hand", exiled,
+                        });
+                    }
+                }
+                else {
+                    stillHere.push(c);
+                }
+                continue;
+            }
+        }
+        stillHere.push(c);
+    }
+    p.field = stillHere;
+    return returned;
+}
 /**
  * Fase pura de manutenção no início do turno de pIdx.
  * Não compra carta — retorna flags para a view.
@@ -1157,6 +1419,8 @@ function runTurnMaintenance(state, pIdx, limits = LIMITS) {
     if (poisonVpGain > 0)
         p.vp += poisonVpGain;
     const returned = returnPulledChampions(state, pIdx);
+    const charmedReturned = returnCharmedChampions(state, pIdx);
+    const holesExpired = tickFieldHoles(state, pIdx);
     const skipDraw = !!p.skipDraw;
     if (p.skipDraw)
         p.skipDraw = false;
@@ -1165,6 +1429,8 @@ function runTurnMaintenance(state, pIdx, limits = LIMITS) {
         plan,
         poisonDestroyed,
         returned,
+        charmedReturned,
+        holesExpired: holesExpired.length,
         statusLogs: status.logs,
         passiveVpGain: plan.passiveVpGain,
         poisonVpGain,
@@ -1183,6 +1449,12 @@ function listOfferableReactives(state, defOwner, attOwner) {
     }
     if (canOfferCancelUltimate(state, defOwner, attOwner).ok) {
         out.push({ effect: REACTIVE_TALENTS.CANCEL_ULT, handIdx: findReactiveTalentHandIndex(state, defOwner, REACTIVE_TALENTS.CANCEL_ULT) });
+    }
+    if (canOfferExaustao(state, defOwner, attOwner).ok) {
+        out.push({ effect: REACTIVE_TALENTS.EXHAUSTION, handIdx: findReactiveTalentHandIndex(state, defOwner, REACTIVE_TALENTS.EXHAUSTION) });
+    }
+    if (canOfferContramagica(state, defOwner, attOwner).ok) {
+        out.push({ effect: REACTIVE_TALENTS.COUNTER, handIdx: findReactiveTalentHandIndex(state, defOwner, REACTIVE_TALENTS.COUNTER) });
     }
     return out;
 }
@@ -1273,6 +1545,8 @@ const DfRules = {
     canOfferReactiveBlock,
     canOfferReactiveProtection,
     canOfferCancelUltimate,
+    canOfferExaustao,
+    canOfferContramagica,
     canResolveOnEnter,
     canEndTurn,
     canBuyCard,
@@ -1286,8 +1560,23 @@ const DfRules = {
     discardChampionAt,
     applyTurnStartStatusTicks,
     returnPulledChampions,
+    returnCharmedChampions,
     runTurnMaintenance,
     listOfferableReactives,
     listLegalActions,
+    hasMuralhaNativa,
+    hasPrisaoPrismatica,
+    hasDesafiante,
+    isFixedCostTwo,
+    syncWallActive,
+    hasSepararTarget,
+    hasCharmeSpace,
+    recalcDesafiante,
+    fieldHolesCount,
+    effectiveMaxField,
+    tickFieldHoles,
+    bounceChampionToHand,
+    hasLacoDeSangue,
+    applyLacoDeSangue,
 };
 export { DfRules };

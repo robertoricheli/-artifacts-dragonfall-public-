@@ -65,6 +65,10 @@ function canReactive(reactiveKey, state, defOwner, attOwner, extra) {
         return rules.canOfferReactiveProtection(state, defOwner, attOwner);
     if (reactiveKey === "cancelarUltimate")
         return rules.canOfferCancelUltimate(state, defOwner, attOwner);
+    if (reactiveKey === "exaustao")
+        return rules.canOfferExaustao(state, defOwner, attOwner);
+    if (reactiveKey === "contramagica")
+        return rules.canOfferContramagica(state, defOwner, attOwner);
     return { ok: false, code: "UNKNOWN_REACTIVE" };
 }
 function planOnEnter(state, casterIdx, fieldIdx) {
@@ -108,9 +112,13 @@ function applyTalentFromHand(state, pIdx, handIdx) {
     return resolveApi()?.applyTalentFromHand(state, pIdx, handIdx)
         || { ok: false, state, events: [], error: "NO_TALENT_RESOLVE" };
 }
-function applyTalentTarget(state, pIdx, targetP, targetI) {
-    return resolveApi()?.applyTalentTarget?.(state, pIdx, targetP, targetI)
+function applyTalentTarget(state, pIdx, targetP, targetI, extra) {
+    return resolveApi()?.applyTalentTarget?.(state, pIdx, targetP, targetI, extra)
         || { ok: false, state, events: [], error: "NO_TALENT_TARGET_RESOLVE" };
+}
+function applyTalentAuto(state, pIdx) {
+    return resolveApi()?.applyTalentAuto?.(state, pIdx)
+        || { ok: false, state, events: [], error: "NO_TALENT_AUTO_RESOLVE" };
 }
 function applyTalentDiscard(state, pIdx) {
     return resolveApi()?.applyTalentDiscard?.(state, pIdx)
@@ -145,6 +153,12 @@ function bootstrapRegistry() {
     registerReactive("cancelarUltimate", {
         legal: (state, defOwner, attOwner) => rules.canOfferCancelUltimate(state, defOwner, attOwner),
     });
+    registerReactive("exaustao", {
+        legal: (state, defOwner, attOwner) => rules.canOfferExaustao(state, defOwner, attOwner),
+    });
+    registerReactive("contramagica", {
+        legal: (state, defOwner, attOwner) => rules.canOfferContramagica(state, defOwner, attOwner),
+    });
 }
 bootstrapRegistry();
 if (typeof globalThis !== "undefined" && globalThis.resolveMod?.bootstrapResolveRegistry) {
@@ -170,6 +184,7 @@ const DfEffects = {
     applyReactiveUse,
     applyTalentFromHand,
     applyTalentTarget,
+    applyTalentAuto,
     applyTalentDiscard,
 };
 export { DfEffects };

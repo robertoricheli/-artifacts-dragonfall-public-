@@ -475,7 +475,9 @@ export function listTalentPlays(state, seat) {
     if (!c || c.category !== "talent") continue;
     // Reativas não se jogam no próprio turno.
     if (c.talentEffect === "bloquearAtaque" || c.talentEffect === "protecaoDivina"
-        || c.talentEffect === "cancelarUltimate") continue;
+        || c.talentEffect === "cancelarUltimate"
+        || c.talentEffect === "exaustao"
+        || c.talentEffect === "contramagica") continue;
     const cost = talentPlayCost(c);
     if ((pl.actions ?? 0) < cost) continue;
     const score = scoreTalentStart(state, seat, { type: "TALENT_START", handIdx: i });

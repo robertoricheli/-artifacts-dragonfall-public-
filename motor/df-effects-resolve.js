@@ -95,6 +95,11 @@ function clearChampionFieldStatuses(c) {
     c.wallBuff = false;
     c.wallBuffApplied = false;
     c.wallBuffSnapshot = 0;
+    c.prisaoPrismatica = false;
+    c.desafianteAtivo = false;
+    c.charme = false;
+    c.charmeTurns = 0;
+    c.charmeOriginalOwner = -1;
     c.foreverGrowth = false;
     c.guerraBuff = false;
     c.guerraBuffTurns = 0;
@@ -207,10 +212,11 @@ function planOnEnterImpl(state, casterIdx, fieldIdx) {
     const instantAuto = new Set([
         "fumacaToxica", "raioDuplo", "pesadelo", "roubar", "desacelerar",
         "defensor", "gritoDeGuerra", "forja", "tecnicasDeCombate", "roletaRussa", "podridao",
+        "enfraquecer", "energizar", "terremoto",
     ]);
     const targetEnemy = new Set([
         "bolaDeFogo", "assassinar", "transformarBichinho", "rajadaCongelante",
-        "mordidaVenenosa", "incendiar",
+        "mordidaVenenosa", "incendiar", "separar", "prisaoPrismatica", "charme",
     ]);
     const targetAlly = new Set(["fortalecer", "devorar", "imitar", "ursificacao", "corromper"]);
     /* pesadelo/roubar/desacelerar migraram pra instantAuto — set vazio
@@ -1029,6 +1035,200 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             });
             break;
         }
+        case "prisaoPrismatica": {
+            const tp = resolution.targetP;
+            const ti = resolution.targetI;
+            const target = state.players[tp]?.field?.[ti];
+            if (!target || tp === casterIdx)
+                break;
+            const already = !!target.prisaoPrismatica;
+            if (!already)
+                target.prisaoPrismatica = true;
+            markOnEnterUsed(state, casterIdx, key);
+            events.push({
+                type: "PRISAO_PRISMATICA",
+                casterIdx, fieldIdx,
+                targetP: tp, targetI: ti,
+                targetName: target.name,
+                already,
+                visual: "prisao_prismatica",
+            });
+            break;
+        }
+        case "separar": {
+            const tp = resolution.targetP;
+            const ti = resolution.targetI;
+            const field = state.players[tp]?.field;
+            const src = field?.[ti];
+            const maxField = R()?.effectiveMaxField?.(state.players[tp])
+                ?? R()?.LIMITS?.MAX_FIELD ?? 6;
+            if (!src || tp === casterIdx)
+                break;
+            if ((src.currentPower ?? src.power) !== 2)
+                break;
+            if ((field?.length ?? 0) >= maxField)
+                break;
+            function splitClone(source) {
+                const c = JSON.parse(JSON.stringify(source));
+                c.uid = `sep-${Date.now()}-${field.length}-${Math.floor(Math.random() * 1e9)}`;
+                c.currentPower = 1;
+                c.basePower = 1;
+                c.power = 1;
+                c.separado = true;
+                c.tapped = false;
+                c.onEnterConsumed = true;
+                return c;
+            }
+            const a = splitClone(src);
+            const b = splitClone(src);
+            field.splice(ti, 1, a, b);
+            markOnEnterUsed(state, casterIdx, key);
+            events.push({
+                type: "SEPARAR",
+                casterIdx, fieldIdx,
+                targetP: tp, targetI: ti,
+                targetName: src.name,
+                cloneA: a.uid, cloneB: b.uid,
+                visual: "separar",
+            });
+            if (R()?.recalcDesafiante)
+                R().recalcDesafiante(state);
+            break;
+        }
+        case "enfraquecer": {
+            let opp = null;
+            for (let i = 0; i < (state.playersCount ?? state.players?.length ?? 0); i++) {
+                if (i !== casterIdx) {
+                    opp = i;
+                    break;
+                }
+            }
+            if (opp == null)
+                break;
+            const pl = state.players[opp];
+            const before = pl.vp ?? 0;
+            pl.vp = Math.max(0, before - 1);
+            const lost = before - pl.vp;
+            markOnEnterUsed(state, casterIdx, key);
+            events.push({
+                type: "ENFRAQUECER",
+                casterIdx, fieldIdx,
+                targetIdx: opp,
+                lost,
+                vpAfter: pl.vp,
+                visual: "enfraquecer",
+            });
+            break;
+        }
+        case "energizar": {
+            const pl = state.players[casterIdx];
+            if (!pl)
+                break;
+            let mode = "bonus";
+            if ((pl.ultimateUses ?? 0) > 0) {
+                pl.ultimateUses = (pl.ultimateUses ?? 0) - 1;
+                mode = "restore";
+            }
+            else {
+                pl.bonusUltimateUses = (pl.bonusUltimateUses ?? 0) + 1;
+                mode = "bonus";
+            }
+            markOnEnterUsed(state, casterIdx, key);
+            events.push({
+                type: "ENERGIZAR",
+                casterIdx, fieldIdx,
+                mode,
+                ultimateUses: pl.ultimateUses ?? 0,
+                bonusUltimateUses: pl.bonusUltimateUses ?? 0,
+                visual: "energizar",
+            });
+            break;
+        }
+        case "terremoto": {
+            let opp = null;
+            for (let i = 0; i < (state.playersCount ?? state.players?.length ?? 0); i++) {
+                if (i !== casterIdx) {
+                    opp = i;
+                    break;
+                }
+            }
+            if (opp == null)
+                break;
+            const victim = state.players[opp];
+            const field = victim.field || [];
+            // Sorteia 2 slots distintos 0..5
+            const slots = [0, 1, 2, 3, 4, 5];
+            for (let i = slots.length - 1; i > 0; i--) {
+                const j = Math.floor(rng() * (i + 1));
+                [slots[i], slots[j]] = [slots[j], slots[i]];
+            }
+            const picked = slots.slice(0, 2).sort((a, b) => b - a); // alto→baixo p/ bounce
+            const bounced = [];
+            for (const slot of picked) {
+                if (slot < field.length) {
+                    const b = R()?.bounceChampionToHand?.(state, opp, slot);
+                    if (b)
+                        bounced.push({ ...b, slot });
+                }
+            }
+            victim.fieldHoles = picked
+                .slice()
+                .sort((a, b) => a - b)
+                .map((slot) => ({ slot, turns: 4 }));
+            markOnEnterUsed(state, casterIdx, key);
+            if (R()?.recalcDesafiante)
+                R().recalcDesafiante(state);
+            events.push({
+                type: "TERREMOTO",
+                casterIdx, fieldIdx,
+                targetIdx: opp,
+                slots: victim.fieldHoles.map((h) => h.slot),
+                bounced,
+                visual: "terremoto",
+            });
+            break;
+        }
+        case "charme": {
+            const tp = resolution.targetP;
+            const ti = resolution.targetI;
+            const enemyField = state.players[tp]?.field;
+            const target = enemyField?.[ti];
+            const myField = state.players[casterIdx]?.field;
+            if (!target || tp === casterIdx || !myField)
+                break;
+            if (target.charme || target.pulled)
+                break;
+            const max = R()?.effectiveMaxField?.(state.players[casterIdx])
+                ?? R()?.LIMITS?.MAX_FIELD ?? 6;
+            if (myField.length >= max) {
+                markOnEnterUsed(state, casterIdx, key);
+                events.push({
+                    type: "CHARME",
+                    casterIdx, fieldIdx,
+                    fizzled: true, reason: "no_space",
+                    visual: "charme",
+                });
+                break;
+            }
+            enemyField.splice(ti, 1);
+            target.charme = true;
+            target.charmeTurns = 2;
+            target.charmeOriginalOwner = tp;
+            target.tapped = false;
+            myField.push(target);
+            markOnEnterUsed(state, casterIdx, key);
+            if (R()?.recalcDesafiante)
+                R().recalcDesafiante(state);
+            events.push({
+                type: "CHARME",
+                casterIdx, fieldIdx,
+                targetP: tp, targetI: ti,
+                targetName: target.name,
+                targetUid: target.uid,
+                visual: "charme",
+            });
+            break;
+        }
         default:
             events.push({ type: "ON_ENTER_DELEGATE", onEnter: key, casterIdx, fieldIdx });
     }
@@ -1048,7 +1248,11 @@ function applyReactiveUse(state, defOwner, talentEffect, use) {
     if (!use)
         return { ok: true, state, events, blocked: false };
     const rules = R();
-    const leg = DfEffectsRef?.canReactive(talentEffect, state, defOwner, null);
+    const leg = getEffectsApi()?.canReactive?.(talentEffect, state, defOwner, null)
+        || (() => {
+            const handIdx = R()?.findReactiveTalentHandIndex?.(state, defOwner, talentEffect) ?? -1;
+            return handIdx >= 0 ? { ok: true, handIdx } : { ok: false, code: "NO_CARD" };
+        })();
     if (!leg?.ok)
         return { ok: false, state, events, error: leg?.code || "NO_REACTIVE" };
     const handIdx = leg.handIdx;
@@ -1075,6 +1279,8 @@ function applyReactiveUse(state, defOwner, talentEffect, use) {
         blocked: talentEffect === "bloquearAtaque",
         protected: talentEffect === "protecaoDivina",
         cancelled: talentEffect === "cancelarUltimate",
+        exhausted: talentEffect === "exaustao",
+        countered: talentEffect === "contramagica",
     });
     return {
         ok: true,
@@ -1083,6 +1289,8 @@ function applyReactiveUse(state, defOwner, talentEffect, use) {
         blocked: talentEffect === "bloquearAtaque",
         protected: talentEffect === "protecaoDivina",
         cancelled: talentEffect === "cancelarUltimate",
+        exhausted: talentEffect === "exaustao",
+        countered: talentEffect === "contramagica",
     };
 }
 function applyTalentFromHand(state, pIdx, handIdx) {
@@ -1158,7 +1366,7 @@ function applyTalentDiscard(state, pIdx) {
  * Resolve talento ativo com alvo (autoridade servidor / motor).
  * Talentos sem implementação completa retornam NOT_IMPLEMENTED (fallback snapshot).
  */
-function applyTalentTarget(state, pIdx, targetP, targetI) {
+function applyTalentTarget(state, pIdx, targetP, targetI, extra) {
     const events = [];
     const at = state.activeTalent;
     if (!at?.card || at.ownerP !== pIdx) {
@@ -1167,6 +1375,7 @@ function applyTalentTarget(state, pIdx, targetP, targetI) {
     const effect = at.card.talentEffect;
     const tp = targetP | 0;
     const ti = targetI | 0;
+    const resolution = (extra && typeof extra === "object") ? extra : {};
     const target = state.players[tp]?.field?.[ti];
     if (!target && effect !== "zeroAbsoluto") {
         return { ok: false, state, events, error: "NO_TARGET" };
@@ -1253,6 +1462,148 @@ function applyTalentTarget(state, pIdx, targetP, targetI) {
             clearActive();
             break;
         }
+        case "investidaTalento": {
+            if (tp !== pIdx)
+                return { ok: false, state, events, error: "ALLY_ONLY" };
+            if (R()?.isPesadoDemais?.(target)) {
+                return { ok: false, state, events, error: "BANJO_NO_INVESTIDA" };
+            }
+            target.freeAttack = true;
+            events.push({
+                type: "TALENT_INVESTIDA", targetP: tp, targetI: ti,
+                targetName: target.name, visual: "investida",
+            });
+            clearActive();
+            break;
+        }
+        case "prisaoPrismaticaTalento": {
+            if (tp === pIdx)
+                return { ok: false, state, events, error: "ENEMY_ONLY" };
+            const already = !!target.prisaoPrismatica;
+            if (!already)
+                target.prisaoPrismatica = true;
+            events.push({
+                type: "TALENT_PRISAO_PRISMATICA", targetP: tp, targetI: ti,
+                targetName: target.name, already, visual: "prisao_prismatica",
+            });
+            clearActive();
+            break;
+        }
+        case "tornadoDeFogo": {
+            if (tp === pIdx)
+                return { ok: false, state, events, error: "ENEMY_ONLY" };
+            if (target.barrier || target.barrierPermanent) {
+                events.push({
+                    type: "TALENT_TORNADO_DE_FOGO", targetP: tp, targetI: ti,
+                    targetName: target.name, immune: true, applied: false, visual: "em_chamas",
+                });
+            }
+            else {
+                target.burning = true;
+                target.burningTurns = 4;
+                target.burningByP = pIdx;
+                events.push({
+                    type: "TALENT_TORNADO_DE_FOGO", targetP: tp, targetI: ti,
+                    targetName: target.name, turns: 4, applied: true, visual: "em_chamas",
+                });
+            }
+            clearActive();
+            break;
+        }
+        case "trocaDeLugar": {
+            // target = aliado P1; resolution.enemyP/enemyI = adversário P2
+            if (tp !== pIdx)
+                return { ok: false, state, events, error: "ALLY_ONLY" };
+            const allyPow = target.currentPower ?? target.power ?? 0;
+            if (allyPow !== 1)
+                return { ok: false, state, events, error: "ALLY_MUST_BE_P1" };
+            const ep = resolution.enemyP | 0;
+            const ei = resolution.enemyI | 0;
+            const enemy = state.players[ep]?.field?.[ei];
+            if (!enemy || ep === pIdx)
+                return { ok: false, state, events, error: "NO_ENEMY" };
+            const enemyPow = enemy.currentPower ?? enemy.power ?? 0;
+            if (enemyPow !== 2)
+                return { ok: false, state, events, error: "ENEMY_MUST_BE_P2" };
+            for (const ch of [target, enemy]) {
+                ch.freeAttack = false;
+                if (!ch.shieldedPermanent) {
+                    ch.shielded = false;
+                    ch.shieldedTurns = 0;
+                }
+                ch.guerraBuff = false;
+                ch.guerraBuffTurns = 0;
+            }
+            state.players[pIdx].field[ti] = enemy;
+            state.players[ep].field[ei] = target;
+            events.push({
+                type: "TALENT_TROCA_DE_LUGAR",
+                allyP: pIdx, allyI: ti,
+                enemyP: ep, enemyI: ei,
+                visual: "troca_de_lugar",
+            });
+            clearActive();
+            break;
+        }
+        case "corromperTalento": {
+            if (tp !== pIdx)
+                return { ok: false, state, events, error: "ALLY_ONLY" };
+            const abilityName = String(target.mimicAbilityName || target.abilityName || "");
+            const nativeNoHonor = target.onDestroy === "noHonor"
+                || target.mimicOnDestroy === "noHonor"
+                || abilityName.toLowerCase().normalize("NFD")
+                    .replace(/[\u0300-\u036f]/g, "").includes("sem honra");
+            const alreadyNoHonor = nativeNoHonor || !!target.corruptedNoHonor;
+            if (!alreadyNoHonor)
+                target.corruptedNoHonor = true;
+            events.push({
+                type: "TALENT_CORROMPER",
+                targetP: tp, targetI: ti,
+                targetName: target.name, alreadyNoHonor, visual: "corrupt",
+            });
+            clearActive();
+            break;
+        }
+        case "transformarBichinhoTalento": {
+            if (tp === pIdx)
+                return { ok: false, state, events, error: "ENEMY_ONLY" };
+            const pow = target.currentPower ?? target.power ?? 0;
+            if (pow < 2)
+                return { ok: false, state, events, error: "NEED_POWER_GE_2" };
+            if (target.barrier || target.barrierPermanent) {
+                events.push({
+                    type: "TALENT_TRANSFORMAR_BICHINHO",
+                    targetP: tp, targetI: ti, targetName: target.name,
+                    immune: true, visual: "transformar_bichinho",
+                });
+                clearActive();
+                break;
+            }
+            const origPower = pow;
+            const origName = target.name;
+            const newPower = Math.floor(origPower / 2);
+            const tokenDef = findCardDef("BICHINHO FOFINHO");
+            if (!tokenDef)
+                return { ok: false, state, events, error: "NO_TOKEN_DEF" };
+            if (target.vulnerable) {
+                destroyAtField(state, tp, ti, events, "transformarBichinhoTalento");
+                events.push({
+                    type: "TALENT_TRANSFORMAR_BICHINHO",
+                    targetP: tp, targetI: ti, origName, origPower,
+                    vulnDestroy: true, visual: "transformar_bichinho",
+                });
+            }
+            else {
+                applyTokenTransform(target, tokenDef, newPower);
+                events.push({
+                    type: "TALENT_TRANSFORMAR_BICHINHO",
+                    targetP: tp, targetI: ti, success: true,
+                    origName, origPower, newPower, visual: "transformar_bichinho",
+                });
+            }
+            clearActive();
+            break;
+        }
         default:
             return { ok: false, state, events, error: "NOT_IMPLEMENTED" };
     }
@@ -1260,6 +1611,428 @@ function applyTalentTarget(state, pIdx, targetP, targetI) {
     if (winner != null) {
         state.winner = winner;
         events.push({ type: "GAME_OVER", winner });
+    }
+    return { ok: true, state, events };
+}
+/** Talentos auto (sem alvo) — Arsenal, Maldição, Grito, Técnicas. */
+function applyTalentAuto(state, pIdx) {
+    const events = [];
+    const at = state.activeTalent;
+    if (!at?.card || at.ownerP !== pIdx) {
+        return { ok: false, state, events, error: "NO_ACTIVE_TALENT" };
+    }
+    const effect = at.card.talentEffect;
+    const pl = state.players[pIdx];
+    const maxHand = R()?.LIMITS?.MAX_HAND ?? 8;
+    const clearActive = () => {
+        const card = at.card;
+        state.activeTalent = null;
+        const disc = pl.discard || [];
+        disc.push(card);
+        pl.discard = disc;
+        events.push({
+            type: "TALENT_RESOLVED",
+            playerId: pIdx,
+            talentEffect: effect,
+            cardName: card.name,
+        });
+    };
+    switch (effect) {
+        case "arsenalDeGuerra": {
+            const drawn = [];
+            for (let n = 0; n < 2; n++) {
+                if ((pl.hand?.length ?? 0) >= maxHand) {
+                    events.push({
+                        type: "TALENT_ARSENAL_DE_GUERRA",
+                        playerId: pIdx, drawn: drawn.length, fizzled: true,
+                        reason: "hand_full", visual: "card_draw",
+                    });
+                    break;
+                }
+                const deck = pl.deck || [];
+                if (!deck.length) {
+                    events.push({
+                        type: "TALENT_ARSENAL_DE_GUERRA",
+                        playerId: pIdx, drawn: drawn.length, fizzled: true,
+                        reason: "deck_empty", visual: "card_draw",
+                    });
+                    break;
+                }
+                const card = deck.pop();
+                if (pl.maldicaoForgetNext && card?.category === "champion") {
+                    card.silencedInHand = true;
+                }
+                pl.hand = pl.hand || [];
+                pl.hand.push(card);
+                drawn.push(card?.name || "?");
+            }
+            events.push({
+                type: "TALENT_ARSENAL_DE_GUERRA",
+                playerId: pIdx, drawn: drawn.length, names: drawn,
+                visual: "card_draw",
+            });
+            clearActive();
+            break;
+        }
+        case "maldicaoSeteMaresTalento": {
+            const count = state.playersCount ?? state.players?.length ?? 0;
+            for (let i = 0; i < count; i++) {
+                if (i === pIdx)
+                    continue;
+                const opp = state.players[i];
+                if (!opp)
+                    continue;
+                opp.maldicaoForgetNext = true;
+                (opp.hand || []).forEach((card) => {
+                    if (card?.category === "champion")
+                        card.silencedInHand = true;
+                });
+            }
+            events.push({
+                type: "TALENT_MALDICAO_SETE_MARES",
+                playerId: pIdx, visual: "maldicao_sete_mares",
+            });
+            clearActive();
+            break;
+        }
+        case "gritoDeGuerraTalento": {
+            const applied = [];
+            (pl.field || []).forEach((ally, i) => {
+                if (!ally)
+                    return;
+                R()?.grantFuryStacks?.(ally, 1);
+                applied.push({
+                    p: pIdx, i, name: ally.name,
+                    furyStacks: R()?.getFuryStacks?.(ally) || 1,
+                });
+            });
+            events.push({
+                type: "TALENT_GRITO_DE_GUERRA",
+                playerId: pIdx, applied, visual: "fury",
+            });
+            clearActive();
+            break;
+        }
+        case "tecnicasDeCombateTalento": {
+            const applied = [];
+            (pl.field || []).forEach((ally, i) => {
+                if (!ally)
+                    return;
+                ally.tecnicasSobrepujar = true;
+                ally.tecnicasSobrepujarTurns = 1;
+                applied.push({ p: pIdx, i, name: ally.name, uid: ally.uid });
+            });
+            events.push({
+                type: "TALENT_TECNICAS_DE_COMBATE",
+                playerId: pIdx, applied, visual: "tecnicas_combate",
+            });
+            clearActive();
+            break;
+        }
+        case "podridaoTalento": {
+            let enemyIdx = -1;
+            const pCount = state.playersCount ?? state.players?.length ?? 0;
+            for (let ep = 0; ep < pCount; ep++) {
+                if (ep !== pIdx) {
+                    enemyIdx = ep;
+                    break;
+                }
+            }
+            if (enemyIdx < 0) {
+                clearActive();
+                break;
+            }
+            const deck = state.players[enemyIdx]?.deck || [];
+            const MAX_PODRIDAO = 12;
+            const currentPodre = deck.filter((c) => c?.podridao).length;
+            const slots = Math.max(0, MAX_PODRIDAO - currentPodre);
+            const eligibleIdx = [];
+            deck.forEach((c, di) => {
+                if (c && !c.podridao)
+                    eligibleIdx.push(di);
+            });
+            if (!slots || !eligibleIdx.length) {
+                events.push({
+                    type: "TALENT_PODRIDAO",
+                    playerId: pIdx, enemyIdx, count: 0, fizzled: true, visual: "podridao",
+                });
+                clearActive();
+                break;
+            }
+            const pickCount = Math.min(4, slots, eligibleIdx.length);
+            for (let k = eligibleIdx.length - 1; k > 0; k--) {
+                const j = Math.floor(Math.random() * (k + 1));
+                [eligibleIdx[k], eligibleIdx[j]] = [eligibleIdx[j], eligibleIdx[k]];
+            }
+            const contaminated = [];
+            for (const di of eligibleIdx.slice(0, pickCount)) {
+                const card = deck[di];
+                if (!card || card.podridao)
+                    continue;
+                card.podridao = true;
+                contaminated.push(card.name);
+            }
+            events.push({
+                type: "TALENT_PODRIDAO",
+                playerId: pIdx, enemyIdx,
+                count: contaminated.length, names: contaminated, visual: "podridao",
+            });
+            clearActive();
+            break;
+        }
+        case "desacelerarTalento": {
+            let t = null;
+            for (let p = 0; p < (state.playersCount ?? state.players.length); p++) {
+                if (p !== pIdx) {
+                    t = p;
+                    break;
+                }
+            }
+            if (t == null || state.players[t]?.skipNextAction) {
+                events.push({
+                    type: "TALENT_DESACELERAR",
+                    playerId: pIdx, fizzled: true, visual: "desacelerar",
+                });
+            }
+            else {
+                state.players[t].skipNextAction = true;
+                events.push({
+                    type: "TALENT_DESACELERAR",
+                    playerId: pIdx, targetIdx: t, visual: "desacelerar",
+                });
+            }
+            clearActive();
+            break;
+        }
+        case "chuvaDeCometas": {
+            const hits = [];
+            for (let ep = 0; ep < (state.playersCount ?? state.players.length); ep++) {
+                const fld = state.players[ep]?.field || [];
+                for (let i = fld.length - 1; i >= 0; i--) {
+                    const c = fld[i];
+                    if (!c)
+                        continue;
+                    if (c.barrier) {
+                        c.barrier = false;
+                        c.barrierTurns = 0;
+                        hits.push({ p: ep, i, name: c.name, barrier: true });
+                        continue;
+                    }
+                    reduceChampionPower(c, 1);
+                    const powerAfter = c.currentPower ?? 0;
+                    hits.push({ p: ep, i, name: c.name, powerAfter });
+                    if (powerAfter <= 0) {
+                        destroyAtField(state, ep, i, events, "chuvaDeCometas");
+                    }
+                }
+            }
+            events.push({
+                type: "TALENT_CHUVA_DE_COMETAS",
+                playerId: pIdx, hits, visual: "comet_starfall",
+            });
+            clearActive();
+            break;
+        }
+        case "ressuscitarTalento": {
+            const maxField = R()?.LIMITS?.MAX_FIELD ?? 6;
+            if ((pl.field?.length ?? 0) >= maxField) {
+                events.push({
+                    type: "TALENT_RESSUSCITAR",
+                    playerId: pIdx, fizzled: true, reason: "field_full", visual: "resurrect",
+                });
+                clearActive();
+                break;
+            }
+            const disc = pl.discard || [];
+            let pick = null;
+            const last = pl.lastDestroyedSummon;
+            const tryRef = (ref) => {
+                if (!ref)
+                    return null;
+                if (ref.category && ref.category !== "champion" && ref.category !== "hidden")
+                    return null;
+                let baseDef = findCardDef(ref.name) || D()?.dragonTokenDef?.(String(ref.name));
+                if (!baseDef || baseDef.category === "talent" || baseDef.category === "reaction")
+                    return null;
+                if ((baseDef.power ?? 0) !== 2)
+                    return null;
+                const dIdx = disc.indexOf(ref);
+                if (dIdx < 0)
+                    return null;
+                return { ref, baseDef, dIdx };
+            };
+            if (last?.discardRef)
+                pick = tryRef(last.discardRef);
+            if (!pick) {
+                for (let i = disc.length - 1; i >= 0; i--) {
+                    pick = tryRef(disc[i]);
+                    if (pick)
+                        break;
+                }
+            }
+            if (!pick) {
+                events.push({
+                    type: "TALENT_RESSUSCITAR",
+                    playerId: pIdx, fizzled: true, reason: "no_p2", visual: "resurrect",
+                });
+                clearActive();
+                break;
+            }
+            disc.splice(pick.dIdx, 1);
+            pl.discard = disc;
+            if (pl.destroyedChampions) {
+                const hIdx = pl.destroyedChampions.indexOf(pick.ref);
+                if (hIdx >= 0)
+                    pl.destroyedChampions.splice(hIdx, 1);
+            }
+            const isConstant = pick.baseDef.abilityType === "constant" || !!pick.baseDef.constantEffect;
+            const revived = {
+                ...pick.baseDef,
+                uid: `u-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+                currentPower: pick.baseDef.power,
+                basePower: pick.baseDef.power,
+                tapped: false,
+                isToken: false,
+                frozen: false, frozenTurns: 0, freeAttack: false,
+                shielded: false, shieldedTurns: 0, shieldedPermanent: false,
+                barrier: false, barrierTurns: 0, barrierPermanent: false,
+                poisoned: false, poisonTurns: 0, poisonedByP: -1,
+                burning: false, burningTurns: 0,
+                silenced: !isConstant,
+                onEnter: isConstant ? (pick.baseDef.onEnter ?? null) : null,
+            };
+            pl.field = pl.field || [];
+            pl.field.push(revived);
+            pl.lastDestroyedSummon = null;
+            events.push({
+                type: "TALENT_RESSUSCITAR",
+                playerId: pIdx,
+                fieldIdx: pl.field.length - 1,
+                cardName: revived.name,
+                silenced: !!revived.silenced,
+                visual: "resurrect",
+            });
+            clearActive();
+            break;
+        }
+        case "enfraquecerTalento": {
+            let opp = null;
+            for (let i = 0; i < (state.playersCount ?? state.players?.length ?? 0); i++) {
+                if (i !== pIdx) {
+                    opp = i;
+                    break;
+                }
+            }
+            if (opp == null) {
+                clearActive();
+                break;
+            }
+            const plOpp = state.players[opp];
+            const before = plOpp.vp ?? 0;
+            plOpp.vp = Math.max(0, before - 1);
+            const lost = before - plOpp.vp;
+            events.push({
+                type: "TALENT_ENFRAQUECER",
+                playerId: pIdx,
+                targetIdx: opp,
+                lost,
+                vpAfter: plOpp.vp,
+                visual: "enfraquecer",
+            });
+            clearActive();
+            break;
+        }
+        case "terremotoTalento": {
+            let opp = null;
+            for (let i = 0; i < (state.playersCount ?? state.players?.length ?? 0); i++) {
+                if (i !== pIdx) {
+                    opp = i;
+                    break;
+                }
+            }
+            if (opp == null) {
+                clearActive();
+                break;
+            }
+            const victim = state.players[opp];
+            const field = victim.field || [];
+            const slots = [0, 1, 2, 3, 4, 5];
+            for (let i = slots.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [slots[i], slots[j]] = [slots[j], slots[i]];
+            }
+            const picked = slots.slice(0, 2).sort((a, b) => b - a);
+            const bounced = [];
+            for (const slot of picked) {
+                if (slot < field.length) {
+                    const b = R()?.bounceChampionToHand?.(state, opp, slot);
+                    if (b)
+                        bounced.push({ ...b, slot });
+                }
+            }
+            victim.fieldHoles = picked
+                .slice()
+                .sort((a, b) => a - b)
+                .map((slot) => ({ slot, turns: 4 }));
+            if (R()?.recalcDesafiante)
+                R().recalcDesafiante(state);
+            events.push({
+                type: "TALENT_TERREMOTO",
+                playerId: pIdx,
+                targetIdx: opp,
+                slots: victim.fieldHoles.map((h) => h.slot),
+                bounced,
+                visual: "terremoto",
+            });
+            clearActive();
+            break;
+        }
+        case "invocarDragaoTalento": {
+            const maxField = R()?.LIMITS?.MAX_FIELD ?? 8;
+            const field = pl.field || [];
+            if (field.length >= maxField) {
+                events.push({
+                    type: "TALENT_INVOCAR_DRAGAO",
+                    playerId: pIdx,
+                    fizzled: true,
+                    reason: "field_full",
+                    visual: "dragon_token_summon",
+                });
+                clearActive();
+                break;
+            }
+            const data = D();
+            const def = data?.babyDragonDef || { name: "FILHOTE DE DRAGÃO", power: 1, category: "champion" };
+            const tok = {
+                ...def,
+                uid: `tok-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+                currentPower: def.power ?? 1,
+                basePower: def.power ?? 1,
+                tapped: false,
+                isToken: true,
+                frozen: false, frozenTurns: 0, freeAttack: false,
+                shielded: false, shieldedTurns: 0, shieldedPermanent: false,
+                barrier: false, barrierTurns: 0, barrierPermanent: false,
+                poisoned: false, poisonTurns: 0, poisonedByP: -1,
+                burning: false, burningTurns: 0,
+                silenced: false,
+                onEnter: null,
+            };
+            field.push(tok);
+            pl.field = field;
+            events.push({
+                type: "TALENT_INVOCAR_DRAGAO",
+                playerId: pIdx,
+                fieldIdx: field.length - 1,
+                cardName: tok.name,
+                uid: tok.uid,
+                visual: "dragon_token_summon",
+            });
+            clearActive();
+            break;
+        }
+        default:
+            return { ok: false, state, events, error: "NOT_AUTO_TALENT" };
     }
     return { ok: true, state, events };
 }
@@ -1271,6 +2044,8 @@ const ON_ENTER_RESOLVE_KEYS = [
     "rajadaCongelante", "corromper", "mordidaVenenosa", "incendiar", "gritoDeGuerra",
     "invokeDragon", "invokeCubicDragon", "forja",
     "tecnicasDeCombate", "roletaRussa", "podridao",
+    "separar", "prisaoPrismatica",
+    "enfraquecer", "energizar", "terremoto", "charme",
 ];
 /** Registra plan + resolve por string no DfEffects (registry unificado). */
 function bootstrapResolveRegistry(E) {
@@ -1284,7 +2059,7 @@ function bootstrapResolveRegistry(E) {
             resolve: (state, casterIdx, fieldIdx, resolution) => applyOnEnterImpl(state, casterIdx, fieldIdx, resolution),
         });
     });
-    ["bloquearAtaque", "protecaoDivina", "cancelarUltimate"].forEach((key) => {
+    ["bloquearAtaque", "protecaoDivina", "cancelarUltimate", "exaustao", "contramagica"].forEach((key) => {
         const prev = E.getReactive(key) || {};
         E.registerReactive(key, {
             ...prev,
@@ -1299,6 +2074,7 @@ const DfEffectsResolve = {
     applyReactiveUse,
     applyTalentFromHand,
     applyTalentTarget,
+    applyTalentAuto,
     applyTalentDiscard,
     swapFieldChamps,
     inferConstantOnDestroy,

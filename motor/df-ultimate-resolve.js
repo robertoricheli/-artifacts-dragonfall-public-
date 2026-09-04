@@ -29,6 +29,9 @@ export function getMaxUltimateUses(heroId) {
         return 3;
     return 4;
 }
+export function getEffectiveMaxUltimateUses(pl, heroId) {
+    return getMaxUltimateUses(heroId) + (pl?.bonusUltimateUses ?? 0);
+}
 function clone(x) {
     return JSON.parse(JSON.stringify(x));
 }
@@ -40,7 +43,8 @@ function allyCanGainPower(c) {
 }
 function cannotReceiveInvestida(c) {
     const R = rules();
-    return c && (c.name === "BANJO" || (R.isPesadoDemais?.(c) ?? false));
+    const prisao = !!c?.prisaoPrismatica && !c?.silenced;
+    return c && (c.name === "BANJO" || (R.isPesadoDemais?.(c) ?? false) || prisao);
 }
 function championBanishable(c) {
     const R = rules();
@@ -373,6 +377,11 @@ function scareReturn(state, pIdx, targetP, targetI, events) {
     champ.foreverGrowth = false;
     champ.guerraBuff = false;
     champ.guerraBuffTurns = 0;
+    champ.charme = false;
+    champ.charmeTurns = 0;
+    champ.charmeOriginalOwner = -1;
+    champ.prisaoPrismatica = false;
+    champ.desafianteAtivo = false;
     champ.onEnterConsumed = false;
     // Manual §9: mão cheia (8) → a carta não volta e sai do jogo.
     const maxHand = rules().LIMITS?.MAX_HAND ?? 8;
@@ -400,7 +409,7 @@ export function validateUltimatePlay(state, action) {
         return { ok: false, code: "WRONG_ULTIMATE_TYPE" };
     if (pl.usedUltimateThisTurn)
         return { ok: false, code: "ULTIMATE_USED" };
-    if ((pl.ultimateUses ?? 0) >= getMaxUltimateUses(heroId))
+    if ((pl.ultimateUses ?? 0) >= getEffectiveMaxUltimateUses(pl, heroId))
         return { ok: false, code: "ULTIMATE_EXHAUSTED" };
     const R = rules();
     const tp = action.targetP;
@@ -788,6 +797,7 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
 }
 export const DfUltimateResolve = Object.freeze({
     getMaxUltimateUses,
+    getEffectiveMaxUltimateUses,
     validateUltimatePlay,
     applyUltimatePlay,
 });

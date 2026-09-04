@@ -23,6 +23,8 @@ export const REACTIVE_QUERY_TO_ANSWER = Object.freeze({
   REACTIVE_BLOCK_QUERY: "REACTIVE_BLOCK_ANSWER",
   REACTIVE_PROTECTION_QUERY: "REACTIVE_PROTECTION_ANSWER",
   REACTIVE_CANCEL_QUERY: "REACTIVE_CANCEL_ANSWER",
+  REACTIVE_EXHAUSTION_QUERY: "REACTIVE_EXHAUSTION_ANSWER",
+  REACTIVE_COUNTER_QUERY: "REACTIVE_COUNTER_ANSWER",
 });
 
 /** Efeito de talento exigido na mão para cada pergunta. */
@@ -30,7 +32,24 @@ const REQUIRED_TALENT = Object.freeze({
   REACTIVE_BLOCK_QUERY: "bloquearAtaque",
   REACTIVE_PROTECTION_QUERY: "protecaoDivina",
   REACTIVE_CANCEL_QUERY: "cancelarUltimate",
+  REACTIVE_EXHAUSTION_QUERY: "exaustao",
+  REACTIVE_COUNTER_QUERY: "contramagica",
 });
+
+const AI_EXAUSTAO_HIGH_VALUE = new Set([
+  "assassinar", "roubar", "charme", "terremoto", "enfraquecer",
+  "bolaDeFogo", "necromancia", "transformarBichinho", "roletaRussa",
+  "pesadelo", "desacelerar", "devorar", "trocaInjusta", "imitar",
+  "corromper", "raioDuplo", "fumacaToxica", "separar", "energizar",
+  "maldicaoSeteMares", "prisaoPrismatica", "invokeDragon", "invokeCubicDragon",
+]);
+const AI_CONTRAMAGICA_HIGH_VALUE = new Set([
+  "explosao", "medoTalento", "zeroAbsoluto", "podridaoTalento",
+  "chuvaDeCometas", "bolaDeFogoTalento", "doppelganger", "missemagicos",
+  "ressuscitarTalento", "tornadoDeFogo", "prisaoPrismaticaTalento",
+  "maldicaoSeteMaresTalento", "trocaDeLugar", "arsenalDeGuerra",
+  "tecnicasDeCombateTalento", "gritoDeGuerraTalento", "transformarBichinhoTalento",
+]);
 
 function handHasTalent(state, seat, effect) {
   const hand = state?.players?.[seat]?.hand;
@@ -123,6 +142,12 @@ export function buildAiReactiveAnswer(room, action, askerSeat, opts = {}) {
       // A IA offline valoriza muito Cancelar Ultimate (peso 14 no score):
       // tendo a carta, cancela.
       use = true;
+    } else if (type === "REACTIVE_EXHAUSTION_QUERY") {
+      const onEnter = action?.onEnter || action?.ability || null;
+      use = !!(onEnter && AI_EXAUSTAO_HIGH_VALUE.has(onEnter));
+    } else if (type === "REACTIVE_COUNTER_QUERY") {
+      const te = action?.talentEffect || null;
+      use = !!(te && AI_CONTRAMAGICA_HIGH_VALUE.has(te));
     }
   }
 
@@ -151,6 +176,17 @@ export function buildAiReactiveAnswer(room, action, askerSeat, opts = {}) {
   } else if (type === "REACTIVE_CANCEL_QUERY") {
     payload.cancelled = use;
     payload.ultimateName = action.ultimateName ?? null;
+  } else if (type === "REACTIVE_EXHAUSTION_QUERY") {
+    payload.exhausted = use;
+    payload.cancelled = use;
+    payload.onEnter = action.onEnter ?? null;
+    payload.championName = action.championName ?? null;
+    payload.abilityName = action.abilityName ?? null;
+  } else if (type === "REACTIVE_COUNTER_QUERY") {
+    payload.countered = use;
+    payload.cancelled = use;
+    payload.talentEffect = action.talentEffect ?? null;
+    payload.talentName = action.talentName ?? null;
   }
 
   return { type: answerType, payload };

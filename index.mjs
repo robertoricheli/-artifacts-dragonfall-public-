@@ -632,6 +632,26 @@ function buildAiReactiveVisual(action, payload, askerSeat) {
       talentEffect: "cancelarUltimate",
     };
   }
+  if (action.type === "REACTIVE_EXHAUSTION_QUERY") {
+    return {
+      kind: "exaustao",
+      casterP: askerSeat,
+      championName: payload.championName,
+      abilityName: payload.abilityName,
+      onEnter: payload.onEnter,
+      cardName: "EXAUSTÃO",
+      talentEffect: "exaustao",
+    };
+  }
+  if (action.type === "REACTIVE_COUNTER_QUERY") {
+    return {
+      kind: "contramagica",
+      casterP: askerSeat,
+      talentName: payload.talentName,
+      talentEffect: payload.talentEffect,
+      cardName: "CONTRAMÁGICA",
+    };
+  }
   return null;
 }
 

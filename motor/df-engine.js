@@ -113,6 +113,14 @@ export function validateAction(state, action, ctx = {}) {
             if (!a.use)
                 return { ok: true, code: "OK" };
             return R.canOfferCancelUltimate(state, pid, a.attOwner ?? 1 - pid);
+        case T.REACTIVE_EXHAUSTION_ANSWER:
+            if (!a.use)
+                return { ok: true, code: "OK" };
+            return R.canOfferExaustao(state, pid, a.attOwner ?? 1 - pid);
+        case T.REACTIVE_COUNTER_ANSWER:
+            if (!a.use)
+                return { ok: true, code: "OK" };
+            return R.canOfferContramagica(state, pid, a.attOwner ?? 1 - pid);
         case T.ON_ENTER_RESOLVE:
             if (a.casterIdx == null || a.fieldIdx == null)
                 return { ok: false, code: "BAD_ON_ENTER" };
@@ -500,7 +508,24 @@ export function applyAction(state, action, ctx = {}) {
                         ...burst,
                     });
                 }
+                // Laço de Sangue: atacante (ainda em campo) buffa aliado aleatório.
+                if (!out.killA && (R.hasLacoDeSangue?.(att) || (att.constantEffect === "lacoDeSangue" && !att.silenced))) {
+                    const laco = R.applyLacoDeSangue?.(next, pid, ctx.rng || Math.random);
+                    if (laco && laco.targetI != null) {
+                        events.push({
+                            type: "LACO_DE_SANGUE",
+                            killerP: pid,
+                            killerUid: att.uid,
+                            targetP: pid,
+                            targetI: laco.targetI,
+                            targetName: laco.targetName,
+                            visual: "laco_de_sangue",
+                        });
+                    }
+                }
             }
+            const attHadLaco = !!(out.killD && out.killA && (R.hasLacoDeSangue?.(att)
+                || (att.constantEffect === "lacoDeSangue" && !att.silenced)));
             if (out.killA) {
                 field.splice(a.attackerIdx, 1);
                 const attDiscard = p.discard || [];
@@ -533,6 +558,21 @@ export function applyAction(state, action, ctx = {}) {
                         source: att.name,
                         reason: "combat",
                         ...burst,
+                    });
+                }
+            }
+            // Empate mútuo: Laço ainda tenta buffar aliados restantes.
+            if (attHadLaco) {
+                const laco = R.applyLacoDeSangue?.(next, pid, ctx.rng || Math.random);
+                if (laco && laco.targetI != null) {
+                    events.push({
+                        type: "LACO_DE_SANGUE",
+                        killerP: pid,
+                        killerUid: att.uid,
+                        targetP: pid,
+                        targetI: laco.targetI,
+                        targetName: laco.targetName,
+                        visual: "laco_de_sangue",
                     });
                 }
             }
@@ -635,6 +675,26 @@ export function applyAction(state, action, ctx = {}) {
             events.push(...(res.events || []));
             break;
         }
+        case T.REACTIVE_EXHAUSTION_ANSWER: {
+            const ER = getEffects();
+            if (!ER?.applyReactiveUse)
+                return { ok: false, state, events: [], error: "NO_REACTIVE" };
+            const res = ER.applyReactiveUse(next, pid, "exaustao", !!a.use);
+            if (!res.ok)
+                return { ok: false, state, events: [], error: res.error || "REACTIVE_FAILED" };
+            events.push(...(res.events || []));
+            break;
+        }
+        case T.REACTIVE_COUNTER_ANSWER: {
+            const ER = getEffects();
+            if (!ER?.applyReactiveUse)
+                return { ok: false, state, events: [], error: "NO_REACTIVE" };
+            const res = ER.applyReactiveUse(next, pid, "contramagica", !!a.use);
+            if (!res.ok)
+                return { ok: false, state, events: [], error: res.error || "REACTIVE_FAILED" };
+            events.push(...(res.events || []));
+            break;
+        }
         case T.SURRENDER: {
             const count = next.playersCount ?? next.players.length;
             const opp = ((pid + 1) % count);
@@ -672,7 +732,10 @@ export function applyAction(state, action, ctx = {}) {
             if (typeof ER?.applyTalentTarget !== "function") {
                 return { ok: false, state, events: [], error: "NO_TALENT_TARGET" };
             }
-            const res = ER.applyTalentTarget(next, pid, a.targetPlayerId ?? a.targetP, a.targetFieldIdx ?? a.targetI);
+            const res = ER.applyTalentTarget(next, pid, a.targetPlayerId ?? a.targetP, a.targetFieldIdx ?? a.targetI, {
+                enemyP: a.enemyP ?? a.enemyPlayerId,
+                enemyI: a.enemyI ?? a.enemyFieldIdx,
+            });
             if (!res.ok)
                 return { ok: false, state, events: res.events || [], error: res.error || "TALENT_TARGET_FAILED" };
             if (res.state)
@@ -881,11 +944,14 @@ export function applyAction(state, action, ctx = {}) {
                         "fury", "pulled", "inspiracao", "mimico", "wallBuff", "guerraBuff",
                         "tecnicasSobrepujar", "foreverGrowth", "fireAura", "burning",
                         "corruptedNoHonor", "furyBonusActive", "podridao", "silencedInHand",
+                        "prisaoPrismatica", "desafianteAtivo", "separado", "muralhaNativa",
+                        "charme",
                     ];
                     const STATUS_NUM = [
                         "frozenTurns", "shieldedTurns", "barrierTurns", "poisonTurns",
                         "furyTurns", "furyStacks", "guerraBuffTurns", "tecnicasSobrepujarTurns",
                         "burningTurns", "fireAuraTurns", "currentPower", "poisonedByP", "burningByP",
+                        "charmeTurns", "charmeOriginalOwner",
                     ];
                     const STATUS_ANY = [
                         "abilityType", "abilityName", "abilityDesc", "onEnter", "onDestroy",
@@ -960,6 +1026,8 @@ export function applyAction(state, action, ctx = {}) {
                     card.furyBonusActive = false;
                     card.vulnerable = false;
                     card.corruptedNoHonor = false;
+                    card.prisaoPrismatica = false;
+                    card.desafianteAtivo = false;
                     events.push({
                         type: "STATUS_SET",
                         targetP: tp,
@@ -1178,6 +1246,8 @@ export function applyAction(state, action, ctx = {}) {
                 T.REACTIVE_BLOCK_QUERY,
                 T.REACTIVE_PROTECTION_QUERY,
                 T.REACTIVE_CANCEL_QUERY,
+                T.REACTIVE_EXHAUSTION_QUERY,
+                T.REACTIVE_COUNTER_QUERY,
                 T.ABILITY_START,
                 T.ULTIMATE_START,
                 T.SYNC_STATE,
