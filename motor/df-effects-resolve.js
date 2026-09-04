@@ -1174,7 +1174,7 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             victim.fieldHoles = picked
                 .slice()
                 .sort((a, b) => a - b)
-                .map((slot) => ({ slot, turns: 3 }));
+                .map((slot) => ({ slot, turns: 4 }));
             markOnEnterUsed(state, casterIdx, key);
             if (R()?.recalcDesafiante)
                 R().recalcDesafiante(state);
@@ -1973,7 +1973,7 @@ function applyTalentAuto(state, pIdx) {
             victim.fieldHoles = picked
                 .slice()
                 .sort((a, b) => a - b)
-                .map((slot) => ({ slot, turns: 3 }));
+                .map((slot) => ({ slot, turns: 4 }));
             if (R()?.recalcDesafiante)
                 R().recalcDesafiante(state);
             events.push({

@@ -285,7 +285,7 @@ const cardDefs = [
         onDestroy: null, onEnter: null, talentEffect: "gritoDeGuerraTalento", composedFace: true },
     { name: "PRISÃO PRISMÁTICA", power: 0, category: "talent", abilityType: "talent",
         abilityName: "Prisão Prismática (Talento)",
-        abilityDesc: "Escolha um campeão adversário, e ele deverá fazer 2 ações para atacar.",
+        abilityDesc: "Escolha um Campeão. Ele ficará aprisionado, tendo que usar 2 ações para atacar.",
         onDestroy: null, onEnter: null, talentEffect: "prisaoPrismaticaTalento", composedFace: true },
     { name: "TORNADO DE FOGO", power: 0, category: "talent", abilityType: "talent",
         abilityName: "Tornado de Fogo (Talento)",
@@ -562,11 +562,11 @@ const cardDefs = [
     // PRISÃO PRISMÁTICA: atacar com o alvo custa sempre 2 ações.
     { name: "GUERREIRO CÚBICO", power: 1, category: "champion", abilityType: "instant",
         abilityName: "Prisão Prismática",
-        abilityDesc: "Ao entrar em campo, escolha 1 Campeão adversário. Ele fica preso numa Prisão Prismática: atacar com ele custa sempre 2 ações.",
+        abilityDesc: "Escolha um Campeão. Ele ficará aprisionado, tendo que usar 2 ações para atacar.",
         onDestroy: null, onEnter: "prisaoPrismatica", composedFace: true },
     { name: "GUERREIRO CÚBICO CORROMPIDO", power: 2, category: "champion", abilityType: "instant",
         abilityName: "Prisão Prismática",
-        abilityDesc: "Ao entrar em campo, escolha 1 Campeão adversário. Ele fica preso numa Prisão Prismática: atacar com ele custa sempre 2 ações.",
+        abilityDesc: "Escolha um Campeão. Ele ficará aprisionado, tendo que usar 2 ações para atacar.",
         onDestroy: null, onEnter: "prisaoPrismatica", composedFace: true },
     // DESAFIANTE: +2 Poder enquanto sozinho no campo.
     { name: "ELFO GLADIADOR", power: 1, category: "champion", abilityType: "constant",
