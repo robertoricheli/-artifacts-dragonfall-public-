@@ -17,7 +17,8 @@ const ROOT = fs.existsSync(path.join(HERE, "artifacts", "dragonfall"))
 
 function readJsonVersion(filePath) {
   try {
-    const v = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const raw = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
+    const v = JSON.parse(raw);
     if (v.displayVersion) return String(v.displayVersion);
     if (v.version) return String(v.version);
   } catch (_) { /* ignore */ }
