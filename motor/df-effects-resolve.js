@@ -1156,13 +1156,8 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
                 break;
             const victim = state.players[opp];
             const field = victim.field || [];
-            // Sorteia 3 slots distintos 0..5
-            const slots = [0, 1, 2, 3, 4, 5];
-            for (let i = slots.length - 1; i > 0; i--) {
-                const j = Math.floor(rng() * (i + 1));
-                [slots[i], slots[j]] = [slots[j], slots[i]];
-            }
-            const picked = slots.slice(0, 3).sort((a, b) => b - a); // alto→baixo p/ bounce
+            // 3 buracos nos slots de invocação 0–2 (centro do campo, como campeões).
+            const picked = [2, 1, 0];
             const bounced = [];
             for (const slot of picked) {
                 if (slot < field.length) {
@@ -1171,10 +1166,7 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
                         bounced.push({ ...b, slot });
                 }
             }
-            victim.fieldHoles = picked
-                .slice()
-                .sort((a, b) => a - b)
-                .map((slot) => ({ slot, turns: 4 }));
+            victim.fieldHoles = [0, 1, 2].map((slot) => ({ slot, turns: 4 }));
             markOnEnterUsed(state, casterIdx, key);
             if (R()?.recalcDesafiante)
                 R().recalcDesafiante(state);
@@ -1956,12 +1948,8 @@ function applyTalentAuto(state, pIdx) {
             }
             const victim = state.players[opp];
             const field = victim.field || [];
-            const slots = [0, 1, 2, 3, 4, 5];
-            for (let i = slots.length - 1; i > 0; i--) {
-                const j = Math.floor(Math.random() * (i + 1));
-                [slots[i], slots[j]] = [slots[j], slots[i]];
-            }
-            const picked = slots.slice(0, 3).sort((a, b) => b - a);
+            // 3 buracos nos slots de invocação 0–2 (centro do campo, como campeões).
+            const picked = [2, 1, 0];
             const bounced = [];
             for (const slot of picked) {
                 if (slot < field.length) {
@@ -1970,10 +1958,7 @@ function applyTalentAuto(state, pIdx) {
                         bounced.push({ ...b, slot });
                 }
             }
-            victim.fieldHoles = picked
-                .slice()
-                .sort((a, b) => a - b)
-                .map((slot) => ({ slot, turns: 4 }));
+            victim.fieldHoles = [0, 1, 2].map((slot) => ({ slot, turns: 4 }));
             if (R()?.recalcDesafiante)
                 R().recalcDesafiante(state);
             events.push({

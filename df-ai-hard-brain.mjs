@@ -218,6 +218,11 @@ export function scoreSummonCard(state, seat, card, handIdx, opts = {}) {
   if (oe === "furia" || oe === "gritoDeGuerra") score += 11;
   if (oe === "defensor") score += 10;
   if (oe === "necromancia") score += 8;
+  if (oe === "roletaRussa") {
+    // JAMAIS: rival sem campeões ou IA com mais/igual campeões que o rival.
+    if (enemyFc <= 0 || enemyFc <= fc) return -9999;
+    score += 18;
+  }
   if (isOverpower(card)) score += onEnterW("sobrepujar", 6);
   // Encher campo (inimigo vazio / poucas peças).
   if (fc < 2) score += onEnterW("fieldSlotBonus", 15);
@@ -615,11 +620,26 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     if (!anyNonPoison) return null;
     return { ...base, targetP: null, targetI: null };
   }
+  if (ultType === "banish") {
+    // Outra Dimensão: regra P≤2; IA só bane Poder impresso 2 (nunca P=1).
+    const pool = [];
+    for (let p = 0; p < (state.playersCount || 2); p++) {
+      if (p === seat) continue;
+      (state.players[p]?.field || []).forEach((c, i) => {
+        if (!c || c.shielded || c.pulled) return;
+        const printed = c.basePower ?? c.power ?? 0;
+        if (printed !== 2) return;
+        pool.push({ p, i, noHonor: !!(c.noHonor || c.corrupted) });
+      });
+    }
+    if (!pool.length) return null;
+    pool.sort((a, b) => (a.noHonor ? 1 : 0) - (b.noHonor ? 1 : 0));
+    return { ...base, targetP: pool[0].p, targetI: pool[0].i };
+  }
   if (["summonDragon", "thunderDiscard", "wallProtect", "poison", "warOverpower",
-    "cometStarfall", "banish", "hook", "potion", "vampirism",
+    "cometStarfall", "hook", "potion", "vampirism",
     "scareReturn", "resurrect"].includes(ultType)) {
-    if (!forceEndOfTurn && ["scareReturn", "banish"].includes(ultType)) {
-      // precisa de inimigo
+    if (!forceEndOfTurn && ultType === "scareReturn") {
       if (enemyFieldCount(state, seat) <= 0) return null;
     }
     return { ...base, targetP: null, targetI: null };
