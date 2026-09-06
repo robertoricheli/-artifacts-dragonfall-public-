@@ -342,6 +342,11 @@ function applyOnDestroyBurst(state, ownerIdx, champ, reason, rng = Math.random) 
         && ability !== "furiaLegado" && ability !== "vinganca"
         && ability !== "legado")
         return { ability: null, targets: [], applied: [] };
+    // LEGADO / VINGANÇA: não disparam se sacrificado por Devorar/Ritual/Ritual Superior.
+    if ((ability === "legado" || ability === "vinganca")
+        && (reason === "devorar" || reason === "ritualSacrifice")) {
+        return { ability: null, targets: [], applied: [] };
+    }
     // Legado: aliado aleatório ganha +1 Poder permanente (manual §Legado).
     if (ability === "legado") {
         const allies = gatherAllyTargets(state, ownerIdx, -1, () => true);
