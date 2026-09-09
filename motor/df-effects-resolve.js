@@ -212,7 +212,7 @@ function planOnEnterImpl(state, casterIdx, fieldIdx) {
     const instantAuto = new Set([
         "fumacaToxica", "raioDuplo", "pesadelo", "roubar", "desacelerar",
         "defensor", "gritoDeGuerra", "forja", "tecnicasDeCombate", "roletaRussa", "podridao",
-        "enfraquecer", "energizar", "terremoto",
+        "enfraquecer", "energizar",
     ]);
     const targetEnemy = new Set([
         "bolaDeFogo", "assassinar", "transformarBichinho", "rajadaCongelante",
@@ -1144,42 +1144,6 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             });
             break;
         }
-        case "terremoto": {
-            let opp = null;
-            for (let i = 0; i < (state.playersCount ?? state.players?.length ?? 0); i++) {
-                if (i !== casterIdx) {
-                    opp = i;
-                    break;
-                }
-            }
-            if (opp == null)
-                break;
-            const victim = state.players[opp];
-            const field = victim.field || [];
-            // 3 buracos nos slots de invocação 0–2 (centro do campo, como campeões).
-            const picked = [2, 1, 0];
-            const bounced = [];
-            for (const slot of picked) {
-                if (slot < field.length) {
-                    const b = R()?.bounceChampionToHand?.(state, opp, slot);
-                    if (b)
-                        bounced.push({ ...b, slot });
-                }
-            }
-            victim.fieldHoles = [0, 1, 2].map((slot) => ({ slot, turns: 4 }));
-            markOnEnterUsed(state, casterIdx, key);
-            if (R()?.recalcDesafiante)
-                R().recalcDesafiante(state);
-            events.push({
-                type: "TERREMOTO",
-                casterIdx, fieldIdx,
-                targetIdx: opp,
-                slots: victim.fieldHoles.map((h) => h.slot),
-                bounced,
-                visual: "terremoto",
-            });
-            break;
-        }
         case "charme": {
             const tp = resolution.targetP;
             const ti = resolution.targetI;
@@ -1934,44 +1898,6 @@ function applyTalentAuto(state, pIdx) {
             clearActive();
             break;
         }
-        case "terremotoTalento": {
-            let opp = null;
-            for (let i = 0; i < (state.playersCount ?? state.players?.length ?? 0); i++) {
-                if (i !== pIdx) {
-                    opp = i;
-                    break;
-                }
-            }
-            if (opp == null) {
-                clearActive();
-                break;
-            }
-            const victim = state.players[opp];
-            const field = victim.field || [];
-            // 3 buracos nos slots de invocação 0–2 (centro do campo, como campeões).
-            const picked = [2, 1, 0];
-            const bounced = [];
-            for (const slot of picked) {
-                if (slot < field.length) {
-                    const b = R()?.bounceChampionToHand?.(state, opp, slot);
-                    if (b)
-                        bounced.push({ ...b, slot });
-                }
-            }
-            victim.fieldHoles = [0, 1, 2].map((slot) => ({ slot, turns: 4 }));
-            if (R()?.recalcDesafiante)
-                R().recalcDesafiante(state);
-            events.push({
-                type: "TALENT_TERREMOTO",
-                playerId: pIdx,
-                targetIdx: opp,
-                slots: victim.fieldHoles.map((h) => h.slot),
-                bounced,
-                visual: "terremoto",
-            });
-            clearActive();
-            break;
-        }
         case "invocarDragaoTalento": {
             const maxField = R()?.LIMITS?.MAX_FIELD ?? 8;
             const field = pl.field || [];
@@ -2030,7 +1956,7 @@ const ON_ENTER_RESOLVE_KEYS = [
     "invokeDragon", "invokeCubicDragon", "forja",
     "tecnicasDeCombate", "roletaRussa", "podridao",
     "separar", "prisaoPrismatica",
-    "enfraquecer", "energizar", "terremoto", "charme",
+    "enfraquecer", "energizar", "charme",
 ];
 /** Registra plan + resolve por string no DfEffects (registry unificado). */
 function bootstrapResolveRegistry(E) {

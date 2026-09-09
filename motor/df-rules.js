@@ -106,27 +106,9 @@ function recalcDesafiante(state) {
 function isCrescimentoDragon(c) {
     return !!(c && !c.silenced && c.abilityName === "Crescimento");
 }
-/** Buracos de Terremoto: reduzem o teto invocável (máx. 3); duração 4 manutenções. */
-function fieldHolesCount(p) {
-    return Array.isArray(p?.fieldHoles) ? p.fieldHoles.length : 0;
-}
-function effectiveMaxField(p, limits = LIMITS) {
-    return Math.max(0, (limits.MAX_FIELD ?? 6) - fieldHolesCount(p));
-}
-function tickFieldHoles(state, pIdx) {
-    const p = state.players[pIdx];
-    if (!p || !Array.isArray(p.fieldHoles) || !p.fieldHoles.length)
-        return [];
-    const expired = [];
-    p.fieldHoles = p.fieldHoles.filter((h) => {
-        h.turns = (h.turns ?? 0) - 1;
-        if (h.turns <= 0) {
-            expired.push({ slot: h.slot });
-            return false;
-        }
-        return true;
-    });
-    return expired;
+/** Teto de campo (buracos/Terremoto removidos do jogo). */
+function effectiveMaxField(_p, limits = LIMITS) {
+    return Math.max(0, limits.MAX_FIELD ?? 6);
 }
 /**
  * Devolve campeão do campo à mão do dono (paridade Amedrontar: mão cheia → exile).
@@ -1425,7 +1407,6 @@ function runTurnMaintenance(state, pIdx, limits = LIMITS) {
         p.vp += poisonVpGain;
     const returned = returnPulledChampions(state, pIdx);
     const charmedReturned = returnCharmedChampions(state, pIdx);
-    const holesExpired = tickFieldHoles(state, pIdx);
     const skipDraw = !!p.skipDraw;
     if (p.skipDraw)
         p.skipDraw = false;
@@ -1435,7 +1416,7 @@ function runTurnMaintenance(state, pIdx, limits = LIMITS) {
         poisonDestroyed,
         returned,
         charmedReturned,
-        holesExpired: holesExpired.length,
+        holesExpired: 0,
         statusLogs: status.logs,
         passiveVpGain: plan.passiveVpGain,
         poisonVpGain,
@@ -1577,9 +1558,7 @@ const DfRules = {
     hasSepararTarget,
     hasCharmeSpace,
     recalcDesafiante,
-    fieldHolesCount,
     effectiveMaxField,
-    tickFieldHoles,
     bounceChampionToHand,
     hasLacoDeSangue,
     applyLacoDeSangue,

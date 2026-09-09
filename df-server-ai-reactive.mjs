@@ -37,7 +37,7 @@ const REQUIRED_TALENT = Object.freeze({
 });
 
 const AI_EXAUSTAO_HIGH_VALUE = new Set([
-  "assassinar", "roubar", "charme", "terremoto", "enfraquecer",
+  "assassinar", "roubar", "charme", "enfraquecer",
   "bolaDeFogo", "necromancia", "transformarBichinho", "roletaRussa",
   "pesadelo", "desacelerar", "devorar", "trocaInjusta", "imitar",
   "corromper", "raioDuplo", "fumacaToxica", "separar", "energizar",
