@@ -316,7 +316,7 @@ const cardDefs = [
         abilityName: "Corromper (Talento)",
         abilityDesc: "Escolha um Campeão. O adversário não ganhará PVs ao destruí-lo.",
         onDestroy: null, onEnter: null, talentEffect: "corromperTalento", composedFace: true },
-    { name: "CHUVA DE COMETAS", power: 0, category: "talent", abilityType: "talent",
+    { name: "CHUVA DE COMETAS", power: 1, category: "talent", abilityType: "talent",
         abilityName: "Chuva de Cometas (Talento)",
         abilityDesc: "Todos os Campeões em campo, seus e do adversário perdem 1 ponto de Poder.",
         onDestroy: null, onEnter: null, talentEffect: "chuvaDeCometas", composedFace: true },
@@ -600,7 +600,7 @@ const cardDefs = [
         abilityName: "Laço de Sangue",
         abilityDesc: "Sempre que atacar e destruir um Campeão em COMBATE, um Campeão aliado aleatório ganha +1 de Poder.",
         onDestroy: null, onEnter: null, constantEffect: "lacoDeSangue", composedFace: true },
-    // CHARME: rouba inimigo por 2 rodadas (não ataca).
+    // CHARME: rouba inimigo por 2 rodadas (não ataca; habilidades aliadas OK).
     { name: "EUGINE", power: 1, category: "champion", abilityType: "instant",
         abilityName: "Charme",
         abilityDesc: "Um Campeão do Adversário fica enfeitiçado e vem para seu campo durante 2 rodadas.",
