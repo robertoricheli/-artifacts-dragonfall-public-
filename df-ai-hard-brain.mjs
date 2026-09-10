@@ -110,7 +110,8 @@ function combatOutcome(att, def) {
 }
 
 function isOverpower(c) {
-  return !!(c && (c.abilityName === "Sobrepujar" || c.constantEffect === "sobrepujar"));
+  return !!(c && (c.abilityName === "Sobrepujar" || c.constantEffect === "sobrepujar"
+    || c.tecnicasSobrepujar || c.warOverpower));
 }
 
 function hasInvestida(c) {
@@ -173,6 +174,72 @@ function canSameTurnAttackAfterSummon(state, seat, card, actionsAfter) {
   return hasLegalAttackTarget(state, seat, stub);
 }
 
+/** Premissas 1/15: aliado com Técnicas/Grito deve poder atacar no mesmo turno. */
+function canAllyFollowUpAttackAfterGrant(state, seat, actionsAfter, grant) {
+  if ((actionsAfter ?? 0) < 1 || enemyFieldCount(state, seat) <= 0) return false;
+  const field = state.players[seat]?.field || [];
+  if (!field.length) return false;
+  for (const c of field) {
+    if (!c || c.tapped || c.frozen || c.pulled) continue;
+    const stub = {
+      ...c,
+      tapped: false,
+      frozen: false,
+      pulled: false,
+    };
+    if (grant === "tecnicas") stub.tecnicasSobrepujar = true;
+    if (grant === "grito") stub.fury = true;
+    if (hasLegalAttackTarget(state, seat, stub)) return true;
+  }
+  return false;
+}
+
+/** Hard-block único das 15 premissas (paridade vs-IA). */
+export function summonPremiseBlocked(state, seat, card, actionsAfter) {
+  if (!card || card.category !== "champion") return false;
+  const fc = fieldCount(state, seat);
+  const enemyFc = enemyFieldCount(state, seat);
+  const aa = actionsAfter ?? 0;
+  const oe = card.onEnter;
+
+  if (oe === "tecnicasDeCombate") {
+    if (fc <= 0 || enemyFc <= 0 || aa < 1) return true;
+    if (!canAllyFollowUpAttackAfterGrant(state, seat, aa, "tecnicas")) return true;
+  }
+  if (oe === "gritoDeGuerra") {
+    if (fc <= 0 || enemyFc <= 0 || aa < 1) return true;
+    if (!canAllyFollowUpAttackAfterGrant(state, seat, aa, "grito")) return true;
+  }
+  if (oe === "charme" || oe === "prisaoPrismatica" || oe === "incendiar") {
+    if (!enemyHasPowerAtLeast(state, seat, 2)) return true;
+  }
+  if (hasLaco(card)) {
+    if (fc < 1 || !canSameTurnAttackAfterSummon(state, seat, card, aa)) return true;
+  }
+  if (hasDesafiante(card)) {
+    if (fc > 0 || !canSameTurnAttackAfterSummon(state, seat, card, aa)) return true;
+  }
+  if (hasInvestida(card)) {
+    if (!canSameTurnAttackAfterSummon(state, seat, card, aa)) return true;
+  }
+  if (oe === "furia") {
+    if (!canSameTurnAttackAfterSummon(state, seat, card, aa)) return true;
+  }
+  if (hasLegado(card)) {
+    if (fc < 1 || !canSameTurnAttackAfterSummon(state, seat, card, aa)) return true;
+  }
+  if (hasVinganca(card)) {
+    if (enemyFc < 2 || !canSameTurnAttackAfterSummon(state, seat, card, aa)) return true;
+  }
+  if (hasInspirar(card)) {
+    if (fc < 2) return true;
+  }
+  if (isOverpower(card)) {
+    if (!canSameTurnAttackAfterSummon(state, seat, card, aa)) return true;
+  }
+  return false;
+}
+
 export function championSummonCost(c) {
   const p = c?.currentPower ?? c?.power ?? 0;
   if (p <= 1) return 1;
@@ -231,6 +298,7 @@ export function scoreSummonCard(state, seat, card, handIdx, opts = {}) {
   const pow = card.currentPower ?? card.power ?? 0;
   const cost = championSummonCost(card);
   const actionsAfter = (pl?.actions ?? 0) - cost;
+  if (summonPremiseBlocked(state, seat, card, actionsAfter)) return -9999;
   let score = pow * 4 * summonMul;
   const needTempoKill = hasCleanKill(state, seat);
   if (needTempoKill && actionsAfter < 1 && !card.summonRitual) {
@@ -292,10 +360,12 @@ export function scoreSummonCard(state, seat, card, handIdx, opts = {}) {
   }
   if (oe === "gritoDeGuerra") {
     if (fc <= 0 || enemyFc <= 0 || actionsAfter < 1) return -9999;
+    if (!canAllyFollowUpAttackAfterGrant(state, seat, actionsAfter, "grito")) return -9999;
     score += 11 + fc * 3;
   }
   if (oe === "tecnicasDeCombate") {
     if (fc <= 0 || enemyFc <= 0 || actionsAfter < 1) return -9999;
+    if (!canAllyFollowUpAttackAfterGrant(state, seat, actionsAfter, "tecnicas")) return -9999;
     score += 18 + fc * 5;
   }
   if (oe === "defensor") score += 10;
@@ -817,6 +887,7 @@ export const DfAiHardBrain = {
   fieldCount,
   enemyFieldCount,
   scoreSummonCard,
+  summonPremiseBlocked,
   shouldAttack,
   scoreAttackAction,
   scoreDrawAction,
