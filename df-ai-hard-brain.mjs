@@ -113,6 +113,66 @@ function isOverpower(c) {
   return !!(c && (c.abilityName === "Sobrepujar" || c.constantEffect === "sobrepujar"));
 }
 
+function hasInvestida(c) {
+  return !!(c && (c.constantEffect === "investida"
+    || (c.abilityType === "constant" && c.abilityName === "Investida")
+    || c.freeAttack));
+}
+function hasLaco(c) {
+  return !!(c && (c.constantEffect === "lacoDeSangue" || c.abilityName === "Laço de Sangue"));
+}
+function hasLegado(c) {
+  return !!(c && (c.onDestroy === "legado" || c.abilityName === "Legado"));
+}
+function hasVinganca(c) {
+  return !!(c && (c.onDestroy === "vinganca" || c.abilityName === "Vingança"));
+}
+function hasInspirar(c) {
+  return !!(c && (c.constantEffect === "inspirar" || c.abilityName === "Inspirar"));
+}
+function hasDesafiante(c) {
+  return !!(c && (c.constantEffect === "desafiante" || c.abilityName === "Desafiante"));
+}
+function enemyHasPowerAtLeast(state, seat, minPow) {
+  const min = minPow | 0;
+  for (let p = 0; p < (state.playersCount || 2); p++) {
+    if (p === seat) continue;
+    for (const c of state.players[p]?.field || []) {
+      if (c && (c.currentPower ?? c.power ?? 0) >= min) return true;
+    }
+  }
+  return false;
+}
+function hasLegalAttackTarget(state, seat, attackerStub) {
+  if (!attackerStub) return false;
+  const att = { ...attackerStub, tapped: false, frozen: false, pulled: false };
+  for (let ep = 0; ep < (state.playersCount || 2); ep++) {
+    if (ep === seat) continue;
+    for (const d of state.players[ep]?.field || []) {
+      if (!d || d.shielded || d.pulled) continue;
+      if (!shouldAttack(att, d)) continue;
+      return true;
+    }
+  }
+  return false;
+}
+function canSameTurnAttackAfterSummon(state, seat, card, actionsAfter) {
+  if (!card || enemyFieldCount(state, seat) <= 0) return false;
+  const free = hasInvestida(card);
+  if (!free && (actionsAfter ?? 0) < 1) return false;
+  const stub = {
+    ...card,
+    tapped: false,
+    frozen: false,
+    pulled: false,
+    freeAttack: free || !!card.freeAttack,
+  };
+  if (hasDesafiante(card) && fieldCount(state, seat) === 0) {
+    stub.currentPower = (card.currentPower ?? card.power ?? 0) + 2;
+  }
+  return hasLegalAttackTarget(state, seat, stub);
+}
+
 export function championSummonCost(c) {
   const p = c?.currentPower ?? c?.power ?? 0;
   if (p <= 1) return 1;
@@ -213,9 +273,31 @@ export function scoreSummonCard(state, seat, card, handIdx, opts = {}) {
     const opp = state.players[humanSeat(state, seat)];
     score += opp && !opp.skipNextAction ? onEnterW("desacelerar", 9) : -6;
   }
-  if (oe === "incendiar" && enemyFc > 0) score += 14;
+  if (oe === "incendiar") {
+    if (!enemyHasPowerAtLeast(state, seat, 2)) return -9999;
+    score += 14;
+  }
+  if (oe === "charme") {
+    if (!enemyHasPowerAtLeast(state, seat, 2)) return -9999;
+    score += 16;
+  }
+  if (oe === "prisaoPrismatica") {
+    if (!enemyHasPowerAtLeast(state, seat, 2)) return -9999;
+    score += 16;
+  }
   if (oe === "guardiao" && fc > 0) score += 12;
-  if (oe === "furia" || oe === "gritoDeGuerra") score += 11;
+  if (oe === "furia") {
+    if (!canSameTurnAttackAfterSummon(state, seat, card, actionsAfter)) return -9999;
+    score += 26;
+  }
+  if (oe === "gritoDeGuerra") {
+    if (fc <= 0 || enemyFc <= 0 || actionsAfter < 1) return -9999;
+    score += 11 + fc * 3;
+  }
+  if (oe === "tecnicasDeCombate") {
+    if (fc <= 0 || enemyFc <= 0 || actionsAfter < 1) return -9999;
+    score += 18 + fc * 5;
+  }
   if (oe === "defensor") score += 10;
   if (oe === "necromancia") score += 8;
   if (oe === "roletaRussa") {
@@ -223,7 +305,34 @@ export function scoreSummonCard(state, seat, card, handIdx, opts = {}) {
     if (enemyFc <= 0 || enemyFc <= fc) return -9999;
     score += 18;
   }
-  if (isOverpower(card)) score += onEnterW("sobrepujar", 6);
+  if (hasInvestida(card)) {
+    if (!canSameTurnAttackAfterSummon(state, seat, card, actionsAfter)) return -9999;
+    score += 30;
+  }
+  if (hasLaco(card)) {
+    if (fc < 1 || !canSameTurnAttackAfterSummon(state, seat, card, actionsAfter)) return -9999;
+    score += 28;
+  }
+  if (hasDesafiante(card)) {
+    if (fc > 0 || !canSameTurnAttackAfterSummon(state, seat, card, actionsAfter)) return -9999;
+    score += 48;
+  }
+  if (hasLegado(card)) {
+    if (fc < 1 || !canSameTurnAttackAfterSummon(state, seat, card, actionsAfter)) return -9999;
+    score += 24;
+  }
+  if (hasVinganca(card)) {
+    if (enemyFc < 2 || !canSameTurnAttackAfterSummon(state, seat, card, actionsAfter)) return -9999;
+    score += 24;
+  }
+  if (hasInspirar(card)) {
+    if (fc < 2) return -9999;
+    score += 22 + fc * 2;
+  }
+  if (isOverpower(card)) {
+    if (!canSameTurnAttackAfterSummon(state, seat, card, actionsAfter)) return -9999;
+    score += onEnterW("sobrepujar", 28);
+  }
   // Encher campo (inimigo vazio / poucas peças).
   if (fc < 2) score += onEnterW("fieldSlotBonus", 15);
   if (enemyFc === 0 && fc < MAX_FIELD) score += 18 + (MAX_FIELD - fc) * 3;
@@ -431,8 +540,28 @@ export function pickOnEnterResolution(state, seat, ability, casterIdx, fieldIdx)
     const pick = pool[Math.floor(Math.random() * pool.length)];
     return { targetP: pick.p, targetI: pick.i, enemyP: pick.p, enemyI: pick.i };
   }
+  if (ability === "charme") {
+    let pool = gatherEnemy((c) => c && !c.charme && !c.pulled
+      && (c.currentPower ?? c.power ?? 0) >= 2);
+    if (!pool.length) return null;
+    pool.sort((a, b) => (b.c.currentPower ?? 0) - (a.c.currentPower ?? 0));
+    return { targetP: pool[0].p, targetI: pool[0].i };
+  }
+  if (ability === "prisaoPrismatica") {
+    let pool = gatherEnemy((c) => c && !c.prisaoPrismatica
+      && (c.currentPower ?? c.power ?? 0) >= 2);
+    if (!pool.length) return null;
+    pool.sort((a, b) => (b.c.currentPower ?? 0) - (a.c.currentPower ?? 0));
+    return { targetP: pool[0].p, targetI: pool[0].i };
+  }
+  if (ability === "corromper") {
+    const allies = gatherAlly((c) => c && !(c.corruptedNoHonor || c.onDestroy === "noHonor"));
+    if (!allies.length) return null;
+    allies.sort((a, b) => (a.c.currentPower ?? 0) - (b.c.currentPower ?? 0));
+    return { targetP: allies[0].p, targetI: allies[0].i };
+  }
   if (ability === "bolaDeFogo" || ability === "assassinar" || ability === "incendiar"
-      || ability === "mordidaVenenosa" || ability === "corromper"
+      || ability === "mordidaVenenosa"
       || ability === "rajadaCongelante" || ability === "transformarBichinho") {
     // Proteção bloqueia ataques; Assassinar/Transformar ignoram Proteção
     // (Transformar: só Barreira; Assassinar: destruição, não ataque).
@@ -444,6 +573,10 @@ export function pickOnEnterResolution(state, seat, ability, casterIdx, fieldIdx)
     }
     if (ability === "mordidaVenenosa") {
       pool = pool.filter((t) => !t.c.poisoned && (t.c.currentPower ?? t.c.power ?? 0) > 1);
+    }
+    if (ability === "incendiar") {
+      pool = pool.filter((t) => !(t.c.barrier || t.c.barrierPermanent)
+        && (t.c.currentPower ?? t.c.power ?? 0) >= 2);
     }
     if (ability === "transformarBichinho") {
       pool = pool.filter((t) => (t.c.currentPower ?? t.c.power ?? 0) >= 2 && !t.c.barrier);
