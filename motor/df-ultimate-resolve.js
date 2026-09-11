@@ -115,7 +115,10 @@ function destroyChampion(state, ownerIdx, fieldIdx, killerIdx, opts = {}, events
             (state.players[killerIdx].vp ?? 0) + 1;
         events.push({ type: "VP_GAIN", playerId: killerIdx, amount: 1, reason: opts.reason || "destroy" });
     }
-    if (resolveOnDestroy(target) === "vinganca" && !target.silenced) {
+    const reason = opts.reason || "ultimate";
+    const skipLegadoVinganca = rules().suppressesLegadoVinganca?.(reason)
+        || reason === "devorar" || reason === "ritualSacrifice";
+    if (!skipLegadoVinganca && resolveOnDestroy(target) === "vinganca" && !target.silenced) {
         const enemies = [];
         for (let p = 0; p < (state.playersCount ?? state.players.length); p++) {
             if (p === ownerIdx)
@@ -136,7 +139,7 @@ function destroyChampion(state, ownerIdx, fieldIdx, killerIdx, opts = {}, events
             }
         }
     }
-    if (resolveOnDestroy(target) === "legado" && !target.silenced) {
+    if (!skipLegadoVinganca && resolveOnDestroy(target) === "legado" && !target.silenced) {
         const allies = rules().gatherAllyTargets(state, ownerIdx, -1);
         if (allies.length) {
             const pick = allies[Math.floor(rng() * allies.length)];
@@ -166,7 +169,6 @@ function destroyChampion(state, ownerIdx, fieldIdx, killerIdx, opts = {}, events
             }
         }
     }
-    const reason = opts.reason || "ultimate";
     const burst = rules().applyOnDestroyBurst?.(state, ownerIdx, target, reason, rng);
     if (burst?.ability) {
         events.push({

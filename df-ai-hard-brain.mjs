@@ -624,10 +624,22 @@ export function pickOnEnterResolution(state, seat, ability, casterIdx, fieldIdx)
     pool.sort((a, b) => (b.c.currentPower ?? 0) - (a.c.currentPower ?? 0));
     return { targetP: pool[0].p, targetI: pool[0].i };
   }
+  if (ability === "separar") {
+    const maxF = 6;
+    let pool = gatherEnemy((c) => c && (c.currentPower ?? c.power) === 2);
+    pool = pool.filter((t) => (state.players[t.p]?.field?.length ?? 0) < maxF);
+    if (!pool.length) return null;
+    pool.sort((a, b) => {
+      const sa = (a.c.onEnter || a.c.onDestroy || a.c.constantEffect) ? 1 : 0;
+      const sb = (b.c.onEnter || b.c.onDestroy || b.c.constantEffect) ? 1 : 0;
+      return sb - sa;
+    });
+    return { targetP: pool[0].p, targetI: pool[0].i };
+  }
   if (ability === "corromper") {
-    const allies = gatherAlly((c) => c && !(c.corruptedNoHonor || c.onDestroy === "noHonor"));
+    const allies = gatherAlly((c) => c && !(c.corruptedNoHonor || c.onDestroy === "noHonor")
+      && (c.currentPower ?? c.power ?? 0) === 1);
     if (!allies.length) return null;
-    allies.sort((a, b) => (a.c.currentPower ?? 0) - (b.c.currentPower ?? 0));
     return { targetP: allies[0].p, targetI: allies[0].i };
   }
   if (ability === "bolaDeFogo" || ability === "assassinar" || ability === "incendiar"

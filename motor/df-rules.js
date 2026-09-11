@@ -312,6 +312,10 @@ const POWER_REDUCTION_DESTROY_REASONS = Object.freeze([
 function isCombatOrPowerReductionDestroy(reason) {
     return reason === "combat" || POWER_REDUCTION_DESTROY_REASONS.includes(reason);
 }
+/** LEGADO/VINGANÇA: nunca em Devorar, Ritual, Ritual Superior (mesmo reason). */
+function suppressesLegadoVinganca(reason) {
+    return reason === "devorar" || reason === "ritualSacrifice";
+}
 /**
  * Resolve Explosão de Gelo/Venenosa e Retaliação após retirar o portador.
  * Retorna alvos escolhidos sem repetição; não concede PV imediato.
@@ -325,8 +329,9 @@ function applyOnDestroyBurst(state, ownerIdx, champ, reason, rng = Math.random) 
         && ability !== "legado")
         return { ability: null, targets: [], applied: [] };
     // LEGADO / VINGANÇA: não disparam se sacrificado por Devorar/Ritual/Ritual Superior.
+    // Troca de Lugar não destrói — nunca deve chegar aqui; ver suppressesLegadoVinganca.
     if ((ability === "legado" || ability === "vinganca")
-        && (reason === "devorar" || reason === "ritualSacrifice")) {
+        && suppressesLegadoVinganca(reason)) {
         return { ability: null, targets: [], applied: [] };
     }
     // Legado: aliado aleatório ganha +1 Poder permanente (manual §Legado).
@@ -1501,6 +1506,7 @@ const DfRules = {
     expireFuryStacks,
     POWER_REDUCTION_DESTROY_REASONS,
     isCombatOrPowerReductionDestroy,
+    suppressesLegadoVinganca,
     applyOnDestroyBurst,
     gatherImitableAllies,
     hasNecromanciaTarget,
