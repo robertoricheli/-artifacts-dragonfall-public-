@@ -202,7 +202,8 @@ function planOnEnterImpl(state, casterIdx, fieldIdx) {
     if (!caster?.onEnter)
         return { ok: true, mode: "none" };
     // Instantânea só na 1ª entrada em qualquer campo (Troca Injusta não reativa).
-    if (caster.onEnterConsumed)
+    // Exceção one-shot: mimicChainPending após IMITAR (habilidade copiada ainda não resolveu).
+    if (caster.onEnterConsumed && !caster.mimicChainPending)
         return { ok: true, mode: "none" };
     const key = caster.onEnter;
     const ctx = R()?.summonContextForPlayer(state, casterIdx) || {};
@@ -246,8 +247,10 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
     const caster = state.players[casterIdx]?.field?.[fieldIdx];
     if (!caster?.onEnter)
         return { ok: true, state, events };
-    if (caster.onEnterConsumed)
+    if (caster.onEnterConsumed && !caster.mimicChainPending)
         return { ok: true, state, events };
+    if (caster.mimicChainPending)
+        caster.mimicChainPending = false;
     if (caster.silenced)
         return { ok: true, state, events };
     const enteringChamp = caster;
@@ -662,6 +665,9 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             caster.mimicOnDestroy = caster.onDestroy;
             caster.mimicOnEnter = ally.onEnter;
             caster.mimicConstantEffect = copiedConstant;
+            // One-shot: permite plan/apply da habilidade copiada após IMITAR.
+            if (ally.onEnter && ally.onEnter !== "imitar")
+                caster.mimicChainPending = true;
             markOnEnterUsed(state, casterIdx, key);
             events.push({
                 type: "IMITAR", casterIdx, fieldIdx, allyP: casterIdx, allyI: ti,

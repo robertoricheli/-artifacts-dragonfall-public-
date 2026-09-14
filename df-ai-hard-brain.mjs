@@ -795,19 +795,25 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     if (!field.length) return null;
     let idx = 0;
     let best = -1;
+    let found = false;
     field.forEach((c, i) => {
       if (!c) return;
+      // Bastion: não aplicar Proteção em quem já está protegido.
+      if (ultType === "targetAllyShield" && (c.shielded || c.shieldedPermanent)) return;
       const pw = c.currentPower ?? c.power ?? 0;
       if (ultType === "targetAllyShield") {
-        if (best < 0 || pw < best) {
+        if (!found || pw < best) {
           best = pw;
           idx = i;
+          found = true;
         }
       } else if (pw > best) {
         best = pw;
         idx = i;
+        found = true;
       }
     });
+    if (!found) return null;
     return { ...base, targetP: seat, targetI: idx };
   }
   if (ultType === "drawCard") {
