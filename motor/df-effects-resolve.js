@@ -24,6 +24,86 @@ function markChampOnEnterConsumed(champ) {
     if (champ && typeof champ === "object")
         champ.onEnterConsumed = true;
 }
+function isApodrecidaCard(c) {
+    return !!(c && (c.name === "APODRECIDA" || c.talentEffect === "apodrecidaDescarte"));
+}
+function makeApodrecidaInstance() {
+    const def = (D()?.cardDefs || []).find((c) => c.name === "APODRECIDA");
+    const base = def
+        ? { ...def }
+        : {
+            name: "APODRECIDA",
+            power: 0,
+            category: "talent",
+            abilityType: "talent",
+            abilityName: "Apodrecida",
+            abilityDesc: "Carta Apodrecida. Descarte-a!",
+            talentEffect: "apodrecidaDescarte",
+            hidden: true,
+            composedFace: true,
+        };
+    return {
+        ...base,
+        uid: `apd-${Date.now()}-${Math.floor(Math.random() * 1e9)}`,
+        currentPower: 0,
+        power: 0,
+    };
+}
+/**
+ * Contador único na vítima (podridaoHits). Máx. 2 aplicações (campeão ou talento).
+ * Transforma até 5 cartas do baralho em APODRECIDA.
+ */
+function applyPodridaoToEnemyDeck(state, enemyIdx, rng = Math.random) {
+    const enemy = state.players?.[enemyIdx];
+    if (!enemy) {
+        return { count: 0, fizzled: true, reason: "no_enemy", names: [], podridaoHits: 0 };
+    }
+    const hits = enemy.podridaoHits | 0;
+    if (hits >= 2) {
+        return {
+            count: 0,
+            fizzled: true,
+            reason: "podridao_cap",
+            names: [],
+            podridaoHits: hits,
+        };
+    }
+    const deck = enemy.deck || [];
+    enemy.deck = deck;
+    const eligibleIdx = [];
+    deck.forEach((c, di) => {
+        if (c && !isApodrecidaCard(c))
+            eligibleIdx.push(di);
+    });
+    enemy.podridaoHits = hits + 1;
+    if (!eligibleIdx.length) {
+        return {
+            count: 0,
+            fizzled: true,
+            reason: "no_eligible",
+            names: [],
+            podridaoHits: enemy.podridaoHits,
+        };
+    }
+    for (let k = eligibleIdx.length - 1; k > 0; k--) {
+        const j = Math.floor(rng() * (k + 1));
+        [eligibleIdx[k], eligibleIdx[j]] = [eligibleIdx[j], eligibleIdx[k]];
+    }
+    const pickCount = Math.min(5, eligibleIdx.length);
+    const names = [];
+    for (const di of eligibleIdx.slice(0, pickCount)) {
+        const prev = deck[di];
+        names.push(prev?.name || "?");
+        deck[di] = makeApodrecidaInstance();
+    }
+    return {
+        count: names.length,
+        fizzled: names.length === 0,
+        reason: names.length ? null : "no_eligible",
+        names,
+        podridaoHits: enemy.podridaoHits,
+    };
+}
 function swapFieldChamps(state, casterIdx, casterFieldIdx, enemyP, enemyI) {
     const a = state.players[casterIdx].field[casterFieldIdx];
     const e = state.players[enemyP].field[enemyI];
@@ -864,49 +944,18 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             }
             if (enemyIdx < 0)
                 break;
-            const deck = state.players[enemyIdx]?.deck || [];
-            const MAX_PODRIDAO = 12;
-            const currentPodre = deck.filter((c) => c?.podridao).length;
-            const slots = Math.max(0, MAX_PODRIDAO - currentPodre);
-            const eligibleIdx = [];
-            deck.forEach((c, di) => {
-                if (c && !c.podridao)
-                    eligibleIdx.push(di);
-            });
             markOnEnterUsed(state, casterIdx, key);
-            if (!slots || !eligibleIdx.length) {
-                events.push({
-                    type: "PODRIDAO",
-                    casterIdx,
-                    fieldIdx,
-                    enemyIdx,
-                    count: 0,
-                    fizzled: true,
-                    visual: "podridao",
-                });
-                break;
-            }
-            const pickCount = Math.min(4, slots, eligibleIdx.length);
-            for (let k = eligibleIdx.length - 1; k > 0; k--) {
-                const j = Math.floor(rng() * (k + 1));
-                [eligibleIdx[k], eligibleIdx[j]] = [eligibleIdx[j], eligibleIdx[k]];
-            }
-            const pickedIdx = eligibleIdx.slice(0, pickCount);
-            const contaminated = [];
-            for (const di of pickedIdx) {
-                const card = deck[di];
-                if (!card || card.podridao)
-                    continue;
-                card.podridao = true;
-                contaminated.push(card.name);
-            }
+            const result = applyPodridaoToEnemyDeck(state, enemyIdx, rng);
             events.push({
                 type: "PODRIDAO",
                 casterIdx,
                 fieldIdx,
                 enemyIdx,
-                count: contaminated.length,
-                names: contaminated,
+                count: result.count,
+                names: result.names,
+                fizzled: !!result.fizzled,
+                reason: result.reason,
+                podridaoHits: result.podridaoHits,
                 visual: "podridao",
             });
             break;
@@ -1267,6 +1316,23 @@ function applyTalentFromHand(state, pIdx, handIdx) {
     if (cost > 0)
         p.actions = Math.max(0, (p.actions ?? 0) - cost);
     const [removed] = p.hand.splice(handIdx, 1);
+    // APODRECIDA: vai para activeTalent (UI canto SE) e resolve sem efeito.
+    if (removed?.name === "APODRECIDA" || removed?.talentEffect === "apodrecidaDescarte") {
+        state.activeTalent = { ownerP: pIdx, card: removed, spentActions: 0 };
+        return {
+            ok: true,
+            state,
+            events: [{
+                    type: "TALENT_STARTED",
+                    playerId: pIdx,
+                    handIdx,
+                    talentEffect: "apodrecidaDescarte",
+                    card: removed.name,
+                    visual: "apodrecida_play",
+                }],
+            card: removed,
+        };
+    }
     if (removed.podridao) {
         delete removed.podridao;
         p.discard = p.discard || [];
@@ -1704,40 +1770,27 @@ function applyTalentAuto(state, pIdx) {
                 clearActive();
                 break;
             }
-            const deck = state.players[enemyIdx]?.deck || [];
-            const MAX_PODRIDAO = 12;
-            const currentPodre = deck.filter((c) => c?.podridao).length;
-            const slots = Math.max(0, MAX_PODRIDAO - currentPodre);
-            const eligibleIdx = [];
-            deck.forEach((c, di) => {
-                if (c && !c.podridao)
-                    eligibleIdx.push(di);
-            });
-            if (!slots || !eligibleIdx.length) {
-                events.push({
-                    type: "TALENT_PODRIDAO",
-                    playerId: pIdx, enemyIdx, count: 0, fizzled: true, visual: "podridao",
-                });
-                clearActive();
-                break;
-            }
-            const pickCount = Math.min(4, slots, eligibleIdx.length);
-            for (let k = eligibleIdx.length - 1; k > 0; k--) {
-                const j = Math.floor(Math.random() * (k + 1));
-                [eligibleIdx[k], eligibleIdx[j]] = [eligibleIdx[j], eligibleIdx[k]];
-            }
-            const contaminated = [];
-            for (const di of eligibleIdx.slice(0, pickCount)) {
-                const card = deck[di];
-                if (!card || card.podridao)
-                    continue;
-                card.podridao = true;
-                contaminated.push(card.name);
-            }
+            const result = applyPodridaoToEnemyDeck(state, enemyIdx, Math.random);
             events.push({
                 type: "TALENT_PODRIDAO",
-                playerId: pIdx, enemyIdx,
-                count: contaminated.length, names: contaminated, visual: "podridao",
+                playerId: pIdx,
+                enemyIdx,
+                count: result.count,
+                names: result.names,
+                fizzled: !!result.fizzled,
+                reason: result.reason,
+                podridaoHits: result.podridaoHits,
+                visual: "podridao",
+            });
+            clearActive();
+            break;
+        }
+        case "apodrecidaDescarte": {
+            events.push({
+                type: "APODRECIDA_DISCARD",
+                playerId: pIdx,
+                cardName: at.card?.name || "APODRECIDA",
+                visual: "apodrecida_discard",
             });
             clearActive();
             break;
@@ -1993,6 +2046,9 @@ const DfEffectsResolve = {
     applyTalentTarget,
     applyTalentAuto,
     applyTalentDiscard,
+    applyPodridaoToEnemyDeck,
+    isApodrecidaCard,
+    makeApodrecidaInstance,
     swapFieldChamps,
     inferConstantOnDestroy,
     bootstrapResolveRegistry,

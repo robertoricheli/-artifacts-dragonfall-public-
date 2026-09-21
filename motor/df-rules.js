@@ -50,7 +50,7 @@ function championSummonCost(c) {
  * jogados mesmo sem ações restantes.
  */
 function talentPlayCost(c) {
-    if (c?.podridao)
+    if (c?.podridao || c?.name === "APODRECIDA" || c?.talentEffect === "apodrecidaDescarte")
         return 0;
     return c?.currentPower ?? c?.power ?? 0;
 }
