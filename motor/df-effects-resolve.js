@@ -121,6 +121,9 @@ function swapFieldChamps(state, casterIdx, casterFieldIdx, enemyP, enemyI) {
     // Troca não é nova entrada — ambos já tiveram (ou terão) onEnter na 1ª invocação.
     markChampOnEnterConsumed(a);
     markChampOnEnterConsumed(e);
+    const aSlot = a.slot;
+    a.slot = e.slot;
+    e.slot = aSlot;
     state.players[casterIdx].field[casterFieldIdx] = e;
     state.players[enemyP].field[enemyI] = a;
     return true;
@@ -1562,6 +1565,9 @@ function applyTalentTarget(state, pIdx, targetP, targetI, extra) {
                 ch.guerraBuff = false;
                 ch.guerraBuffTurns = 0;
             }
+            const allySlot = target.slot;
+            target.slot = enemy.slot;
+            enemy.slot = allySlot;
             state.players[pIdx].field[ti] = enemy;
             state.players[ep].field[ei] = target;
             events.push({

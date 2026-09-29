@@ -120,6 +120,7 @@ function bounceChampionToHand(state, ownerP, fieldIdx) {
     if (!champ)
         return null;
     owner.field.splice(fieldIdx, 1);
+    delete champ.slot;
     const base = champ.basePower ?? champ.power ?? champ.currentPower ?? 0;
     champ.currentPower = base;
     champ.basePower = base;
@@ -679,6 +680,109 @@ function canOnEnterResolve(state, pIdx, card, ctx) {
         }
     }
     return { ok: true };
+}
+/** Espaços fixos do campo (0 = esquerda … 5 = direita). */
+const FIELD_SLOT_COUNT = 6;
+/** Ordem padrão de ocupação: os dois espaços do centro primeiro. */
+const SLOT_ORDER_CENTER_OUT = [2, 3, 1, 4, 0, 5];
+function isValidFieldSlot(slot) {
+    return Number.isInteger(slot) && slot >= 0 && slot < FIELD_SLOT_COUNT;
+}
+function usedFieldSlots(field) {
+    const used = new Set();
+    (field || []).forEach((c) => {
+        if (c && isValidFieldSlot(c.slot))
+            used.add(c.slot);
+    });
+    return used;
+}
+/** Espaços livres (ordem esquerda → direita). */
+function freeFieldSlots(field) {
+    const used = usedFieldSlots(field);
+    const out = [];
+    for (let s = 0; s < FIELD_SLOT_COUNT; s++) {
+        if (!used.has(s))
+            out.push(s);
+    }
+    return out;
+}
+/** Primeiro espaço livre do centro para fora; -1 se o campo estiver cheio. */
+function pickDefaultFieldSlot(field) {
+    const used = usedFieldSlots(field);
+    for (const s of SLOT_ORDER_CENTER_OUT) {
+        if (!used.has(s))
+            return s;
+    }
+    return -1;
+}
+/**
+ * Garante `slot` único e válido em cada campeão, sem reordenar o array.
+ * Campeões sem slot (tokens, estado antigo) ocupam um espaço livre entre os
+ * vizinhos do array; campo inteiro sem slots é centralizado.
+ */
+function ensureFieldSlots(field) {
+    if (!Array.isArray(field))
+        return field;
+    const cards = field.filter(Boolean);
+    if (!cards.length)
+        return field;
+    if (cards.every((c) => !isValidFieldSlot(c.slot))) {
+        const n = Math.min(cards.length, FIELD_SLOT_COUNT);
+        const start = Math.floor((FIELD_SLOT_COUNT - n) / 2);
+        cards.forEach((c, k) => {
+            c.slot = k < FIELD_SLOT_COUNT ? start + k : -1;
+        });
+        return field;
+    }
+    const used = new Set();
+    const pending = new Set();
+    field.forEach((c, i) => {
+        if (!c)
+            return;
+        if (isValidFieldSlot(c.slot) && !used.has(c.slot))
+            used.add(c.slot);
+        else
+            pending.add(i);
+    });
+    if (!pending.size)
+        return field;
+    for (let i = 0; i < field.length; i++) {
+        if (!pending.has(i))
+            continue;
+        const c = field[i];
+        let lo = -1;
+        for (let j = i - 1; j >= 0; j--) {
+            if (field[j] && !pending.has(j) && isValidFieldSlot(field[j].slot)) {
+                lo = field[j].slot;
+                break;
+            }
+        }
+        let hi = FIELD_SLOT_COUNT;
+        for (let j = i + 1; j < field.length; j++) {
+            if (field[j] && !pending.has(j) && isValidFieldSlot(field[j].slot)) {
+                hi = field[j].slot;
+                break;
+            }
+        }
+        let pick = SLOT_ORDER_CENTER_OUT.find((s) => !used.has(s) && s > lo && s < hi);
+        if (pick == null)
+            pick = SLOT_ORDER_CENTER_OUT.find((s) => !used.has(s));
+        c.slot = pick == null ? -1 : pick;
+        if (pick != null)
+            used.add(pick);
+        pending.delete(i);
+    }
+    return field;
+}
+/** Índice do array para inserir um campeão no `slot` (array ordenado por slot). */
+function insertIndexForSlot(field, slot) {
+    const arr = field || [];
+    for (let i = 0; i < arr.length; i++) {
+        const s = arr[i]?.slot;
+        if (isValidFieldSlot(s) && s > slot)
+            return i;
+    }
+    return arr.length;
 }
 /** Índice padrão ao inserir no campo (fileira simétrica: centro → esq → dir…). */
 function defaultSummonInsertIndex(fieldLen) {
@@ -1520,6 +1624,13 @@ const DfRules = {
     hasTransformarBichinhoTarget,
     summonContextForPlayer,
     defaultSummonInsertIndex,
+    FIELD_SLOT_COUNT,
+    SLOT_ORDER_CENTER_OUT,
+    isValidFieldSlot,
+    freeFieldSlots,
+    pickDefaultFieldSlot,
+    ensureFieldSlots,
+    insertIndexForSlot,
     canOnEnterResolve,
     canSummon,
     listSummonableHandIndices,

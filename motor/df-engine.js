@@ -407,10 +407,29 @@ export function applyAction(state, action, ctx = {}) {
                 });
             }
             const field = p.field;
-            const insertIdx = a.insertIdx != null
-                ? a.insertIdx
-                : R.defaultSummonInsertIndex(field.length);
-            field.splice(Math.min(insertIdx, field.length), 0, champ);
+            if (R.ensureFieldSlots) {
+                R.ensureFieldSlots(field);
+                // Espaço pedido inválido/ocupado → padrão centro-para-fora (não rejeita a jogada).
+                const wanted = a.slot;
+                const slot = R.isValidFieldSlot?.(wanted) && R.freeFieldSlots?.(field).includes(wanted)
+                    ? wanted
+                    : (a.insertIdx != null ? null : R.pickDefaultFieldSlot?.(field));
+                if (slot != null && slot >= 0) {
+                    champ.slot = slot;
+                    field.splice(R.insertIndexForSlot(field, slot), 0, champ);
+                }
+                else {
+                    delete champ.slot;
+                    field.splice(Math.min(a.insertIdx, field.length), 0, champ);
+                    R.ensureFieldSlots(field);
+                }
+            }
+            else {
+                const insertIdx = a.insertIdx != null
+                    ? a.insertIdx
+                    : R.defaultSummonInsertIndex(field.length);
+                field.splice(Math.min(insertIdx, field.length), 0, champ);
+            }
             if (!a.freeAction)
                 p.actions = p.actions - R.championSummonCost(card);
             const fIdx = field.indexOf(champ);

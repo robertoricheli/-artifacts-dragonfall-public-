@@ -217,6 +217,9 @@ function performTrickerySwap(state, casterIdx, allyI, enemyP, enemyI) {
         ch.guerraBuff = false;
         ch.guerraBuffTurns = 0;
     }
+    const aSlot = a.slot;
+    a.slot = e.slot;
+    e.slot = aSlot;
     state.players[casterIdx].field[allyI] = e;
     state.players[enemyP].field[enemyI] = a;
 }
