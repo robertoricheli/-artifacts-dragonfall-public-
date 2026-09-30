@@ -36,6 +36,7 @@ import {
   REFRESH_COST,
   MARKET_ROTATION_MS,
 } from "./df-market.mjs";
+import { ensureJourneyState, claimLevel } from "./df-journey.mjs";
 
 export { initAuthStore, getAuthStoreMode };
 
@@ -51,7 +52,8 @@ function getCardDefs() {
  * Devolve true se o jogador foi alterado (precisa persistir).
  */
 function ensureCollection(player) {
-  if (Array.isArray(player.ownedCards) && player.ownedCards.length) return false;
+  const journeyChanged = ensureJourneyState(player);
+  if (Array.isArray(player.ownedCards) && player.ownedCards.length) return journeyChanged;
   const owned = rollStarter(getCardDefs());
   player.ownedCards = owned;
   player.customDecks = starterDecks(owned);
@@ -184,6 +186,8 @@ function playerPublic(p) {
     coins: Math.max(0, p.coins | 0),
     ownedCards: Array.isArray(p.ownedCards) ? p.ownedCards : null,
     collectionEpoch: p.collectionEpoch | 0,
+    ownedHeroes: Array.isArray(p.ownedHeroes) ? p.ownedHeroes : null,
+    claimedLevels: Array.isArray(p.claimedLevels) ? p.claimedLevels : null,
   };
 }
 
@@ -278,6 +282,8 @@ async function authRegister(req, body) {
     ownedCards: null,
     market: null,
     collectionEpoch: 0,
+    ownedHeroes: null,
+    claimedLevels: null,
     profileRevision: 0,
     createdAt: now,
     updatedAt: now,
@@ -631,6 +637,35 @@ async function authMarketBuy(req, body) {
   return saveMarketChange(player, res, { bought: name, slot: res.slot });
 }
 
+/** Jornada do Jogador: resgata a recompensa de um nível já alcançado. */
+async function authJourneyClaim(req, body) {
+  const limited = allowAuthedAttempt(req);
+  if (limited) return limited;
+  const authed = await authFromHeader(req);
+  if (!authed) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  const level = Number(body?.level);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const player = attempt === 0 ? await withCollection(authed) : await withCollection(await getPlayerById(authed.id));
+    if (!player) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+    const playerLevel = statsFromTotalXp(player.xpTotal || 0).level;
+    const res = claimLevel(player, level, playerLevel);
+    if (!res.ok) {
+      return { status: 400, data: { ok: false, error: res.error, player: playerPublic(player) } };
+    }
+    player.claimedLevels = res.claimedLevels;
+    player.ownedHeroes = res.ownedHeroes;
+    player.coins = res.coins;
+    const r = await persistPlayer(player, { expectedRevision: Number(player.profileRevision ?? 0) });
+    if (r.ok) {
+      return { status: 200, data: { ok: true, reward: res.reward, player: playerPublic(r.player) } };
+    }
+    if (r.error !== "PROFILE_CONFLICT") {
+      return { status: 500, data: { ok: false, error: r.error || "SAVE_FAILED" } };
+    }
+  }
+  return { status: 409, data: { ok: false, error: "PROFILE_CONFLICT" } };
+}
+
 async function authLogout(req) {
   const tok = bearerToken(req);
   if (tok) await deleteSessionRecord(tok);
@@ -708,6 +743,7 @@ export async function handleAuthHttp(req, res) {
   else if (req.method === "POST" && pathname === "/auth/market") result = await authMarket(fakeReq);
   else if (req.method === "POST" && pathname === "/auth/market/refresh") result = await authMarketRefresh(fakeReq);
   else if (req.method === "POST" && pathname === "/auth/market/buy") result = await authMarketBuy(fakeReq, body);
+  else if (req.method === "POST" && pathname === "/auth/journey/claim") result = await authJourneyClaim(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/logout") result = await authLogout(fakeReq);
   else {
     sendAuthJson(res, 404, { ok: false, error: "NOT_FOUND" });
@@ -764,6 +800,11 @@ export function registerAuthRoutes(app) {
 
   app.post("/auth/market/buy", async (req, res) => {
     const r = await authMarketBuy(req, req.body || {});
+    res.status(r.status).json(r.data);
+  });
+
+  app.post("/auth/journey/claim", async (req, res) => {
+    const r = await authJourneyClaim(req, req.body || {});
     res.status(r.status).json(r.data);
   });
 
