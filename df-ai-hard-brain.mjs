@@ -789,7 +789,29 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     }
     return { ...base, targetP: pool[0].p, targetI: pool[0].i };
   }
-  if (ultType === "targetAlly" || ultType === "targetAllyShield" || ultType === "targetAllyFreeAttack") {
+  if (ultType === "targetAllyShield") {
+    // Bastion: Proteção em todos os aliados de Poder 1 — usa no fim do turno.
+    if (!forceEndOfTurn) return null;
+    const anyP1 = (pl.field || []).some((c) => c
+      && (c.currentPower ?? c.power) === 1 && !c.shielded && !c.shieldedPermanent);
+    if (!anyP1) return null;
+    return { ...base, targetP: null, targetI: null };
+  }
+  if (ultType === "incinerate") {
+    const pool = [];
+    for (let p = 0; p < (state.playersCount || 2); p++) {
+      if (p === seat) continue;
+      (state.players[p]?.field || []).forEach((c, i) => {
+        if (!c || c.barrier || c.barrierPermanent || c.burning || c.pulled) return;
+        const pw = c.currentPower ?? c.power ?? 0;
+        if (pw >= 2) pool.push({ p, i, pw });
+      });
+    }
+    if (!pool.length) return null;
+    pool.sort((a, b) => b.pw - a.pw);
+    return { ...base, targetP: pool[0].p, targetI: pool[0].i };
+  }
+  if (ultType === "targetAlly" || ultType === "targetAllyFreeAttack") {
     if (ultType === "targetAllyFreeAttack" && !forceEndOfTurn) return null;
     const field = pl.field || [];
     if (!field.length) return null;
@@ -798,16 +820,8 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     let found = false;
     field.forEach((c, i) => {
       if (!c) return;
-      // Bastion: não aplicar Proteção em quem já está protegido.
-      if (ultType === "targetAllyShield" && (c.shielded || c.shieldedPermanent)) return;
       const pw = c.currentPower ?? c.power ?? 0;
-      if (ultType === "targetAllyShield") {
-        if (!found || pw < best) {
-          best = pw;
-          idx = i;
-          found = true;
-        }
-      } else if (pw > best) {
+      if (pw > best) {
         best = pw;
         idx = i;
         found = true;

@@ -16,12 +16,13 @@ function data() {
 export function getMaxUltimateUses(heroId) {
     const four = new Set([
         "vaughan", "linguarudo", "pirate", "euravia",
-        "ironGuard", "thor",
+        "thor",
     ]);
     const three = new Set([
         "iceWitch", "princesaSlime", "jekiro", "sangueDragao", "gancho",
         "paladino", "alquimista", "valmont", "tecnomago",
         "quimera", "hercules", "sinistrela", "estrelar",
+        "ironGuard", "diablos", "tristana",
     ]);
     if (four.has(heroId))
         return 4;
@@ -40,6 +41,30 @@ function heroDef(heroId) {
 }
 function allyCanGainPower(c) {
     return !!c;
+}
+function isPower1Champ(c) {
+    return !!c && (c.currentPower ?? c.power) === 1;
+}
+/** Tristana (Reutilização): aliado com Instantânea que teria efeito válido se entrasse agora. */
+export function canReuseInstant(state, pid, fieldIdx) {
+    const c = state.players[pid]?.field?.[fieldIdx];
+    if (!c || c.silenced || c.abilityType !== "instant" || !c.onEnter)
+        return false;
+    const sim = clone(state);
+    const sc = sim.players[pid].field[fieldIdx];
+    sc.onEnterConsumed = false;
+    const used = sim.players[pid].onEnterUsedThisTurn;
+    if (Array.isArray(used)) {
+        sim.players[pid].onEnterUsedThisTurn = used.filter((k) => k !== sc.onEnter);
+    }
+    const E = globalThis.DfEffects;
+    if (E?.planOnEnter) {
+        const plan = E.planOnEnter(sim, pid, fieldIdx) || {};
+        return !!plan.ok && plan.mode !== "none" && plan.mode !== "blocked";
+    }
+    const R = rules();
+    const ctx = R.summonContextForPlayer?.(sim, pid) || {};
+    return R.canOnEnterResolve ? !!R.canOnEnterResolve(sim, pid, sc, { ...ctx, fieldIdx }).ok : true;
 }
 function cannotReceiveInvestida(c) {
     const R = rules();
@@ -450,9 +475,28 @@ export function validateUltimatePlay(state, action) {
                 return { ok: false, code: "NO_ALLY_ABSORBER" };
             }
             break;
+        case "incinerate":
+            if (tp == null || ti == null)
+                return { ok: false, code: "TARGET_REQUIRED" };
+            if (tp === pid)
+                return { ok: false, code: "BAD_TARGET" };
+            if (!state.players[tp]?.field?.[ti])
+                return { ok: false, code: "INVALID_TARGET" };
+            break;
+        case "targetAllyShield":
+            if (!field.some((c) => isPower1Champ(c)))
+                return { ok: false, code: "NO_POWER1_ALLY" };
+            break;
+        case "reuseInstant":
+            if (tp == null || ti == null)
+                return { ok: false, code: "TARGET_REQUIRED" };
+            if (tp !== pid)
+                return { ok: false, code: "BAD_TARGET" };
+            if (!canReuseInstant(state, pid, ti))
+                return { ok: false, code: "INVALID_TARGET" };
+            break;
         case "targetAlly":
         case "targetAllyFreeAttack":
-        case "targetAllyShield":
         case "potion":
             if (tp == null || ti == null)
                 return { ok: false, code: "TARGET_REQUIRED" };
@@ -565,10 +609,34 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
             break;
         }
         case "targetAllyShield": {
+            pl.field.forEach((c, i) => {
+                if (!isPower1Champ(c))
+                    return;
+                c.shielded = true;
+                c.shieldedTurns = 1;
+                events.push({ type: "SHIELD", targetP: pid, targetI: i });
+            });
+            break;
+        }
+        case "incinerate": {
             const t = next.players[tp].field[ti];
-            t.shielded = true;
-            t.shieldedTurns = 1;
-            events.push({ type: "SHIELD", targetP: tp, targetI: ti });
+            if (t.barrier || t.barrierPermanent) {
+                events.push({ type: "INCINERATE", targetP: tp, targetI: ti, card: t.name, immune: true, applied: false });
+                break;
+            }
+            t.burning = true;
+            t.burningTurns = 4;
+            t.burningByP = pid;
+            events.push({ type: "INCINERATE", targetP: tp, targetI: ti, card: t.name, turns: 4, applied: true });
+            break;
+        }
+        case "reuseInstant": {
+            const c = pl.field[ti];
+            c.onEnterConsumed = false;
+            const used = pl.onEnterUsedThisTurn;
+            if (Array.isArray(used))
+                pl.onEnterUsedThisTurn = used.filter((k) => k !== c.onEnter);
+            events.push({ type: "REUSE_INSTANT", targetP: pid, targetI: ti, onEnter: c.onEnter, card: c.name });
             break;
         }
         case "drawCard":
@@ -803,6 +871,7 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
 export const DfUltimateResolve = Object.freeze({
     getMaxUltimateUses,
     getEffectiveMaxUltimateUses,
+    canReuseInstant,
     validateUltimatePlay,
     applyUltimatePlay,
 });

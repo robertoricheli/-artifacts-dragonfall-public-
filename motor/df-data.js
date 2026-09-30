@@ -17,7 +17,7 @@ const heroDefs = [
         ultimateDesc: 'Compre uma carta imediatamente (ação livre). Pode usar até 4 vezes.',
         ultimateType: 'drawCard' },
     { id: 'ironGuard', name: 'Bastion', emoji: '🛡️', image: 'heroes/bastion.png', ultimateName: 'Proteção',
-        ultimateDesc: 'Escolha um campeão aliado. Ele não pode ser atacado por uma rodada. Até 4 usos.',
+        ultimateDesc: 'Todos os seus Campeões com Poder 1 em campo ficam com Proteção (não podem ser atacados) por 1 rodada. Até 3 usos.',
         ultimateType: 'targetAllyShield' },
     { id: 'princesaSlime', name: 'Princesa Slime', emoji: '🧪', image: 'heroes/princesa_slime.png', ultimateName: 'Travessura',
         ultimateDesc: 'Escolha um Campeão aliado de Poder 1. Ele troca de lugar com um Campeão adversário (prioriza Poder 2, depois 3+, depois 1). Até 2 usos.',
@@ -57,7 +57,13 @@ const heroDefs = [
         ultimateType: 'scareReturn' },
     { id: 'estrelar', name: 'Estrelar', emoji: '⭐', image: 'heroes/estrelar.png', ultimateName: 'Cometa Estrelar',
         ultimateDesc: 'Um cometa cai no campo: TODOS os Campeões (aliados e adversários) perdem 1 de Poder. Você só ganha PV pelos Campeões adversários destruídos — destruir os seus próprios não dá PV. Até 3 usos.',
-        ultimateType: 'cometStarfall' }
+        ultimateType: 'cometStarfall' },
+    { id: 'diablos', name: 'Diablos', emoji: '😈', image: 'heroes/diablos.png', ultimateName: 'Incinerar',
+        ultimateDesc: 'Escolha um Campeão adversário. Ele fica Em Chamas por 4 rodadas, perdendo 1 ponto de Poder por rodada (igual à Habilidade Incendiar). Até 3 usos.',
+        ultimateType: 'incinerate' },
+    { id: 'tristana', name: 'Tristana', emoji: '🔁', image: 'heroes/tristana.png', ultimateName: 'Reutilização',
+        ultimateDesc: 'Escolha um Campeão aliado com Habilidade Instantânea. Ele usa a Habilidade Instantânea de novo, como se tivesse acabado de entrar em campo. Até 3 usos.',
+        ultimateType: 'reuseInstant' }
 ];
 const cardDefs = [
     { name: "CAVALEIRO DA NOITE", power: 1, category: "champion", abilityType: "constant", abilityName: "Sem Honra",
