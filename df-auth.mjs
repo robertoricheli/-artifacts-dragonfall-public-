@@ -24,8 +24,54 @@ import {
   recordActivitySync,
   recordMatchXpEvent,
 } from "./df-analytics.mjs";
+import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
+import {
+  rollStarter,
+  starterDecks,
+  ensureMarket,
+  buyCard,
+  refreshMarket,
+  rewardFor,
+  CARD_PRICE,
+  REFRESH_COST,
+  MARKET_ROTATION_MS,
+} from "./df-market.mjs";
 
 export { initAuthStore, getAuthStoreMode };
+
+let cardDefsCache = null;
+function getCardDefs() {
+  if (!cardDefsCache) cardDefsCache = bootDragonfallEngine().DfData.cardDefs || [];
+  return cardDefsCache;
+}
+
+/**
+ * Coleção por conta: toda conta (nova ou antiga) sem `ownedCards` recebe as 20 cartas
+ * iniciais; baralhos antigos são substituídos pelo Baralho 1 com essas cartas.
+ * Devolve true se o jogador foi alterado (precisa persistir).
+ */
+function ensureCollection(player) {
+  if (Array.isArray(player.ownedCards) && player.ownedCards.length) return false;
+  const owned = rollStarter(getCardDefs());
+  player.ownedCards = owned;
+  player.customDecks = starterDecks(owned);
+  player.coins = Math.max(0, player.coins | 0);
+  player.market = null;
+  player.collectionEpoch = (player.collectionEpoch | 0) + 1;
+  return true;
+}
+
+async function withCollection(player) {
+  if (!player || !ensureCollection(player)) return player;
+  const r = await persistPlayer(player, { expectedRevision: Number(player.profileRevision ?? 0) });
+  if (r.ok) return r.player;
+  const fresh = await getPlayerById(player.id);
+  if (fresh && ensureCollection(fresh)) {
+    const r2 = await persistPlayer(fresh, { expectedRevision: Number(fresh.profileRevision ?? 0) });
+    return r2.ok ? r2.player : fresh;
+  }
+  return fresh || player;
+}
 
 const SESSION_DAYS = 90;
 const MAX_SESSIONS_PER_PLAYER = 8;
@@ -135,6 +181,9 @@ function playerPublic(p) {
     xpInLevel: xp.xpInLevel,
     xpToNext: xp.xpToNext,
     totalXp: xp.totalXp,
+    coins: Math.max(0, p.coins | 0),
+    ownedCards: Array.isArray(p.ownedCards) ? p.ownedCards : null,
+    collectionEpoch: p.collectionEpoch | 0,
   };
 }
 
@@ -225,10 +274,15 @@ async function authRegister(req, body) {
     hubBackgroundId: null,
     customDecks: null,
     xpTotal: 0,
+    coins: 0,
+    ownedCards: null,
+    market: null,
+    collectionEpoch: 0,
     profileRevision: 0,
     createdAt: now,
     updatedAt: now,
   };
+  ensureCollection(player);
   setPlayerPassword(player, password);
   await insertPlayer(player);
   const token = await createSession(id);
@@ -252,7 +306,7 @@ async function authLogin(req, body) {
     await persistPlayer(player).catch(() => {});
   }
   const token = await createSession(player.id);
-  const fresh = await getPlayerById(player.id);
+  const fresh = await withCollection(await getPlayerById(player.id));
   recordActivity(player.id, "login");
   return { status: 200, data: { ok: true, token, player: playerPublic(fresh || player) } };
 }
@@ -340,13 +394,15 @@ async function authChangePassword(req, body) {
 }
 
 async function authMe(req) {
-  const player = await authFromHeader(req);
-  if (!player) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  const authed = await authFromHeader(req);
+  if (!authed) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  const player = await withCollection(authed);
   recordActivitySync(player.id);
   return { status: 200, data: { ok: true, player: playerPublic(player) } };
 }
 
-function normalizeCustomDecks(raw) {
+function normalizeCustomDecks(raw, ownedCards) {
+  const owned = Array.isArray(ownedCards) && ownedCards.length ? new Set(ownedCards) : null;
   if (!Array.isArray(raw) || raw.length !== 5) {
     return { ok: false, error: "BAD_DECKS" };
   }
@@ -359,7 +415,10 @@ function normalizeCustomDecks(raw) {
     for (let s = 0; s < 24; s++) {
       const c = cardsIn[s];
       if (c == null || c === "") cards.push(null);
-      else cards.push(String(c).trim().slice(0, 80));
+      else {
+        const nm = String(c).trim().slice(0, 80);
+        cards.push(owned && !owned.has(nm) ? null : nm);
+      }
     }
     return { name, cards };
   });
@@ -369,8 +428,9 @@ function normalizeCustomDecks(raw) {
 async function authProfile(req, body) {
   const limited = allowAuthedAttempt(req);
   if (limited) return limited;
-  const player = await authFromHeader(req);
-  if (!player) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  const authed = await authFromHeader(req);
+  if (!authed) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  const player = await withCollection(authed);
 
   const expectedRev = body?.profileRevision != null ? Number(body.profileRevision) : null;
   const currentRev = Number(player.profileRevision ?? 0);
@@ -438,7 +498,7 @@ async function authProfile(req, body) {
   }
 
   if (body.customDecks != null) {
-    const norm = normalizeCustomDecks(body.customDecks);
+    const norm = normalizeCustomDecks(body.customDecks, player.ownedCards);
     if (!norm.ok) {
       return { status: 400, data: { ok: false, error: norm.error } };
     }
@@ -459,25 +519,12 @@ async function authProfile(req, body) {
   return { status: 200, data: { ok: true, player: playerPublic(r.player) } };
 }
 
-const MATCH_XP = {
-  ai: { win: 2, lose: 1 },
-  ai_normal: { win: 2, lose: 1 },
-  ai_hard: { win: 3, lose: 1 },
-  pvp: { win: 5, lose: 2 },
-};
-
-function resolveMatchXpKey(matchType, aiDifficulty) {
-  if (matchType === "pvp") return "pvp";
-  if (matchType !== "ai") return null;
-  if (aiDifficulty === "hard" || matchType === "ai_hard") return "ai_hard";
-  return "ai_normal";
-}
-
 async function authAwardMatchXp(req, body) {
   const limited = allowAuthedAttempt(req);
   if (limited) return limited;
-  const player = await authFromHeader(req);
-  if (!player) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  const authed = await authFromHeader(req);
+  if (!authed) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  const player = await withCollection(authed);
 
   const rawType = body?.matchType;
   const matchType = rawType === "pvp" || rawType === "ai" || rawType === "ai_hard" || rawType === "ai_normal"
@@ -488,11 +535,13 @@ async function authAwardMatchXp(req, body) {
     return { status: 400, data: { ok: false, error: "BAD_MATCH" } };
   }
 
-  const key = resolveMatchXpKey(matchType, body?.aiDifficulty)
-    || (matchType === "pvp" ? "pvp" : "ai_normal");
-  const gain = MATCH_XP[key]?.[outcome] ?? MATCH_XP.ai[outcome];
+  const reward = rewardFor(matchType === "pvp" ? "pvp" : "ai", outcome);
+  const key = reward.key;
+  const gain = reward.xp;
+  const coinsGain = reward.coins;
   const before = statsFromTotalXp(player.xpTotal || 0);
   player.xpTotal = (player.xpTotal || 0) + gain;
+  player.coins = Math.max(0, player.coins | 0) + coinsGain;
   const r = await persistPlayer(player, { expectedRevision: Number(player.profileRevision ?? 0) });
   if (!r.ok) {
     return { status: 409, data: { ok: false, error: r.error, player: playerPublic(r.player) } };
@@ -508,11 +557,78 @@ async function authAwardMatchXp(req, body) {
     data: {
       ok: true,
       gain,
+      coinsGain,
       matchKey: key,
       leveledUp: after.level > before.level,
       player: playerPublic(r.player),
     },
   };
+}
+
+function marketPayload(player, extra = {}) {
+  const m = player.market || { cards: [], dailyAt: Date.now() };
+  return {
+    ok: true,
+    market: {
+      cards: Array.isArray(m.cards) ? m.cards : [],
+      dailyAt: m.dailyAt,
+      nextRotationAt: (m.dailyAt || Date.now()) + MARKET_ROTATION_MS,
+    },
+    price: CARD_PRICE,
+    refreshCost: REFRESH_COST,
+    coins: Math.max(0, player.coins | 0),
+    player: playerPublic(player),
+    ...extra,
+  };
+}
+
+/** Carrega jogador autenticado com coleção e mercado válidos (rotação 24h). */
+async function marketPlayer(req) {
+  const limited = allowAuthedAttempt(req);
+  if (limited) return { error: limited };
+  const authed = await authFromHeader(req);
+  if (!authed) return { error: { status: 401, data: { ok: false, error: "UNAUTHORIZED" } } };
+  let player = await withCollection(authed);
+  const em = ensureMarket(player.market, getCardDefs(), player.ownedCards);
+  if (em.changed) {
+    player.market = em.market;
+    const r = await persistPlayer(player, { expectedRevision: Number(player.profileRevision ?? 0) });
+    if (!r.ok) return { error: { status: 409, data: { ok: false, error: r.error || "SAVE_FAILED" } } };
+    player = r.player;
+  }
+  return { player };
+}
+
+async function authMarket(req) {
+  const { player, error } = await marketPlayer(req);
+  if (error) return error;
+  return { status: 200, data: marketPayload(player) };
+}
+
+async function saveMarketChange(player, res, extra) {
+  player.coins = res.coins;
+  player.market = res.market;
+  if (res.ownedCards) player.ownedCards = res.ownedCards;
+  const r = await persistPlayer(player, { expectedRevision: Number(player.profileRevision ?? 0) });
+  if (!r.ok) return { status: 409, data: { ok: false, error: r.error || "SAVE_FAILED" } };
+  return { status: 200, data: marketPayload(r.player, extra) };
+}
+
+async function authMarketRefresh(req) {
+  const { player, error } = await marketPlayer(req);
+  if (error) return error;
+  const res = refreshMarket(player, getCardDefs());
+  if (!res.ok) return { status: 400, data: { ...marketPayload(player), ok: false, error: res.error } };
+  return saveMarketChange(player, res);
+}
+
+async function authMarketBuy(req, body) {
+  const { player, error } = await marketPlayer(req);
+  if (error) return error;
+  const name = String(body?.card || "").trim();
+  const res = buyCard(player, name, getCardDefs());
+  if (!res.ok) return { status: 400, data: { ...marketPayload(player), ok: false, error: res.error } };
+  return saveMarketChange(player, res, { bought: name, slot: res.slot });
 }
 
 async function authLogout(req) {
@@ -589,6 +705,9 @@ export async function handleAuthHttp(req, res) {
   else if (req.method === "GET" && pathname === "/auth/me") result = await authMe(fakeReq);
   else if (req.method === "PATCH" && pathname === "/auth/profile") result = await authProfile(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/match-xp") result = await authAwardMatchXp(fakeReq, body);
+  else if (req.method === "POST" && pathname === "/auth/market") result = await authMarket(fakeReq);
+  else if (req.method === "POST" && pathname === "/auth/market/refresh") result = await authMarketRefresh(fakeReq);
+  else if (req.method === "POST" && pathname === "/auth/market/buy") result = await authMarketBuy(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/logout") result = await authLogout(fakeReq);
   else {
     sendAuthJson(res, 404, { ok: false, error: "NOT_FOUND" });
@@ -630,6 +749,21 @@ export function registerAuthRoutes(app) {
 
   app.post("/auth/match-xp", async (req, res) => {
     const r = await authAwardMatchXp(req, req.body || {});
+    res.status(r.status).json(r.data);
+  });
+
+  app.post("/auth/market", async (req, res) => {
+    const r = await authMarket(req);
+    res.status(r.status).json(r.data);
+  });
+
+  app.post("/auth/market/refresh", async (req, res) => {
+    const r = await authMarketRefresh(req);
+    res.status(r.status).json(r.data);
+  });
+
+  app.post("/auth/market/buy", async (req, res) => {
+    const r = await authMarketBuy(req, req.body || {});
     res.status(r.status).json(r.data);
   });
 
