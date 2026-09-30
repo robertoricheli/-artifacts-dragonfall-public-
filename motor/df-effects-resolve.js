@@ -1135,6 +1135,11 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
                 c.separado = true;
                 c.tapped = false;
                 c.onEnterConsumed = true;
+                // P1 fixo: a Fúria do original não passa às cópias (expirar deixaria P0).
+                c.fury = false;
+                c.furyStacks = 0;
+                c.furyTurns = 0;
+                c.furyBonusActive = false;
                 return c;
             }
             const a = splitClone(src);
@@ -1615,11 +1620,13 @@ function applyTalentTarget(state, pIdx, targetP, targetI, extra) {
             }
             const origPower = pow;
             const origName = target.name;
-            const newPower = Math.floor(origPower / 2);
-            const tokenDef = findCardDef("BICHINHO FOFINHO");
+            const tfRng = resolution.rng || Math.random;
+            const tfSuccess = resolution.success != null ? !!resolution.success : tfRng() < 0.90;
+            const newPower = tfSuccess ? Math.floor(origPower / 2) : (origPower + 1);
+            const tokenDef = findCardDef(tfSuccess ? "BICHINHO FOFINHO" : "O CHEFÃO");
             if (!tokenDef)
                 return { ok: false, state, events, error: "NO_TOKEN_DEF" };
-            if (target.vulnerable) {
+            if (tfSuccess && target.vulnerable) {
                 destroyAtField(state, tp, ti, events, "transformarBichinhoTalento");
                 events.push({
                     type: "TALENT_TRANSFORMAR_BICHINHO",
@@ -1631,7 +1638,7 @@ function applyTalentTarget(state, pIdx, targetP, targetI, extra) {
                 applyTokenTransform(target, tokenDef, newPower);
                 events.push({
                     type: "TALENT_TRANSFORMAR_BICHINHO",
-                    targetP: tp, targetI: ti, success: true,
+                    targetP: tp, targetI: ti, success: tfSuccess,
                     origName, origPower, newPower, visual: "transformar_bichinho",
                 });
             }
