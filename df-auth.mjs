@@ -36,7 +36,7 @@ import {
   REFRESH_COST,
   MARKET_ROTATION_MS,
 } from "./df-market.mjs";
-import { ensureJourneyState, claimLevel } from "./df-journey.mjs";
+import { ensureJourneyState, claimLevel, isAvatarAllowed } from "./df-journey.mjs";
 
 export { initAuthStore, getAuthStoreMode };
 
@@ -88,7 +88,7 @@ const HERO_IDS = new Set([
   "vaughan", "iceWitch", "linguarudo", "pirate", "euravia", "ironGuard",
   "princesaSlime", "thor", "jekiro", "sangueDragao", "gancho", "paladino",
   "alquimista", "valmont", "tecnomago", "quimera", "hercules",
-  "sinistrela", "estrelar",
+  "sinistrela", "estrelar", "diablos", "tristana",
 ]);
 
 const HUB_BG_IDS = new Set([
@@ -452,7 +452,8 @@ async function authProfile(req, body) {
     if (!HERO_IDS.has(hid)) {
       return { status: 400, data: { ok: false, error: "BAD_AVATAR" } };
     }
-    player.avatarHeroId = hid;
+    /* herói ainda bloqueado: ignora e mantém o avatar atual (já validado) */
+    if (isAvatarAllowed(player, hid)) player.avatarHeroId = hid;
   }
 
   if (body.hubBackgroundId != null) {

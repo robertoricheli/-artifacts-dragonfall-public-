@@ -49,8 +49,14 @@ export function rewardForLevel(level) {
   return JOURNEY_REWARDS[lv - 1] || null;
 }
 
+/** Avatar só entre heróis desbloqueados. */
+export function isAvatarAllowed(player, heroId) {
+  return Array.isArray(player?.ownedHeroes) && player.ownedHeroes.includes(heroId);
+}
+
 /**
  * Contas sem `ownedHeroes` (novas ou antigas) ficam só com a Eurávia e o nível 1 resgatado.
+ * Avatar de herói ainda bloqueado volta para a Eurávia.
  * Devolve true se o jogador foi alterado.
  */
 export function ensureJourneyState(player) {
@@ -62,6 +68,10 @@ export function ensureJourneyState(player) {
   }
   if (!Array.isArray(player.claimedLevels) || !player.claimedLevels.length) {
     player.claimedLevels = [1];
+    changed = true;
+  }
+  if (player.avatarHeroId && !isAvatarAllowed(player, player.avatarHeroId)) {
+    player.avatarHeroId = START_HERO_ID;
     changed = true;
   }
   return changed;
