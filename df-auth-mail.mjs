@@ -78,7 +78,7 @@ export function isMailConfigured() {
 
 /**
  * Textos do e-mail por idioma da conta (`language` em df-auth). Conta sem idioma → en.
- * Novo idioma (es/de/ja/zh): copiar o bloco `en` com as mesmas chaves. `{password}` = senha.
+ * Novo idioma: copiar o bloco `en` com as mesmas chaves (+ MAIL_HTML_LANG). `{password}` = senha.
  */
 const MAIL_DEFAULT_LANG = "en";
 const MAIL_TEXT = {
@@ -190,11 +190,75 @@ const MAIL_TEXT = {
     htmlNextReminder: "Gib es auf dem Bildschirm <strong>ANMELDEN</strong> ein und ändere danach dein Passwort in deinem Profil.",
     htmlFooter: "Wenn du das nicht angefordert hast, ignoriere diese E-Mail.",
   },
+  ja: {
+    subjectChanged: "Dragonfall — プロフィールのパスワードが変更されました",
+    subjectSetupTest: "[テスト] Dragonfall — メール設定",
+    subjectReminder: "Dragonfall — 復旧用の仮パスワード",
+    introChangedNotice: "Dragonfallのプロフィールでパスワードが変更されました。お心当たりがない場合は、すぐに「パスワードを忘れた」をご利用ください。",
+    introChanged: "Dragonfallのプロフィールでパスワードが変更されました。新しく設定されたパスワードは次のとおりです。",
+    introSetupTest: "これはSMTP設定のテストメールです。パスワードの復旧ではなく、ゲームのパスワードは変更されていません。",
+    introReminder: "Dragonfallでパスワードの復旧がリクエストされました。新しい仮パスワードを発行しました（以前のパスワードは使えなくなりました）。",
+    greeting: "こんにちは。",
+    setupTestWorking: "このメールが届いていれば、送信は正常に機能しています。",
+    noticeOldPassword: "以前のパスワードは使えなくなりました。プロフィールで設定した新しいパスワードをご利用ください。",
+    passwordLineChanged: "新しいパスワード：{password}",
+    passwordLineReminder: "仮パスワード：{password}",
+    nextSetupTest: "このメールは閉じてください。実際にパスワードを復旧するには、ゲーム内の「パスワードを忘れた」をご利用ください。",
+    nextChangedNotice: "お心当たりがない場合は、「パスワードを忘れた」からアカウントを復旧してください。",
+    nextChanged: "ログイン画面でこのパスワードを入力して、ゲームに入ってください。",
+    nextReminder: "ログイン画面でこのパスワードを入力し、その後プロフィールでパスワードを変更してください。",
+    footerText: "お心当たりがない場合は、このメールを無視してください。ログインできる場合は、プロフィールでパスワードを変更してください。",
+    signature: "— Dragonfall",
+    htmlSetupTest: "<p>このメールが届いていれば、送信は正常に機能しています。</p><p><strong>ゲームのパスワードは変更されていません。</strong>実際にパスワードを復旧するには、ゲーム内の<em>「パスワードを忘れた」</em>をご利用ください。</p>",
+    htmlChangedNotice: "<p>以前のパスワードは<strong>使えなくなりました</strong>。プロフィールで設定した新しいパスワードをご利用ください。</p>",
+    htmlPasswordLabelChanged: "<strong>新しい</strong>パスワード：",
+    htmlPasswordLabelReminder: "<strong>仮</strong>パスワード：",
+    htmlNextChanged: "<strong>ログイン</strong>画面でこのパスワードを入力して、ゲームに入ってください。",
+    htmlNextReminder: "<strong>ログイン</strong>画面でこのパスワードを入力し、その後プロフィールでパスワードを変更してください。",
+    htmlFooter: "お心当たりがない場合は、このメールを無視してください。",
+  },
+  zh: {
+    subjectChanged: "Dragonfall — 你的个人资料中的密码已更改",
+    subjectSetupTest: "[测试] Dragonfall — 邮件设置",
+    subjectReminder: "Dragonfall — 用于找回的临时密码",
+    introChangedNotice: "你在Dragonfall个人资料中更改了密码。如果不是你本人操作，请立即使用“忘记密码”。",
+    introChanged: "你在Dragonfall个人资料中更改了密码。以下是你设置的新密码：",
+    introSetupTest: "这是一封SMTP设置测试邮件。它不是密码找回邮件，你的游戏密码没有更改。",
+    introReminder: "你在Dragonfall申请了找回密码。我们已生成新的临时密码（旧密码已失效）。",
+    greeting: "你好：",
+    setupTestWorking: "如果你收到了这封邮件，说明发送功能正常。",
+    noticeOldPassword: "你的旧密码已失效。请使用你在个人资料中设置的新密码。",
+    passwordLineChanged: "你的新密码是：{password}",
+    passwordLineReminder: "你的临时密码是：{password}",
+    nextSetupTest: "请关闭这封邮件。如需真正找回密码，请在游戏中使用“忘记密码”。",
+    nextChangedNotice: "如果这不是你本人的请求，请通过“忘记密码”找回你的账号。",
+    nextChanged: "请在登录界面输入此密码进入游戏。",
+    nextReminder: "请在登录界面输入此密码，然后在个人资料中更改密码。",
+    footerText: "如果这不是你本人的请求，请忽略这封邮件；如果你能登录，请在个人资料中更改密码。",
+    signature: "— Dragonfall",
+    htmlSetupTest: "<p>如果你收到了这封邮件，说明发送功能正常。</p><p><strong>你的游戏密码没有更改。</strong>如需找回真实密码，请在游戏中使用<em>“忘记密码”</em>。</p>",
+    htmlChangedNotice: "<p>你的旧密码<strong>已失效</strong>。请使用你在个人资料中设置的新密码。</p>",
+    htmlPasswordLabelChanged: "你的<strong>新</strong>密码是：",
+    htmlPasswordLabelReminder: "你的<strong>临时</strong>密码是：",
+    htmlNextChanged: "请在<strong>登录</strong>界面输入此密码进入游戏。",
+    htmlNextReminder: "请在<strong>登录</strong>界面输入此密码，然后在个人资料中更改密码。",
+    htmlFooter: "如果这不是你本人的请求，请忽略这封邮件。",
+  },
+};
+/** <html lang> do e-mail por idioma da conta. */
+const MAIL_HTML_LANG = { en: "en", pt: "pt-BR", es: "es", de: "de", ja: "ja", zh: "zh-Hans" };
+/** Fontes CJK do sistema do leitor de e-mail antes do fallback latino. */
+const MAIL_FONT = {
+  ja: "'Hiragino Sans','Hiragino Kaku Gothic ProN','Yu Gothic',Meiryo,'Segoe UI',Arial,sans-serif",
+  zh: "'PingFang SC','Hiragino Sans GB','Microsoft YaHei','Segoe UI',Arial,sans-serif",
 };
 
+function mailLang(language) {
+  return Object.prototype.hasOwnProperty.call(MAIL_TEXT, language) ? language : MAIL_DEFAULT_LANG;
+}
+
 function mailTextFor(language) {
-  const lang = Object.prototype.hasOwnProperty.call(MAIL_TEXT, language) ? language : MAIL_DEFAULT_LANG;
-  return MAIL_TEXT[lang];
+  return MAIL_TEXT[mailLang(language)];
 }
 
 function withPassword(template, password) {
@@ -238,8 +302,10 @@ export function buildMessage(password, kind = "reminder", language = null) {
     "",
     m.signature,
   ].join("\n");
-  const html = `
-    <div style="font-family:Segoe UI,Arial,sans-serif;line-height:1.55;color:#1a1428;max-width:480px">
+  const lang = mailLang(language);
+  const html = `<!DOCTYPE html>
+<html lang="${MAIL_HTML_LANG[lang] || lang}"><head><meta charset="utf-8"><meta http-equiv="Content-Type" content="text/html; charset=utf-8"></head><body>
+    <div style="font-family:${MAIL_FONT[lang] || "Segoe UI,Arial,sans-serif"};line-height:1.55;color:#1a1428;max-width:480px">
       <p>${m.greeting}</p>
       <p>${intro}</p>
       ${kind === "setup-test"
@@ -250,7 +316,8 @@ export function buildMessage(password, kind = "reminder", language = null) {
       <p style="font-size:1.35rem;font-weight:700;letter-spacing:0.05em;color:#5a3a8a;margin:16px 0">${password}</p>
       <p>${kind === "changed" ? m.htmlNextChanged : m.htmlNextReminder}</p>`}
       <p style="color:#666;font-size:0.88rem;margin-top:24px">${m.htmlFooter}</p>
-    </div>`;
+    </div>
+</body></html>`;
   return { subject, text, html };
 }
 
