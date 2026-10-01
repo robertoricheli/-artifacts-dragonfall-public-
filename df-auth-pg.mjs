@@ -27,6 +27,8 @@ ALTER TABLE df_players ADD COLUMN IF NOT EXISTS market_state JSONB;
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS collection_epoch INT NOT NULL DEFAULT 0;
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS owned_heroes JSONB;
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS journey_claimed JSONB;
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS redeemed_codes JSONB;
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS dev_unlock_all BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE TABLE IF NOT EXISTS df_sessions (
   token TEXT PRIMARY KEY,
   player_id UUID NOT NULL REFERENCES df_players(id) ON DELETE CASCADE,
@@ -60,6 +62,8 @@ function rowToPlayer(row) {
     collectionEpoch: row.collection_epoch ?? 0,
     ownedHeroes: row.owned_heroes ?? null,
     claimedLevels: row.journey_claimed ?? null,
+    redeemedCodes: row.redeemed_codes ?? null,
+    devUnlockAll: !!row.dev_unlock_all,
     profileRevision: Number(row.profile_revision ?? 0),
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
@@ -87,6 +91,8 @@ function playerToRow(p) {
     p.collectionEpoch ?? 0,
     p.ownedHeroes != null ? JSON.stringify(p.ownedHeroes) : null,
     p.claimedLevels != null ? JSON.stringify(p.claimedLevels) : null,
+    p.redeemedCodes != null ? JSON.stringify(p.redeemedCodes) : null,
+    !!p.devUnlockAll,
   ];
 }
 
@@ -122,8 +128,9 @@ export async function pgInsertPlayer(player) {
     `INSERT INTO df_players
       (id, email, password_salt, password_hash, password_enc, display_name, display_name_locked,
        avatar_hero_id, hub_background_id, custom_decks, xp_total, profile_revision, created_at,
-       owned_cards, coins, market_state, collection_epoch, owned_heroes, journey_claimed)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13::timestamptz,$14::jsonb,$15,$16::jsonb,$17,$18::jsonb,$19::jsonb)`,
+       owned_cards, coins, market_state, collection_epoch, owned_heroes, journey_claimed,
+       redeemed_codes, dev_unlock_all)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13::timestamptz,$14::jsonb,$15,$16::jsonb,$17,$18::jsonb,$19::jsonb,$20::jsonb,$21)`,
     vals,
   );
   return pgGetPlayerById(player.id);
@@ -157,7 +164,8 @@ export async function pgUpdatePlayer(player, { expectedRevision } = {}) {
         hub_background_id = $9, custom_decks = $10::jsonb, xp_total = $11,
         profile_revision = $12, owned_cards = $13::jsonb, coins = $14,
         market_state = $15::jsonb, collection_epoch = $16, owned_heroes = $17::jsonb,
-        journey_claimed = $18::jsonb, updated_at = NOW()
+        journey_claimed = $18::jsonb, redeemed_codes = $19::jsonb, dev_unlock_all = $20,
+        updated_at = NOW()
        WHERE id = $1`,
       [
         player.id,
@@ -178,6 +186,8 @@ export async function pgUpdatePlayer(player, { expectedRevision } = {}) {
         player.collectionEpoch ?? 0,
         player.ownedHeroes != null ? JSON.stringify(player.ownedHeroes) : null,
         player.claimedLevels != null ? JSON.stringify(player.claimedLevels) : null,
+        player.redeemedCodes != null ? JSON.stringify(player.redeemedCodes) : null,
+        !!player.devUnlockAll,
       ],
     );
     await client.query("COMMIT");

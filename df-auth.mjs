@@ -32,18 +32,43 @@ import {
   buyCard,
   refreshMarket,
   rewardFor,
+  playablePool,
   CARD_PRICE,
   REFRESH_COST,
   MARKET_ROTATION_MS,
 } from "./df-market.mjs";
-import { ensureJourneyState, claimLevel, isAvatarAllowed } from "./df-journey.mjs";
+import {
+  ensureJourneyState,
+  claimLevel,
+  isAvatarAllowed,
+  JOURNEY_REWARDS,
+  JOURNEY_MAX_LEVEL,
+} from "./df-journey.mjs";
+import { verifyCode, redeemForPlayer, ensureDevUnlocks, DEV_LEVEL } from "./df-redeem.mjs";
 
 export { initAuthStore, getAuthStoreMode };
 
 let cardDefsCache = null;
+let heroDefsCache = null;
 function getCardDefs() {
   if (!cardDefsCache) cardDefsCache = bootDragonfallEngine().DfData.cardDefs || [];
   return cardDefsCache;
+}
+
+function getHeroDefs() {
+  if (!heroDefsCache) heroDefsCache = bootDragonfallEngine().DfData.heroDefs || [];
+  return heroDefsCache;
+}
+
+/** Cartas jogáveis + todos os heróis (para contas com `devUnlockAll`). */
+function unlockAllContext() {
+  const heroIds = new Set(HERO_IDS);
+  for (const r of JOURNEY_REWARDS) if (r.type === "hero") heroIds.add(r.heroId);
+  for (const h of getHeroDefs()) if (h?.id) heroIds.add(h.id);
+  return {
+    playableCards: playablePool(getCardDefs()).map((c) => c.name),
+    heroIds: [...heroIds],
+  };
 }
 
 /**
@@ -52,15 +77,18 @@ function getCardDefs() {
  * Devolve true se o jogador foi alterado (precisa persistir).
  */
 function ensureCollection(player) {
-  const journeyChanged = ensureJourneyState(player);
-  if (Array.isArray(player.ownedCards) && player.ownedCards.length) return journeyChanged;
-  const owned = rollStarter(getCardDefs());
-  player.ownedCards = owned;
-  player.customDecks = starterDecks(owned);
-  player.coins = Math.max(0, player.coins | 0);
-  player.market = null;
-  player.collectionEpoch = (player.collectionEpoch | 0) + 1;
-  return true;
+  let changed = ensureJourneyState(player);
+  if (!Array.isArray(player.ownedCards) || !player.ownedCards.length) {
+    const owned = rollStarter(getCardDefs());
+    player.ownedCards = owned;
+    player.customDecks = starterDecks(owned);
+    player.coins = Math.max(0, player.coins | 0);
+    player.market = null;
+    player.collectionEpoch = (player.collectionEpoch | 0) + 1;
+    changed = true;
+  }
+  if (player.devUnlockAll && ensureDevUnlocks(player, unlockAllContext())) changed = true;
+  return changed;
 }
 
 async function withCollection(player) {
@@ -83,6 +111,9 @@ const authIpLimit = createRateLimiter({ maxPerWindow: 20, windowMs: 60_000 });
 const authEmailLimit = createRateLimiter({ maxPerWindow: 8, windowMs: 60_000 });
 /** Rotas autenticadas (perfil / XP / troca de senha). */
 const authAuthedLimit = createRateLimiter({ maxPerWindow: 60, windowMs: 60_000 });
+/** Resgatar código: anti força bruta por conta e por IP. */
+const redeemAccountLimit = createRateLimiter({ maxPerWindow: 10, windowMs: 10 * 60_000 });
+const redeemIpLimit = createRateLimiter({ maxPerWindow: 30, windowMs: 10 * 60_000 });
 
 const HERO_IDS = new Set([
   "vaughan", "iceWitch", "linguarudo", "pirate", "euravia", "ironGuard",
@@ -166,6 +197,13 @@ function statsFromTotalXp(totalXp) {
   }
 }
 
+/** XP total no início exato do nível `level`. */
+function totalXpForLevel(level) {
+  let total = 0;
+  for (let lv = 1; lv < (level | 0); lv++) total += xpRequiredForLevelUp(lv);
+  return total;
+}
+
 function playerPublic(p) {
   if (!p) return null;
   const xp = statsFromTotalXp(p.xpTotal || 0);
@@ -188,6 +226,7 @@ function playerPublic(p) {
     collectionEpoch: p.collectionEpoch | 0,
     ownedHeroes: Array.isArray(p.ownedHeroes) ? p.ownedHeroes : null,
     claimedLevels: Array.isArray(p.claimedLevels) ? p.claimedLevels : null,
+    devUnlockAll: !!p.devUnlockAll,
   };
 }
 
@@ -284,6 +323,8 @@ async function authRegister(req, body) {
     collectionEpoch: 0,
     ownedHeroes: null,
     claimedLevels: null,
+    redeemedCodes: null,
+    devUnlockAll: false,
     profileRevision: 0,
     createdAt: now,
     updatedAt: now,
@@ -667,6 +708,51 @@ async function authJourneyClaim(req, body) {
   return { status: 409, data: { ok: false, error: "PROFILE_CONFLICT" } };
 }
 
+/** Resgatar código: uma vez por conta; recompensa decidida pelo servidor. */
+async function authRedeem(req, body) {
+  const limited = allowAuthedAttempt(req);
+  if (limited) return limited;
+  if (!redeemIpLimit(`redeem-ip:${clientIp(req)}`)) {
+    return { status: 429, data: { ok: false, error: "RATE_LIMIT", retryAfterSec: 600 } };
+  }
+  const authed = await authFromHeader(req);
+  if (!authed) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  if (!redeemAccountLimit(`redeem-acc:${authed.id}`)) {
+    return { status: 429, data: { ok: false, error: "RATE_LIMIT", retryAfterSec: 600 } };
+  }
+  const codeId = typeof body?.code === "string" ? verifyCode(body.code) : null;
+  if (!codeId) return { status: 400, data: { ok: false, error: "INVALID_CODE" } };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const player = attempt === 0 ? await withCollection(authed) : await withCollection(await getPlayerById(authed.id));
+    if (!player) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+    const res = redeemForPlayer(player, codeId, {
+      ...unlockAllContext(),
+      devXpTotal: totalXpForLevel(DEV_LEVEL),
+      journeyMaxLevel: JOURNEY_MAX_LEVEL,
+    });
+    if (!res.ok) {
+      return { status: 400, data: { ok: false, error: res.error, player: playerPublic(player) } };
+    }
+    player.redeemedCodes = res.redeemedCodes;
+    player.coins = res.coins;
+    if (res.devUnlockAll) {
+      player.xpTotal = res.xpTotal;
+      player.claimedLevels = res.claimedLevels;
+      player.ownedHeroes = res.ownedHeroes;
+      player.ownedCards = res.ownedCards;
+      player.devUnlockAll = true;
+    }
+    const r = await persistPlayer(player, { expectedRevision: Number(player.profileRevision ?? 0) });
+    if (r.ok) {
+      return { status: 200, data: { ok: true, reward: res.reward, player: playerPublic(r.player) } };
+    }
+    if (r.error !== "PROFILE_CONFLICT") {
+      return { status: 500, data: { ok: false, error: r.error || "SAVE_FAILED" } };
+    }
+  }
+  return { status: 409, data: { ok: false, error: "PROFILE_CONFLICT" } };
+}
+
 async function authLogout(req) {
   const tok = bearerToken(req);
   if (tok) await deleteSessionRecord(tok);
@@ -745,6 +831,7 @@ export async function handleAuthHttp(req, res) {
   else if (req.method === "POST" && pathname === "/auth/market/refresh") result = await authMarketRefresh(fakeReq);
   else if (req.method === "POST" && pathname === "/auth/market/buy") result = await authMarketBuy(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/journey/claim") result = await authJourneyClaim(fakeReq, body);
+  else if (req.method === "POST" && pathname === "/auth/redeem") result = await authRedeem(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/logout") result = await authLogout(fakeReq);
   else {
     sendAuthJson(res, 404, { ok: false, error: "NOT_FOUND" });
@@ -806,6 +893,11 @@ export function registerAuthRoutes(app) {
 
   app.post("/auth/journey/claim", async (req, res) => {
     const r = await authJourneyClaim(req, req.body || {});
+    res.status(r.status).json(r.data);
+  });
+
+  app.post("/auth/redeem", async (req, res) => {
+    const r = await authRedeem(req, req.body || {});
     res.status(r.status).json(r.data);
   });
 
