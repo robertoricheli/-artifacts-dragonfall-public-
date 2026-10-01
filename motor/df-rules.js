@@ -981,7 +981,8 @@ function combatOutcome(a, d) {
         return { killA: true, killD: false, pvTo: "defender", swords: ["a"], over: true };
     if (oa && od)
         return { killA: false, killD: false, pvTo: null, swords: ["a", "d"] };
-    return { killA: true, killD: true, pvTo: null, swords: ["a", "d"] };
+    // Empate mútuo: só o atacante pontua pela destruição do defensor (manual §5.2).
+    return { killA: true, killD: true, pvTo: "attacker", swords: ["a", "d"] };
 }
 /** Recompensa de uma destruição válida em combate; Sem Honra é avaliado no alvo. */
 function combatVictoryPointReward(winner) {
