@@ -122,6 +122,9 @@ const HERO_IDS = new Set([
   "sinistrela", "estrelar", "diablos", "tristana",
 ]);
 
+/** Idiomas da interface (DfI18n.LANGS no cliente). */
+const LANGUAGE_IDS = new Set(["en", "pt", "es", "de", "ja", "zh"]);
+
 const HUB_BG_IDS = new Set([
   "reino-encantado",
   "frente-de-batalha",
@@ -214,6 +217,7 @@ function playerPublic(p) {
     displayNameLocked: !!p.displayNameLocked,
     avatarHeroId: p.avatarHeroId || null,
     hubBackgroundId: p.hubBackgroundId || null,
+    language: LANGUAGE_IDS.has(p.language) ? p.language : null,
     customDecks: Array.isArray(p.customDecks) ? p.customDecks : null,
     profileRevision: Number(p.profileRevision ?? 0),
     updatedAt: p.updatedAt || null,
@@ -315,6 +319,7 @@ async function authRegister(req, body) {
     displayNameLocked: false,
     avatarHeroId: null,
     hubBackgroundId: null,
+    language: null,
     customDecks: null,
     xpTotal: 0,
     coins: 0,
@@ -380,7 +385,7 @@ async function authForgotPassword(req, body) {
   const tempPassword = newTemporaryPassword();
   // Envia e-mail ANTES de invalidar a senha — evita lockout se SMTP falhar.
   try {
-    await sendPasswordResetEmail(email, tempPassword);
+    await sendPasswordResetEmail(email, tempPassword, player.language || null);
   } catch (e) {
     const code = String(e?.message || "").includes("MAIL_NOT_CONFIGURED")
       ? "MAIL_NOT_CONFIGURED"
@@ -430,7 +435,7 @@ async function authChangePassword(req, body) {
 
   let mailSent = true;
   try {
-    await sendPasswordChangedNoticeEmail(player.email);
+    await sendPasswordChangedNoticeEmail(player.email, player.language || null);
   } catch (e) {
     mailSent = false;
     console.error("[auth] change-password mail:", e?.cause?.message || e?.message || e);
@@ -503,6 +508,14 @@ async function authProfile(req, body) {
       return { status: 400, data: { ok: false, error: "BAD_HUB_BG" } };
     }
     player.hubBackgroundId = bid;
+  }
+
+  if (body.language != null) {
+    const lang = String(body.language);
+    if (!LANGUAGE_IDS.has(lang)) {
+      return { status: 400, data: { ok: false, error: "BAD_LANGUAGE" } };
+    }
+    player.language = lang;
   }
 
   if (body.displayName != null) {

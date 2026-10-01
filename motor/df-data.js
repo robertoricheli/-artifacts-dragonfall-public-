@@ -29,7 +29,7 @@ const heroDefs = [
         ultimateDesc: 'Afeta TODOS os Campeões adversários. Cada um tem 50% de chance de ser CONGELADO por 2 rodadas e 50% de chance de receber BOLA DE FOGO (-1 Poder). Até 3 usos.',
         ultimateType: 'fireAndIce' },
     { id: 'sangueDragao', name: 'Sangue de Dragão', emoji: '🩸', image: 'heroes/sangue_de_dragao.png', ultimateName: 'Invocar Dragão',
-        ultimateDesc: 'Invoca um Dragão Cúbico no seu campo como ação livre. Até 3 usos.',
+        ultimateDesc: 'Invoca um Dragão Azul no seu campo como ação livre. Até 3 usos.',
         ultimateType: 'summonDragon' },
     { id: 'gancho', name: 'Gancho', emoji: '⚓', image: 'heroes/gancho.png', ultimateName: 'Puxão',
         ultimateDesc: 'Puxa um Campeão adversário com Poder menor que 3 (65% chance de Poder 1, 35% de Poder 2) e o ROUBA permanentemente pro seu campo. Até 3 usos.',
@@ -403,11 +403,11 @@ const cardDefs = [
     // Poder). Não dispara sob Silêncio.
     { name: "BARBALONGA", power: 1, category: "champion", abilityType: "constant",
         abilityName: "Legado",
-        abilityDesc: "Após a morrer, um Campeão aliado aleatório ganhará 1 ponto de Poder!",
+        abilityDesc: "Após morrer, um Campeão aliado aleatório ganhará 1 ponto de Poder!",
         onDestroy: "legado", onEnter: null, composedFace: true },
     { name: "BEATRIX", power: 2, category: "champion", abilityType: "constant",
         abilityName: "Legado",
-        abilityDesc: "Após a morrer, um Campeão aliado aleatório ganhará 1 ponto de Poder!",
+        abilityDesc: "Após morrer, um Campeão aliado aleatório ganhará 1 ponto de Poder!",
         onDestroy: "legado", onEnter: null, composedFace: true },
     // NECROMANCIA (LICH / MÁSCARA DA MORTE): onEnter instantânea.
     // Mostra até 4 cartas aleatórias do DESCARTE pro jogador
@@ -632,7 +632,7 @@ const cardDefs = [
         abilityDesc: "Ser fofo é sua principal arma. Sem habilidade.",
         onDestroy: null, onEnter: null, hidden: true, composedFace: true },
     { name: "O CHEFÃO", power: 0, category: "champion", abilityType: "constant",
-        abilityName: "Ameaça Eminente",
+        abilityName: "Ameaça Iminente",
         abilityDesc: "Gosta de uma boa briga! Sem habilidade.",
         onDestroy: null, onEnter: null, hidden: true, composedFace: true },
 ];

@@ -76,56 +76,126 @@ export function isMailConfigured() {
   return !!(smtp?.host && smtp?.user && smtp?.pass);
 }
 
-function buildMessage(password, kind = "reminder") {
+/**
+ * Textos do e-mail por idioma da conta (`language` em df-auth). Conta sem idioma → en.
+ * Novo idioma (es/de/ja/zh): copiar o bloco `en` com as mesmas chaves. `{password}` = senha.
+ */
+const MAIL_DEFAULT_LANG = "en";
+const MAIL_TEXT = {
+  en: {
+    subjectChanged: "Dragonfall — password changed in your profile",
+    subjectSetupTest: "[TEST] Dragonfall — email setup",
+    subjectReminder: "Dragonfall — temporary recovery password",
+    introChangedNotice: "You changed your password in your Dragonfall profile. If this wasn't you, use Forgot password right away.",
+    introChanged: "You changed your password in your Dragonfall profile. Here is the new password you chose:",
+    introSetupTest: "This is a TEST email for SMTP setup. It is not a password recovery, and your game password has NOT changed.",
+    introReminder: "You requested a password recovery on Dragonfall. We generated a new TEMPORARY password (the old one no longer works).",
+    greeting: "Hello,",
+    setupTestWorking: "If you received this email, sending is working.",
+    noticeOldPassword: "Your old password no longer works. Use the new password you set in your profile.",
+    passwordLineChanged: "Your new password is: {password}",
+    passwordLineReminder: "Your temporary password is: {password}",
+    nextSetupTest: "Close this email. To actually recover your password, use Forgot password in the game.",
+    nextChangedNotice: "If you didn't request this, recover your account with Forgot password.",
+    nextChanged: "Use it on the LOG IN screen to enter the game.",
+    nextReminder: "Use it on the LOG IN screen, then change your password in your profile.",
+    footerText: "If you didn't request this, ignore this email and change your password in your profile if you can log in.",
+    signature: "— Dragonfall",
+    htmlSetupTest: "<p>If you received this email, sending is working.</p><p><strong>Your game password has not changed.</strong> To recover your real password, use <em>Forgot password</em> in the game.</p>",
+    htmlChangedNotice: "<p>Your old password <strong>no longer works</strong>. Use the new password you set in your profile.</p>",
+    htmlPasswordLabelChanged: "Your <strong>new</strong> password is:",
+    htmlPasswordLabelReminder: "Your <strong>temporary</strong> password is:",
+    htmlNextChanged: "Use it on the <strong>LOG IN</strong> screen to enter the game.",
+    htmlNextReminder: "Use it on the <strong>LOG IN</strong> screen, then change your password in your profile.",
+    htmlFooter: "If you didn't request this, ignore this email.",
+  },
+  pt: {
+    subjectChanged: "Dragonfall — senha alterada no perfil",
+    subjectSetupTest: "[TESTE] Dragonfall — configuração de e-mail",
+    subjectReminder: "Dragonfall — senha temporária de recuperação",
+    introChangedNotice: "Você alterou sua senha no perfil do Dragonfall. Se não foi você, use Esqueci a senha imediatamente.",
+    introChanged: "Você alterou sua senha no perfil do Dragonfall. Abaixo está a nova senha que você escolheu:",
+    introSetupTest: "Este é um e-mail de TESTE de configuração SMTP. Não é recuperação de senha e sua senha do jogo NÃO mudou.",
+    introReminder: "Você pediu recuperação de senha no Dragonfall. Geramos uma senha TEMPORÁRIA nova (a antiga foi invalidada).",
+    greeting: "Olá,",
+    setupTestWorking: "Se você recebeu este e-mail, o envio está funcionando.",
+    noticeOldPassword: "Sua senha antiga não funciona mais. Use a nova senha que você definiu no perfil.",
+    passwordLineChanged: "Sua senha cadastrada é: {password}",
+    passwordLineReminder: "Sua senha temporária é: {password}",
+    nextSetupTest: "Feche este e-mail. Para recuperar sua senha de verdade, use Esqueci a senha no jogo.",
+    nextChangedNotice: "Se você não pediu isso, recupere a conta com Esqueci a senha.",
+    nextChanged: "Use-a na tela de LOGIN para entrar no jogo.",
+    nextReminder: "Use-a na tela de LOGIN e depois altere a senha no perfil.",
+    footerText: "Se você não pediu isso, ignore este e-mail e altere a senha no perfil se conseguir entrar.",
+    signature: "— Dragonfall",
+    htmlSetupTest: "<p>Se você recebeu este e-mail, o envio está funcionando.</p><p><strong>Sua senha do jogo não mudou.</strong> Para recuperar a senha real, use <em>Esqueci a senha</em> no jogo.</p>",
+    htmlChangedNotice: "<p>Sua senha antiga <strong>não funciona mais</strong>. Use a nova senha que você definiu no perfil.</p>",
+    htmlPasswordLabelChanged: "Sua senha <strong>cadastrada</strong> é:",
+    htmlPasswordLabelReminder: "Sua senha <strong>temporária</strong> é:",
+    htmlNextChanged: "Use-a na tela de <strong>LOGIN</strong> para entrar no jogo.",
+    htmlNextReminder: "Use-a na tela de <strong>LOGIN</strong> e depois altere a senha no perfil.",
+    htmlFooter: "Se você não pediu isso, ignore este e-mail.",
+  },
+};
+
+function mailTextFor(language) {
+  const lang = Object.prototype.hasOwnProperty.call(MAIL_TEXT, language) ? language : MAIL_DEFAULT_LANG;
+  return MAIL_TEXT[lang];
+}
+
+function withPassword(template, password) {
+  return String(template).split("{password}").join(String(password ?? ""));
+}
+
+export function buildMessage(password, kind = "reminder", language = null) {
+  const m = mailTextFor(language);
   const subject = kind === "changed" || kind === "changed-notice"
-    ? "Dragonfall — senha alterada no perfil"
+    ? m.subjectChanged
     : kind === "setup-test"
-      ? "[TESTE] Dragonfall — configuração de e-mail"
-      : "Dragonfall — senha temporária de recuperação";
+      ? m.subjectSetupTest
+      : m.subjectReminder;
   const intro = kind === "changed-notice"
-    ? "Você alterou sua senha no perfil do Dragonfall. Se não foi você, use Esqueci a senha imediatamente."
+    ? m.introChangedNotice
     : kind === "changed"
-    ? "Você alterou sua senha no perfil do Dragonfall. Abaixo está a nova senha que você escolheu:"
+    ? m.introChanged
     : kind === "setup-test"
-      ? "Este é um e-mail de TESTE de configuração SMTP. Não é recuperação de senha e sua senha do jogo NÃO mudou."
-      : "Você pediu recuperação de senha no Dragonfall. Geramos uma senha TEMPORÁRIA nova (a antiga foi invalidada).";
+      ? m.introSetupTest
+      : m.introReminder;
   const text = [
-    "Olá,",
+    m.greeting,
     "",
     intro,
     "",
     kind === "setup-test"
-      ? "Se você recebeu este e-mail, o envio está funcionando."
+      ? m.setupTestWorking
       : kind === "changed-notice"
-        ? "Sua senha antiga não funciona mais. Use a nova senha que você definiu no perfil."
-      : `Sua senha ${kind === "changed" ? "cadastrada" : "temporária"} é: ${password}`,
+        ? m.noticeOldPassword
+      : withPassword(kind === "changed" ? m.passwordLineChanged : m.passwordLineReminder, password),
     "",
     kind === "setup-test"
-      ? "Feche este e-mail. Para recuperar sua senha de verdade, use Esqueci a senha no jogo."
+      ? m.nextSetupTest
       : kind === "changed-notice"
-        ? "Se você não pediu isso, recupere a conta com Esqueci a senha."
+        ? m.nextChangedNotice
       : kind === "changed"
-        ? "Use-a na tela de LOGIN para entrar no jogo."
-        : "Use-a na tela de LOGIN e depois altere a senha no perfil.",
+        ? m.nextChanged
+        : m.nextReminder,
     "",
-    "Se você não pediu isso, ignore este e-mail e altere a senha no perfil se conseguir entrar.",
+    m.footerText,
     "",
-    "— Dragonfall",
+    m.signature,
   ].join("\n");
   const html = `
     <div style="font-family:Segoe UI,Arial,sans-serif;line-height:1.55;color:#1a1428;max-width:480px">
-      <p>Olá,</p>
+      <p>${m.greeting}</p>
       <p>${intro}</p>
       ${kind === "setup-test"
-        ? "<p>Se você recebeu este e-mail, o envio está funcionando.</p><p><strong>Sua senha do jogo não mudou.</strong> Para recuperar a senha real, use <em>Esqueci a senha</em> no jogo.</p>"
+        ? m.htmlSetupTest
         : kind === "changed-notice"
-          ? "<p>Sua senha antiga <strong>não funciona mais</strong>. Use a nova senha que você definiu no perfil.</p>"
-        : `<p>Sua senha <strong>${kind === "changed" ? "cadastrada" : "temporária"}</strong> é:</p>
+          ? m.htmlChangedNotice
+        : `<p>${kind === "changed" ? m.htmlPasswordLabelChanged : m.htmlPasswordLabelReminder}</p>
       <p style="font-size:1.35rem;font-weight:700;letter-spacing:0.05em;color:#5a3a8a;margin:16px 0">${password}</p>
-      <p>${kind === "changed"
-        ? "Use-a na tela de <strong>LOGIN</strong> para entrar no jogo."
-        : "Use-a na tela de <strong>LOGIN</strong> e depois altere a senha no perfil."}</p>`}
-      <p style="color:#666;font-size:0.88rem;margin-top:24px">Se você não pediu isso, ignore este e-mail.</p>
+      <p>${kind === "changed" ? m.htmlNextChanged : m.htmlNextReminder}</p>`}
+      <p style="color:#666;font-size:0.88rem;margin-top:24px">${m.htmlFooter}</p>
     </div>`;
   return { subject, text, html };
 }
@@ -146,11 +216,11 @@ function createSmtpTransport(cfg) {
   });
 }
 
-async function sendViaResend(to, password, kind) {
+async function sendViaResend(to, password, kind, language) {
   const apiKey = process.env.DF_RESEND_API_KEY;
   const from = process.env.DF_MAIL_FROM;
   if (!apiKey || !from) throw new Error("MAIL_NOT_CONFIGURED");
-  const { subject, html, text } = buildMessage(password, kind);
+  const { subject, html, text } = buildMessage(password, kind, language);
   const r = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
@@ -165,13 +235,13 @@ async function sendViaResend(to, password, kind) {
   }
 }
 
-async function sendViaSmtp(to, password, kind) {
+async function sendViaSmtp(to, password, kind, language) {
   const cfg = loadSmtpConfig();
   if (!cfg?.host || !cfg?.user || !cfg?.pass) {
     throw new Error("MAIL_NOT_CONFIGURED");
   }
   const transporter = createSmtpTransport(cfg);
-  const { subject, html, text } = buildMessage(password, kind);
+  const { subject, html, text } = buildMessage(password, kind, language);
   const info = await transporter.sendMail({
     from: cfg.from,
     to,
@@ -184,13 +254,13 @@ async function sendViaSmtp(to, password, kind) {
   }
 }
 
-async function deliverPasswordEmail(to, password, kind) {
+async function deliverPasswordEmail(to, password, kind, language) {
   if (process.env.DF_RESEND_API_KEY) {
-    await sendViaResend(to, password, kind);
+    await sendViaResend(to, password, kind, language);
     return;
   }
   try {
-    await sendViaSmtp(to, password, kind);
+    await sendViaSmtp(to, password, kind, language);
   } catch (e) {
     const code = classifyMailError(e);
     const err = new Error(code);
@@ -199,22 +269,23 @@ async function deliverPasswordEmail(to, password, kind) {
   }
 }
 
-export async function sendPasswordResetEmail(to, password) {
-  await deliverPasswordEmail(to, password, "reminder");
+/** `language` = idioma da conta (en|pt|…); null/desconhecido → en. */
+export async function sendPasswordResetEmail(to, password, language = null) {
+  await deliverPasswordEmail(to, password, "reminder", language);
 }
 
 /** E-mail de teste ao rodar CONFIGURAR-EMAIL.bat — NÃO é recuperação de senha. */
-export async function sendMailConfigTestEmail(to) {
-  await deliverPasswordEmail(to, "", "setup-test");
+export async function sendMailConfigTestEmail(to, language = null) {
+  await deliverPasswordEmail(to, "", "setup-test", language);
 }
 
-export async function sendPasswordChangedEmail(to, password) {
-  await deliverPasswordEmail(to, password, "changed");
+export async function sendPasswordChangedEmail(to, password, language = null) {
+  await deliverPasswordEmail(to, password, "changed", language);
 }
 
 /** Aviso de troca de senha sem enviar a senha em texto. */
-export async function sendPasswordChangedNoticeEmail(to) {
-  await deliverPasswordEmail(to, "", "changed-notice");
+export async function sendPasswordChangedNoticeEmail(to, language = null) {
+  await deliverPasswordEmail(to, "", "changed-notice", language);
 }
 
 export function classifyMailError(e) {
