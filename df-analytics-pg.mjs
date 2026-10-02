@@ -84,6 +84,26 @@ export async function pgInsertMatchStat(row) {
   );
 }
 
+/**
+ * Histórico de partidas de um jogador (conquistas retroativas). Só as linhas de /auth/match-xp
+ * (action_seq NULL): uma por partida e por jogador; as de fim de partida online duplicariam o PvP.
+ * @returns {Promise<{ matches: number, aiWins: number, pvpWins: number } | null>}
+ */
+export async function pgCountPlayerMatches(playerId) {
+  const pool = getPgPool();
+  if (!pool || !playerId) return null;
+  const res = await pool.query(
+    `SELECT COUNT(*)::int AS matches,
+            COUNT(*) FILTER (WHERE match_type LIKE 'ai%' AND outcome = 'win')::int AS ai_wins,
+            COUNT(*) FILTER (WHERE match_type = 'pvp' AND outcome = 'win')::int AS pvp_wins
+       FROM df_match_stats
+      WHERE player_id = $1 AND action_seq IS NULL`,
+    [String(playerId)],
+  );
+  const row = res.rows[0] || {};
+  return { matches: row.matches | 0, aiWins: row.ai_wins | 0, pvpWins: row.pvp_wins | 0 };
+}
+
 export function analyticsPgEnabled() {
   return isPostgresEnabled();
 }

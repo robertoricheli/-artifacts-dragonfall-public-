@@ -23,7 +23,17 @@ import {
   recordActivity,
   recordActivitySync,
   recordMatchXpEvent,
+  countPlayerMatchHistory,
 } from "./df-analytics.mjs";
+import {
+  ensureAchievementState,
+  applyBackfill,
+  applyMatchToStats,
+  addCoinsSpent,
+  claimAchievement,
+  validateShowcase,
+  achievementsPublic,
+} from "./df-achievements.mjs";
 import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
 import {
   rollStarter,
@@ -91,12 +101,31 @@ function ensureCollection(player) {
   return changed;
 }
 
+/** Campos de conquista + retroativo (uma vez por conta). Devolve true se mudou. */
+async function ensureAchievements(player) {
+  let changed = ensureAchievementState(player);
+  if (!player.achStats.backfilled) {
+    const counts = await countPlayerMatchHistory(player.id);
+    if (counts) {
+      player.achStats = applyBackfill(player.achStats, counts);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+async function ensurePlayerState(player) {
+  const a = ensureCollection(player);
+  const b = await ensureAchievements(player);
+  return a || b;
+}
+
 async function withCollection(player) {
-  if (!player || !ensureCollection(player)) return player;
+  if (!player || !(await ensurePlayerState(player))) return player;
   const r = await persistPlayer(player, { expectedRevision: Number(player.profileRevision ?? 0) });
   if (r.ok) return r.player;
   const fresh = await getPlayerById(player.id);
-  if (fresh && ensureCollection(fresh)) {
+  if (fresh && (await ensurePlayerState(fresh))) {
     const r2 = await persistPlayer(fresh, { expectedRevision: Number(fresh.profileRevision ?? 0) });
     return r2.ok ? r2.player : fresh;
   }
@@ -231,6 +260,7 @@ function playerPublic(p) {
     ownedHeroes: Array.isArray(p.ownedHeroes) ? p.ownedHeroes : null,
     claimedLevels: Array.isArray(p.claimedLevels) ? p.claimedLevels : null,
     devUnlockAll: !!p.devUnlockAll,
+    ...achievementsPublic(p),
   };
 }
 
@@ -330,6 +360,9 @@ async function authRegister(req, body) {
     claimedLevels: null,
     redeemedCodes: null,
     devUnlockAll: false,
+    achStats: { backfilled: true },
+    achClaimed: [],
+    achShowcase: [],
     profileRevision: 0,
     createdAt: now,
     updatedAt: now,
@@ -566,6 +599,12 @@ async function authProfile(req, body) {
     player.customDecks = norm.decks;
   }
 
+  if (body.achShowcase != null) {
+    const sc = validateShowcase(body.achShowcase, player.achClaimed);
+    if (!sc.ok) return { status: 400, data: { ok: false, error: sc.error } };
+    player.achShowcase = sc.showcase;
+  }
+
   const r = await persistPlayer(player, { expectedRevision: expectedRev ?? currentRev });
   if (!r.ok) {
     if (r.error === "PROFILE_CONFLICT") {
@@ -596,22 +635,35 @@ async function authAwardMatchXp(req, body) {
     return { status: 400, data: { ok: false, error: "BAD_MATCH" } };
   }
 
-  const reward = rewardFor(matchType === "pvp" ? "pvp" : "ai", outcome);
+  // Abandono: conta como derrota nas conquistas, sem XP/moedas nem linha de analytics.
+  const abandoned = outcome === "lose" && body?.abandoned === true;
+  const reward = abandoned
+    ? { key: "abandon", xp: 0, coins: 0 }
+    : rewardFor(matchType === "pvp" ? "pvp" : "ai", outcome);
   const key = reward.key;
   const gain = reward.xp;
   const coinsGain = reward.coins;
   const before = statsFromTotalXp(player.xpTotal || 0);
   player.xpTotal = (player.xpTotal || 0) + gain;
   player.coins = Math.max(0, player.coins | 0) + coinsGain;
+  player.achStats = applyMatchToStats(player.achStats, {
+    matchType,
+    outcome,
+    myVp: body?.myVp,
+    oppVp: body?.oppVp,
+    champKills: body?.champKills,
+  });
   const r = await persistPlayer(player, { expectedRevision: Number(player.profileRevision ?? 0) });
   if (!r.ok) {
     return { status: 409, data: { ok: false, error: r.error, player: playerPublic(r.player) } };
   }
   const after = statsFromTotalXp(r.player.xpTotal);
 
-  try {
-    recordMatchXpEvent(r.player, body);
-  } catch (e) { /* analytics never blocks */ }
+  if (!abandoned) {
+    try {
+      recordMatchXpEvent(r.player, body);
+    } catch (e) { /* analytics never blocks */ }
+  }
 
   return {
     status: 200,
@@ -667,6 +719,8 @@ async function authMarket(req) {
 }
 
 async function saveMarketChange(player, res, extra) {
+  const spent = Math.max(0, player.coins | 0) - Math.max(0, res.coins | 0);
+  if (spent > 0) player.achStats = addCoinsSpent(player.achStats, spent);
   player.coins = res.coins;
   player.market = res.market;
   if (res.ownedCards) player.ownedCards = res.ownedCards;
@@ -709,6 +763,33 @@ async function authJourneyClaim(req, body) {
     }
     player.claimedLevels = res.claimedLevels;
     player.ownedHeroes = res.ownedHeroes;
+    player.coins = res.coins;
+    const r = await persistPlayer(player, { expectedRevision: Number(player.profileRevision ?? 0) });
+    if (r.ok) {
+      return { status: 200, data: { ok: true, reward: res.reward, player: playerPublic(r.player) } };
+    }
+    if (r.error !== "PROFILE_CONFLICT") {
+      return { status: 500, data: { ok: false, error: r.error || "SAVE_FAILED" } };
+    }
+  }
+  return { status: 409, data: { ok: false, error: "PROFILE_CONFLICT" } };
+}
+
+/** Conquistas: resgata as Moedas de uma conquista concluída. */
+async function authAchievementClaim(req, body) {
+  const limited = allowAuthedAttempt(req);
+  if (limited) return limited;
+  const authed = await authFromHeader(req);
+  if (!authed) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  const id = String(body?.id || "");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const player = attempt === 0 ? await withCollection(authed) : await withCollection(await getPlayerById(authed.id));
+    if (!player) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+    const res = claimAchievement(player, id);
+    if (!res.ok) {
+      return { status: 400, data: { ok: false, error: res.error, player: playerPublic(player) } };
+    }
+    player.achClaimed = res.achClaimed;
     player.coins = res.coins;
     const r = await persistPlayer(player, { expectedRevision: Number(player.profileRevision ?? 0) });
     if (r.ok) {
@@ -845,6 +926,7 @@ export async function handleAuthHttp(req, res) {
   else if (req.method === "POST" && pathname === "/auth/market/buy") result = await authMarketBuy(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/journey/claim") result = await authJourneyClaim(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/redeem") result = await authRedeem(fakeReq, body);
+  else if (req.method === "POST" && pathname === "/auth/achievements/claim") result = await authAchievementClaim(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/logout") result = await authLogout(fakeReq);
   else {
     sendAuthJson(res, 404, { ok: false, error: "NOT_FOUND" });
@@ -911,6 +993,11 @@ export function registerAuthRoutes(app) {
 
   app.post("/auth/redeem", async (req, res) => {
     const r = await authRedeem(req, req.body || {});
+    res.status(r.status).json(r.data);
+  });
+
+  app.post("/auth/achievements/claim", async (req, res) => {
+    const r = await authAchievementClaim(req, req.body || {});
     res.status(r.status).json(r.data);
   });
 

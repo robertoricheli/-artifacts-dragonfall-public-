@@ -5,6 +5,8 @@ import {
   initAnalyticsSchema,
   pgInsertActivity,
   pgInsertMatchStat,
+  pgCountPlayerMatches,
+  analyticsPgEnabled,
 } from "./df-analytics-pg.mjs";
 
 const SYNC_DEBOUNCE_MS = 30 * 60 * 1000;
@@ -104,6 +106,20 @@ export function recordMatchXpEvent(player, body) {
     deckCards: null,
     endedAt: new Date().toISOString(),
   });
+}
+
+/**
+ * Contagem histórica para as conquistas retroativas.
+ * Sem Postgres → zeros (dev local). Erro de consulta → null (tenta de novo depois).
+ */
+export async function countPlayerMatchHistory(playerId) {
+  if (!analyticsPgEnabled()) return { matches: 0, aiWins: 0, pvpWins: 0 };
+  try {
+    return await pgCountPlayerMatches(playerId);
+  } catch (e) {
+    console.warn("[analytics] match history count failed:", e?.message || e);
+    return null;
+  }
 }
 
 /** Expõe debounce para testes. */
