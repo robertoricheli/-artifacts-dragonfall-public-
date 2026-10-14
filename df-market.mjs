@@ -6,7 +6,7 @@
 export const MARKET_SIZE = 6;
 export const CARD_PRICE = 8;
 export const REFRESH_COST = 1;
-export const MARKET_ROTATION_MS = 24 * 60 * 60 * 1000;
+export const MARKET_ROTATION_MS = 20 * 60 * 1000;
 export const DECK_SLOTS = 24;
 export const DECK_COUNT = 5;
 
@@ -15,8 +15,8 @@ export const STARTER_SHAPE = { champ1: 7, champ2: 7, talent: 5, reaction: 1 };
 
 /** Recompensas por partida (XP + Moedas). */
 export const MATCH_REWARDS = {
-  ai: { win: { xp: 6, coins: 2 }, lose: { xp: 0, coins: 0 } },
-  pvp: { win: { xp: 8, coins: 2 }, lose: { xp: 2, coins: 0 } },
+  ai: { win: { xp: 4, coins: 1 }, lose: { xp: 0, coins: 0 } },
+  pvp: { win: { xp: 6, coins: 1 }, lose: { xp: 1, coins: 0 } },
 };
 
 export function rewardFor(matchType, outcome) {

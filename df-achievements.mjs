@@ -11,7 +11,7 @@ export const ACH_FAMILIES = Object.freeze([
   { family: "scourge", metric: "aiWins", goals: [10, 50, 100, 200, 500] },
   { family: "collector", metric: "cards", goals: [30, 50, 80, 100, 120] },
   { family: "openhand", metric: "coinsSpent", goals: [20, 50, 100, 200, 400] },
-  { family: "medal", metric: "rank", locked: true,
+  { family: "medal", metric: "rank",
     tiers: ["Bronze", "Silver", "Gold", "Diamond", "Platinum", "Challenger", "Mythic"],
     coins: [2, 4, 6, 8, 10, 12, 14] },
   { family: "victor", metric: "pvpWins", goals: [10, 20, 50, 70, 100] },
@@ -24,7 +24,7 @@ export const ACH_FAMILIES = Object.freeze([
 export const ACHIEVEMENTS = Object.freeze(ACH_FAMILIES.flatMap((f) => {
   if (f.tiers) {
     return f.tiers.map((t, i) => Object.freeze({
-      id: `medal${t}`, family: f.family, tier: i + 1, metric: f.metric, goal: 1, coins: f.coins[i], locked: true,
+      id: `medal${t}`, family: f.family, tier: i + 1, metric: f.metric, goal: 1, coins: f.coins[i], locked: false,
     }));
   }
   return f.goals.map((goal, i) => Object.freeze({
@@ -69,8 +69,14 @@ export function ensureAchievementState(player) {
 export function metricValue(player, metric) {
   if (metric === "cards") return Array.isArray(player?.ownedCards) ? new Set(player.ownedCards).size : 0;
   if (metric === "heroes") return Array.isArray(player?.ownedHeroes) ? new Set(player.ownedHeroes).size : 0;
-  if (metric === "rank") return 0;
+  if (metric === "rank") return Math.max(0, Number(player?.rankBestTier) | 0);
   return normalizeStats(player?.achStats)[metric] || 0;
+}
+
+/** Valor de uma conquista: Medalha = 1 quando a melhor faixa de Rank já alcançada chega ao nível dela. */
+export function valueFor(player, a) {
+  if (a.metric === "rank") return metricValue(player, "rank") >= a.tier ? 1 : 0;
+  return metricValue(player, a.metric);
 }
 
 /** Progresso de todas as conquistas: { id: { value, goal, done, claimed, locked } }. */
@@ -78,7 +84,7 @@ export function progressFor(player) {
   const claimed = new Set(normalizeClaimed(player?.achClaimed));
   const out = {};
   for (const a of ACHIEVEMENTS) {
-    const value = a.locked ? 0 : metricValue(player, a.metric);
+    const value = a.locked ? 0 : valueFor(player, a);
     out[a.id] = { value, goal: a.goal, done: !a.locked && value >= a.goal, claimed: claimed.has(a.id), locked: a.locked };
   }
   return out;
@@ -95,7 +101,7 @@ export function claimAchievement(player, id) {
   if (a.locked) return { ok: false, error: "LOCKED" };
   const claimed = normalizeClaimed(player?.achClaimed);
   if (claimed.includes(a.id)) return { ok: false, error: "ALREADY_CLAIMED" };
-  if (metricValue(player, a.metric) < a.goal) return { ok: false, error: "NOT_REACHED" };
+  if (valueFor(player, a) < a.goal) return { ok: false, error: "NOT_REACHED" };
   return {
     ok: true,
     reward: { id: a.id, coins: a.coins },

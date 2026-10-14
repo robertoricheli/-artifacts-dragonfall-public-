@@ -52,7 +52,8 @@ import {
 } from "./df-ranked-store.mjs";
 import { initPostgres, isPostgresEnabled, getReplayByRoomCode, shutdownPostgres } from "./df-postgres.mjs";
 import { initAuthStore, getAuthStoreMode } from "./df-auth.mjs";
-import { authPlayerFromToken, startSessionPruneScheduler } from "./df-auth-store.mjs";
+import { authPlayerFromToken, getPlayerById, startSessionPruneScheduler } from "./df-auth-store.mjs";
+import { initRankStore, recordRankedSeasonMatch, flushRankStore, rankStoreMode } from "./df-rank.mjs";
 import { recordMatchEnd } from "./df-match-history.mjs";
 import { applyAuthoritativeAction, seedRoomFromSnapshot, buildReplayPayload, getEngineBootStatus, projectStateForSeat } from "./df-authority.mjs";
 import { attachPeerStateDiff } from "./df-state-diff.mjs";
@@ -210,6 +211,7 @@ app.get("/health", (_req, res) => {
     maxQueue: MAX_QUEUE,
     matchmaking: getMatchmakingMode(),
     rankedStore: rankedStoreMode(),
+    rankStore: rankStoreMode(),
     postgres: isPostgresEnabled(),
     authStore: getAuthStoreMode(),
     mailConfigured: isMailConfigured(),
@@ -439,7 +441,36 @@ function maybeFinishMatch(room, state) {
     void recordMatchEnd(room, state, GAME_VERSION);
     void deleteLiveRoom(room.code);
   }
+  maybeRecordRankSeason(room, state);
   return maybeRecordRankedResult(room, state);
+}
+
+function rankMatchKey(room) {
+  return `${room.code}:${room.createdAt || 0}`;
+}
+
+/** Rank da temporada: fim normal da partida rankeada (vitória/derrota). */
+function maybeRecordRankSeason(room, state) {
+  if (!room?.ranked || room.rankSeasonRecorded || state?.winner == null) return;
+  room.rankSeasonRecorded = true;
+  const w = state.winner | 0;
+  const ids = room.rankedPlayerIds || [];
+  void recordRankedSeasonMatch(rankMatchKey(room), [
+    { id: ids[0] || null, outcome: w === 0 ? "win" : "loss" },
+    { id: ids[1] || null, outcome: w === 1 ? "win" : "loss" },
+  ]).catch((e) => logMp("rank_record_err", { error: e?.message || String(e) }));
+}
+
+/** Rank da temporada: quem abandona/desconecta (IA assume) perde; quem fica vence na hora. */
+function recordRankAbandon(room, seat) {
+  if (!room?.ranked || room.rankSeasonRecorded || room.gameState?.winner != null) return;
+  if (seat !== 0 && seat !== 1) return;
+  room.rankSeasonRecorded = true;
+  const ids = room.rankedPlayerIds || [];
+  void recordRankedSeasonMatch(rankMatchKey(room), [
+    { id: ids[0] || null, outcome: seat === 0 ? "loss" : "win" },
+    { id: ids[1] || null, outcome: seat === 1 ? "loss" : "win" },
+  ]).catch((e) => logMp("rank_record_err", { error: e?.message || String(e) }));
 }
 
 function maybeRecordRankedResult(room, state) {
@@ -678,9 +709,10 @@ function serverAiHooks(room) {
     maybeFinish: (r, state) => maybeFinishMatch(r, state),
     resetTurnTimer,
     persist: () => touchPersist(room),
-    onAiTakeover: () => {
+    onAiTakeover: (_r, seat) => {
       resetTurnTimer(room);
       emitTurnDeadline(room);
+      recordRankAbandon(room, seat);
     },
     onExtendDeadline: () => {
       resetTurnTimer(room);
@@ -1060,12 +1092,19 @@ io.on("connection", (socket) => {
     }
     leaveSocketRoom(socket);
     let playerId = schema.playerId || null;
+    let verified = false;
     const tok = payload?.token || payload?.authToken;
     if (tok) {
       try {
         const account = await authPlayerFromToken(String(tok));
-        if (account?.id) playerId = account.id;
+        if (account?.id) { playerId = account.id; verified = true; }
       } catch (e) { /* keep schema playerId */ }
+    }
+    // Id de conta sem sessão válida não conta como aquela conta (Rank da temporada é só de contas logadas).
+    if (!verified && playerId) {
+      try {
+        if (await getPlayerById(playerId)) playerId = `u-${playerId}`.slice(0, 64);
+      } catch (e) { /* */ }
     }
     if (!playerId) playerId = `anon-${socket.id.slice(0, 12)}`;
     const info = addToRankedQueue(socket.id, playerId);
@@ -1498,6 +1537,7 @@ async function gracefulShutdown(signal) {
     await flushAllLiveRooms(listPlayingRooms);
   } catch (e) { /* */ }
   flushPersistRooms(listPlayingRooms);
+  flushRankStore();
   try {
     await shutdownPostgres();
   } catch (e) { /* */ }
@@ -1511,6 +1551,7 @@ await initPostgres();
 await initLiveRoomsSchema();
 await initRankedStoreSchema();
 await initAuthStore();
+await initRankStore();
 startSessionPruneScheduler();
 
 // Restaura salas de PG (preferência) além do rooms.json.

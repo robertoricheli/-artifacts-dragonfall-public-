@@ -4,7 +4,7 @@
  * resgatados por nível (1–62). Autoridade: o servidor.
  */
 
-export const JOURNEY_COINS = 6;
+export const JOURNEY_COINS = 4;
 export const START_HERO_ID = "euravia";
 
 /** Heróis por nível; os demais níveis (2–62) dão JOURNEY_COINS Moedas. */

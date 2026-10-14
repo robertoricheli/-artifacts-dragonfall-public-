@@ -55,6 +55,20 @@ import {
   JOURNEY_MAX_LEVEL,
 } from "./df-journey.mjs";
 import { verifyCode, redeemForPlayer, ensureDevUnlocks, DEV_LEVEL } from "./df-redeem.mjs";
+import {
+  RANK_TIERS,
+  MIN_MATCHES,
+  TOP_SIZE,
+  TOP_COINS,
+  rankPublic,
+  topPublic,
+  seasonPublic,
+  bestTierOf,
+  touchRankDisplay,
+  takePending,
+  restorePending,
+  setRankDisplayResolver,
+} from "./df-rank.mjs";
 
 export { initAuthStore, getAuthStoreMode };
 
@@ -260,9 +274,23 @@ function playerPublic(p) {
     ownedHeroes: Array.isArray(p.ownedHeroes) ? p.ownedHeroes : null,
     claimedLevels: Array.isArray(p.claimedLevels) ? p.claimedLevels : null,
     devUnlockAll: !!p.devUnlockAll,
-    ...achievementsPublic(p),
+    ...achievementsPublic({ ...p, rankBestTier: bestTierOf(p.id) }),
+    rankBestTier: bestTierOf(p.id),
+    rank: rankPublic(p.id),
   };
 }
+
+/** Nome/avatar/nível exibidos no Top 200 do Rank. */
+function rankDisplayInfo(p) {
+  if (!p) return null;
+  return {
+    name: p.displayName || null,
+    avatarHeroId: p.avatarHeroId || null,
+    level: statsFromTotalXp(p.xpTotal || 0).level,
+  };
+}
+
+setRankDisplayResolver(async (id) => rankDisplayInfo(await getPlayerById(id)));
 
 function bearerToken(req) {
   const h = req.headers.authorization || "";
@@ -483,6 +511,7 @@ async function authMe(req) {
   if (!authed) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
   const player = await withCollection(authed);
   recordActivitySync(player.id);
+  touchRankDisplay(player.id, rankDisplayInfo(player));
   return { status: 200, data: { ok: true, player: playerPublic(player) } };
 }
 
@@ -616,6 +645,7 @@ async function authProfile(req, body) {
     return { status: 500, data: { ok: false, error: r.error || "SAVE_FAILED" } };
   }
 
+  touchRankDisplay(r.player.id, rankDisplayInfo(r.player));
   return { status: 200, data: { ok: true, player: playerPublic(r.player) } };
 }
 
@@ -658,6 +688,7 @@ async function authAwardMatchXp(req, body) {
     return { status: 409, data: { ok: false, error: r.error, player: playerPublic(r.player) } };
   }
   const after = statsFromTotalXp(r.player.xpTotal);
+  touchRankDisplay(r.player.id, rankDisplayInfo(r.player));
 
   if (!abandoned) {
     try {
@@ -785,7 +816,7 @@ async function authAchievementClaim(req, body) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const player = attempt === 0 ? await withCollection(authed) : await withCollection(await getPlayerById(authed.id));
     if (!player) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
-    const res = claimAchievement(player, id);
+    const res = claimAchievement({ ...player, rankBestTier: bestTierOf(player.id) }, id);
     if (!res.ok) {
       return { status: 400, data: { ok: false, error: res.error, player: playerPublic(player) } };
     }
@@ -795,6 +826,63 @@ async function authAchievementClaim(req, body) {
     if (r.ok) {
       return { status: 200, data: { ok: true, reward: res.reward, player: playerPublic(r.player) } };
     }
+    if (r.error !== "PROFILE_CONFLICT") {
+      return { status: 500, data: { ok: false, error: r.error || "SAVE_FAILED" } };
+    }
+  }
+  return { status: 409, data: { ok: false, error: "PROFILE_CONFLICT" } };
+}
+
+const rankIpLimit = createRateLimiter({ maxPerWindow: 60, windowMs: 60_000 });
+
+/** Página RANK: faixas, temporada e Top 200 (público); com sessão, também a posição do jogador. */
+async function authRank(req) {
+  if (!rankIpLimit(`rank:${clientIp(req)}`)) {
+    return { status: 429, data: { ok: false, error: "RATE_LIMIT", retryAfterSec: 60 } };
+  }
+  let me = null;
+  const authed = await authFromHeader(req);
+  if (authed) {
+    touchRankDisplay(authed.id, rankDisplayInfo(authed));
+    me = { ...rankPublic(authed.id), ...rankDisplayInfo(authed) };
+  }
+  return {
+    status: 200,
+    data: {
+      ok: true,
+      season: seasonPublic(),
+      tiers: RANK_TIERS,
+      minMatches: MIN_MATCHES,
+      topSize: TOP_SIZE,
+      topCoins: TOP_COINS,
+      top: topPublic(),
+      me,
+    },
+  };
+}
+
+/** Fim de temporada: resgata as Moedas de Rank + Top 200 pendentes. */
+async function authRankClaim(req) {
+  const limited = allowAuthedAttempt(req);
+  if (limited) return limited;
+  const authed = await authFromHeader(req);
+  if (!authed) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const player = attempt === 0 ? await withCollection(authed) : await withCollection(await getPlayerById(authed.id));
+    if (!player) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+    const taken = takePending(player.id);
+    if (!taken.list.length) {
+      return { status: 400, data: { ok: false, error: "NOTHING_TO_CLAIM", player: playerPublic(player) } };
+    }
+    player.coins = Math.max(0, player.coins | 0) + taken.coins;
+    const r = await persistPlayer(player, { expectedRevision: Number(player.profileRevision ?? 0) });
+    if (r.ok) {
+      return {
+        status: 200,
+        data: { ok: true, reward: { coins: taken.coins, seasons: taken.list }, player: playerPublic(r.player) },
+      };
+    }
+    restorePending(player.id, taken.list);
     if (r.error !== "PROFILE_CONFLICT") {
       return { status: 500, data: { ok: false, error: r.error || "SAVE_FAILED" } };
     }
@@ -927,6 +1015,8 @@ export async function handleAuthHttp(req, res) {
   else if (req.method === "POST" && pathname === "/auth/journey/claim") result = await authJourneyClaim(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/redeem") result = await authRedeem(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/achievements/claim") result = await authAchievementClaim(fakeReq, body);
+  else if (req.method === "GET" && pathname === "/auth/rank") result = await authRank(fakeReq);
+  else if (req.method === "POST" && pathname === "/auth/rank/claim") result = await authRankClaim(fakeReq);
   else if (req.method === "POST" && pathname === "/auth/logout") result = await authLogout(fakeReq);
   else {
     sendAuthJson(res, 404, { ok: false, error: "NOT_FOUND" });
@@ -998,6 +1088,16 @@ export function registerAuthRoutes(app) {
 
   app.post("/auth/achievements/claim", async (req, res) => {
     const r = await authAchievementClaim(req, req.body || {});
+    res.status(r.status).json(r.data);
+  });
+
+  app.get("/auth/rank", async (req, res) => {
+    const r = await authRank(req);
+    res.status(r.status).json(r.data);
+  });
+
+  app.post("/auth/rank/claim", async (req, res) => {
+    const r = await authRankClaim(req);
     res.status(r.status).json(r.data);
   });
 
