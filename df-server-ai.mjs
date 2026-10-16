@@ -38,6 +38,13 @@ export function clearAiSeat(room, seat) {
   // Nova geração: ticks/follow-ups em voo abortam no check.
   room.aiGeneration = (room.aiGeneration | 0) + 1;
   room.aiControlled[seat] = false;
+  // Reset de fase quando este assento deixa de ser controlado por IA.
+  if (room.aiTurnSeat === seat) {
+    room.aiTurnSeat = null;
+    room.aiPhase = "talent";
+    room.aiMainFloor = 5;
+    room.aiStepsThisTurn = 0;
+  }
   if (room.aiGraceTimer[seat]) {
     clearTimeout(room.aiGraceTimer[seat]);
     room.aiGraceTimer[seat] = null;
@@ -306,7 +313,9 @@ function buildPendingOnEnterAction(room, seat, summonResult) {
       && resolution.targetPlayerIdx == null && resolution.targetIdx == null)) {
     try {
       if (typeof DfEngine.autoOnEnterResolution === "function") {
-        resolution = DfEngine.autoOnEnterResolution(state, cIdx, fIdx, plan, Math.random) || {};
+        // Determinístico: usar roomActionRng da sala em vez de Math.random (evita decisões não reproduzíveis entre clientes).
+        const aiRng = roomActionRng(room, seat);
+        resolution = DfEngine.autoOnEnterResolution(state, cIdx, fIdx, plan, aiRng) || {};
       }
     } catch (e) { /* */ }
   }
