@@ -489,7 +489,9 @@ function maybeRecordRankedResult(room, state) {
 function pairQueueSockets(io) {
   let pair = takePair();
   while (pair) {
-    const [sid0, sid1] = pair;
+    const [e0, e1] = pair;
+    const sid0 = e0.socketId;
+    const sid1 = e1.socketId;
     if (!isGameRole()) {
       const urls = getGameShardUrls();
       const serverUrl = urls[0] || getGatewayUrl();
@@ -520,6 +522,9 @@ function pairQueueSockets(io) {
     room.winPoints = 15;
     room.sockets[0] = sid0;
     room.sockets[1] = sid1;
+    // Nome do jogador na sala (Fase 5, decisão 4): vem da fila; sem
+    // token o nome fica null e o cliente mostra só o herói.
+    room.playerNames = [e0.displayName || null, e1.displayName || null];
     ensureSeatTokens(room);
     socketRoom.set(sid0, room.code);
     socketRoom.set(sid1, room.code);
@@ -1135,7 +1140,7 @@ io.on("connection", (socket) => {
     ack?.({ ok: true, playerId, ...getRankedProfile(playerId) });
   });
 
-  socket.on("join_queue", (_payload, ack) => {
+  socket.on("join_queue", async (payload, ack) => {
     if (rejectUnlessGateway(ack, "join_queue")) return;
     removeFromRankedQueue(socket.id);
     removeFromQueue(socket.id);
@@ -1149,7 +1154,17 @@ io.on("connection", (socket) => {
       }
     }
     leaveSocketRoom(socket);
-    const queued = addToQueue(socket.id);
+    // Nome na fila (Fase 5): token opcional; sem token ou inválido,
+    // entra anônimo (displayName null) como o cliente antigo.
+    let displayName = null;
+    const tok = payload?.token || payload?.authToken;
+    if (tok) {
+      try {
+        const account = await authPlayerFromToken(String(tok));
+        if (account?.displayName) displayName = account.displayName;
+      } catch (e) { /* anônimo */ }
+    }
+    const queued = addToQueue(socket.id, displayName);
     if (queued?.ok === false) {
       ack?.({ ok: false, error: queued.error || "SERVER_BUSY" });
       return;

@@ -3,7 +3,7 @@
  */
 import { MAX_QUEUE } from "./df-mp-limits.mjs";
 
-/** @type {{ socketId: string, joinedAt: number }[]} */
+/** @type {{ socketId: string, joinedAt: number, displayName: string | null }[]} */
 const queue = [];
 
 export function removeFromQueue(socketId) {
@@ -14,12 +14,12 @@ export function removeFromQueue(socketId) {
 /**
  * @returns {{ ok: true, size: number } | { ok: false, error: string, size: number }}
  */
-export function addToQueue(socketId) {
+export function addToQueue(socketId, displayName = null) {
   removeFromQueue(socketId);
   if (queue.length >= MAX_QUEUE) {
     return { ok: false, error: "SERVER_BUSY", size: queue.length };
   }
-  queue.push({ socketId, joinedAt: Date.now() });
+  queue.push({ socketId, joinedAt: Date.now(), displayName: displayName || null });
   return { ok: true, size: queue.length };
 }
 
@@ -33,12 +33,12 @@ export function isInQueue(socketId) {
   return queue.some((e) => e.socketId === socketId);
 }
 
-/** @returns {[string, string] | null} */
+/** @returns {[{ socketId: string, joinedAt: number, displayName: string | null }, { socketId: string, joinedAt: number, displayName: string | null }] | null} */
 export function takePair() {
   if (queue.length < 2) return null;
   const a = queue.shift();
   const b = queue.shift();
-  return [a.socketId, b.socketId];
+  return [a, b];
 }
 
 export function queueSize() {
