@@ -360,6 +360,9 @@ function startMatchForRoom(room, io) {
     if (!sid) continue;
     io.to(sid).emit("match_start", {
       ...match,
+      // (Fase 6 T1) fog: cada assento recebe só a própria mão; a do
+      // adversário vai como contagem (projectStateForSeat).
+      gameState: projectStateForSeat(match.gameState, seat),
       yourSeat: seat,
       seatToken: seatTokenFor(room, seat),
       code: room.code,
@@ -1265,7 +1268,8 @@ io.on("connection", (socket) => {
           return ack?.({
             ok: false,
             error: result.error || "ILLEGAL_ACTION",
-            authoritativeState: auth,
+            // (Fase 6 T1) fog: o estado de reconciliação também é projetado.
+            authoritativeState: auth ? projectStateForSeat(auth, seat) : null,
           });
         }
 
@@ -1324,12 +1328,15 @@ io.on("connection", (socket) => {
           ok: true,
         });
 
+        // (Fase 6 T1) fog: o ack leva o estado projetado por assento —
+        // a mão do adversário nunca viaja para o ator.
+        const ackStateRaw = (result.omitAuthoritativeState || (result.skip && result.uiOnly))
+          ? (room.gameState || null)
+          : (result.state || room.gameState || null);
         const ackPayload = {
           ok: true,
           seq: room.actionSeq,
-          authoritativeState: (result.omitAuthoritativeState || (result.skip && result.uiOnly))
-            ? (room.gameState || null)
-            : (result.state || room.gameState || null),
+          authoritativeState: ackStateRaw ? projectStateForSeat(ackStateRaw, seat) : null,
           events: result.events || [],
           logEntry: result.logEntry || null,
           skip: !!result.skip,
