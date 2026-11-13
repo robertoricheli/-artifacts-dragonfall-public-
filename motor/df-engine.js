@@ -77,22 +77,6 @@ export function validateAction(state, action, ctx = {}) {
         case T.SUMMON: {
             const hand = state.players[pid]?.hand;
             const idx = resolveSummonHandIdx(hand, a.handIdx, a.cardName, a.uid);
-            const card = hand?.[idx];
-            if (card?.summonRitual && a.freeAction) {
-                const sacIdx = a.sacrificeIdx;
-                const field = state.players[pid]?.field;
-                const sac = field?.[sacIdx];
-                const req = card.summonRitual;
-                if (sacIdx == null || sacIdx < 0 || !sac) {
-                    return { ok: false, code: "NO_RITUAL_SACRIFICE" };
-                }
-                const sacPow = sac.currentPower ?? sac.power ?? 0;
-                if (sacPow !== req)
-                    return { ok: false, code: "BAD_RITUAL_POWER" };
-                if (a.sacrificeUid != null && String(sac.uid || "") !== String(a.sacrificeUid)) {
-                    return { ok: false, code: "BAD_RITUAL_UID" };
-                }
-            }
             return R.canSummon(state, pid, idx, {
                 freeAction: !!a.freeAction,
                 ...R.summonContextForPlayer(state, pid),
@@ -100,6 +84,10 @@ export function validateAction(state, action, ctx = {}) {
             });
         }
         case T.ATTACK_RESOLVE:
+            // Trava de turno (Fase 6 T5): canAttack não checa de quem é o
+            // turno — sem isto, um cliente podia atacar no turno do outro.
+            if (state.currentPlayer !== pid)
+                return { ok: false, code: "NOT_YOUR_TURN" };
             return R.canAttack(state, pid, a.attackerIdx, a.defenderPlayerId, a.defenderIdx, ctx);
         case T.REACTIVE_BLOCK_ANSWER:
             if (!a.use)
@@ -109,18 +97,6 @@ export function validateAction(state, action, ctx = {}) {
             if (!a.use)
                 return { ok: true, code: "OK" };
             return R.canOfferReactiveProtection(state, pid, a.attOwner ?? 1 - pid);
-        case T.REACTIVE_CANCEL_ANSWER:
-            if (!a.use)
-                return { ok: true, code: "OK" };
-            return R.canOfferCancelUltimate(state, pid, a.attOwner ?? 1 - pid);
-        case T.REACTIVE_EXHAUSTION_ANSWER:
-            if (!a.use)
-                return { ok: true, code: "OK" };
-            return R.canOfferExaustao(state, pid, a.attOwner ?? 1 - pid);
-        case T.REACTIVE_COUNTER_ANSWER:
-            if (!a.use)
-                return { ok: true, code: "OK" };
-            return R.canOfferContramagica(state, pid, a.attOwner ?? 1 - pid);
         case T.ON_ENTER_RESOLVE:
             if (a.casterIdx == null || a.fieldIdx == null)
                 return { ok: false, code: "BAD_ON_ENTER" };
@@ -128,9 +104,8 @@ export function validateAction(state, action, ctx = {}) {
         case T.TALENT_START: {
             if (state.currentPlayer !== pid)
                 return { ok: false, code: "NOT_YOUR_TURN" };
-            const hand = state.players[pid]?.hand;
-            const talentIdx = resolveSummonHandIdx(hand || [], a.handIdx, a.cardName, a.uid);
-            const handCard = hand?.[talentIdx];
+            const card = state.players[pid]?.hand;
+            const handCard = card?.[a.handIdx];
             if (!handCard || handCard.category !== "talent")
                 return { ok: false, code: "NOT_TALENT" };
             const pl = state.players[pid];
@@ -143,158 +118,8 @@ export function validateAction(state, action, ctx = {}) {
                 return { ok: false, code: "INSUFFICIENT_ACTIONS" };
             return { ok: true, code: "OK" };
         }
-        case T.TALENT_DISCARD: {
-            const at = state.activeTalent;
-            if (!at?.ownerP && at !== null && at !== undefined) {
-                /* activeTalent shape odd — still allow clear attempt */
-            }
-            if (at && at.ownerP != null && at.ownerP !== pid)
-                return { ok: false, code: "NOT_TALENT_OWNER" };
-            return { ok: true, code: "OK" };
-        }
         case T.ULTIMATE_PLAY:
             return validateUltimatePlay(state, a);
-        case T.FIELD_COMMIT: {
-            if (state.currentPlayer !== pid)
-                return { ok: false, code: "NOT_YOUR_TURN" };
-            const mutations = a.mutations;
-            if (!Array.isArray(mutations) || !mutations.length)
-                return { ok: false, code: "NO_MUTATIONS" };
-            for (const m of mutations) {
-                const op = String(m?.op || "");
-                const tp = m.targetP;
-                const ti = m.targetI;
-                if (tp == null || tp < 0)
-                    return { ok: false, code: "BAD_TARGET" };
-                const champ = state.players[tp]?.field;
-                if (!champ)
-                    return { ok: false, code: "NO_TARGET" };
-                if (op === "insertToken" || op === "insert") {
-                    if (ti == null || ti < 0)
-                        return { ok: false, code: "BAD_TARGET" };
-                    if (!m.card || typeof m.card !== "object")
-                        return { ok: false, code: "NO_CARD" };
-                    continue;
-                }
-                if (op === "setActions") {
-                    if (m.actions == null)
-                        return { ok: false, code: "BAD_AMOUNT" };
-                    continue;
-                }
-                if (op === "discardToHand") {
-                    if (!m.card || typeof m.card !== "object")
-                        return { ok: false, code: "NO_CARD" };
-                    continue;
-                }
-                if (ti == null || ti < 0)
-                    return { ok: false, code: "BAD_TARGET" };
-                const card = champ?.[ti];
-                if (!card)
-                    return { ok: false, code: "NO_TARGET" };
-                if (op === "reducePower") {
-                    const amount = m.amount | 0;
-                    if (amount < 1)
-                        return { ok: false, code: "BAD_AMOUNT" };
-                }
-                else if (op === "destroy") {
-                    if (m.requirePower != null) {
-                        const pow = card.currentPower ?? card.power ?? 0;
-                        if (pow !== m.requirePower)
-                            return { ok: false, code: "BAD_POWER" };
-                    }
-                }
-                else if (op === "setStatus") {
-                    // flags opcionais — alvo já validado
-                }
-                else if (op === "transformToken") {
-                    // Identidade in-place (Transformar / Ursificar) — card/flags já no mutation
-                }
-                else if (op === "returnToHand") {
-                    // Medo / scare — remove do campo e devolve à mão
-                }
-                else {
-                    return { ok: false, code: "BAD_MUTATION" };
-                }
-            }
-            return { ok: true, code: "OK" };
-        }
-        case T.TALENT_TARGET: {
-            if (state.currentPlayer !== pid)
-                return { ok: false, code: "NOT_YOUR_TURN" };
-            if (!state.activeTalent)
-                return { ok: false, code: "NO_ACTIVE_TALENT" };
-            return { ok: true, code: "OK" };
-        }
-        case T.UNFREEZE_CONFIRM: {
-            if (state.currentPlayer !== pid)
-                return { ok: false, code: "NOT_YOUR_TURN" };
-            const fIdx = a.fieldIdx;
-            const field = state.players[pid]?.field;
-            const card = field?.[fIdx];
-            if (!card)
-                return { ok: false, code: "NO_TARGET" };
-            if (!card.frozen)
-                return { ok: false, code: "NOT_FROZEN" };
-            const yes = a.yes === true || a.confirmed === true
-                || (a.choiceIndex === 0 && a.yes !== false);
-            if (yes && (state.players[pid].actions | 0) < 1) {
-                return { ok: false, code: "INSUFFICIENT_ACTIONS" };
-            }
-            return { ok: true, code: "OK" };
-        }
-        case T.NECROMANCIA_PICK: {
-            if (state.currentPlayer !== pid)
-                return { ok: false, code: "NOT_YOUR_TURN" };
-            const casterIdx = (a.casterIdx ?? pid);
-            const discard = state.players[casterIdx]?.discard;
-            if (!discard?.length)
-                return { ok: false, code: "NO_DISCARD" };
-            const cardName = a.cardName || a.card?.name;
-            const uid = a.uid || a.card?.uid;
-            let di = a.discardIndex;
-            if (di == null)
-                di = a.discardIdx;
-            if ((di == null || di < 0) && uid) {
-                di = discard.findIndex((c) => c && c.uid === uid);
-            }
-            if ((di == null || di < 0) && cardName) {
-                di = discard.findIndex((c) => c && c.name === cardName);
-            }
-            if (di == null || di < 0 || di >= discard.length)
-                return { ok: false, code: "NECRO_BAD_CARD" };
-            return { ok: true, code: "OK" };
-        }
-        case T.ABILITY_TARGET: {
-            if (state.currentPlayer !== pid)
-                return { ok: false, code: "NOT_YOUR_TURN" };
-            const cIdx = (a.casterIdx ?? pid);
-            const fIdx = a.fieldIdx;
-            if (fIdx == null || fIdx < 0)
-                return { ok: false, code: "BAD_ON_ENTER" };
-            return R.canResolveOnEnter(state, cIdx, fIdx, ctx);
-        }
-        case T.ULTIMATE_TARGET:
-            return validateUltimatePlay(state, { ...a, type: T.ULTIMATE_PLAY });
-        case T.MENU_CHOICE: {
-            if (state.currentPlayer !== pid)
-                return { ok: false, code: "NOT_YOUR_TURN" };
-            const kind = String(a.menuKind || a.menuType || a.abilityKey || "");
-            if (kind === "unfreeze" || kind === "UNFREEZE_CONFIRM") {
-                return validateAction(state, {
-                    ...a,
-                    type: T.UNFREEZE_CONFIRM,
-                    yes: a.choiceIndex === 0 || a.yes === true,
-                }, ctx);
-            }
-            if (kind === "target-player" || a.targetPlayerIdx != null || a.abilityKey) {
-                const cIdx = (a.casterIdx ?? pid);
-                const fIdx = a.fieldIdx;
-                if (fIdx == null || fIdx < 0)
-                    return { ok: false, code: "BAD_MENU" };
-                return R.canResolveOnEnter(state, cIdx, fIdx, ctx);
-            }
-            return { ok: false, code: "BAD_MENU" };
-        }
         default:
             return { ok: true, code: "DELEGATE" };
     }
@@ -325,9 +150,6 @@ export function applyAction(state, action, ctx = {}) {
             const card = deck.pop();
             if (!card)
                 return { ok: false, state, events: [], error: "DECK_EMPTY" };
-            if (p.maldicaoForgetNext && card?.category === "champion") {
-                card.silencedInHand = true;
-            }
             p.hand.push(card);
             p.actions = p.actions - 1;
             events.push({ type: "DRAW", playerId: pid, card });
@@ -349,33 +171,6 @@ export function applyAction(state, action, ctx = {}) {
             if (wantName && (!handCard || String(handCard.name || "") !== wantName)) {
                 return { ok: false, state, events: [], error: "CARD_MISMATCH" };
             }
-            // Ritual: sacrifica o aliado no servidor ANTES de invocar (evita Gamer+Tiamat).
-            if (handCard?.summonRitual && a.freeAction) {
-                const sacIdx = a.sacrificeIdx;
-                const fieldNow = p.field;
-                const sac = fieldNow?.[sacIdx];
-                const req = handCard.summonRitual;
-                if (sacIdx == null || sacIdx < 0 || !sac) {
-                    return { ok: false, state, events: [], error: "NO_RITUAL_SACRIFICE" };
-                }
-                const sacPow = sac.currentPower ?? sac.power ?? 0;
-                if (sacPow !== req)
-                    return { ok: false, state, events: [], error: "BAD_RITUAL_POWER" };
-                if (a.sacrificeUid != null && String(sac.uid || "") !== String(a.sacrificeUid)) {
-                    return { ok: false, state, events: [], error: "BAD_RITUAL_UID" };
-                }
-                const removed = fieldNow.splice(sacIdx, 1)[0];
-                const sacDiscard = p.discard || [];
-                sacDiscard.push(removed);
-                p.discard = sacDiscard;
-                events.push({
-                    type: "DESTROY",
-                    p: pid,
-                    i: sacIdx,
-                    reason: "ritualSacrifice",
-                    card: removed,
-                });
-            }
             const card = hand.splice(summonIdx, 1)[0];
             const champ = {
                 ...card,
@@ -386,78 +181,15 @@ export function applyAction(state, action, ctx = {}) {
                 frozen: false,
                 isToken: false,
             };
-            // Maldição dos Sete Mares: o próximo campeão deste jogador entra sem habilidade.
-            if (p.maldicaoForgetNext) {
-                champ.silenced = true;
-                champ.onEnter = null;
-                champ.onDestroy = null;
-                champ.talentEffect = null;
-                champ.constantEffect = null;
-                champ.silencedInHand = false;
-                p.maldicaoForgetNext = false;
-                for (const hc of p.hand || []) {
-                    if (hc)
-                        hc.silencedInHand = false;
-                }
-                events.push({
-                    type: "MALDICAO_CONSUMED",
-                    playerId: pid,
-                    cardName: champ.name,
-                    visual: "maldicao_sete_mares",
-                });
-            }
             const field = p.field;
-            if (R.ensureFieldSlots) {
-                R.ensureFieldSlots(field);
-                // Espaço pedido inválido/ocupado → padrão centro-para-fora (não rejeita a jogada).
-                const wanted = a.slot;
-                const slot = R.isValidFieldSlot?.(wanted) && R.freeFieldSlots?.(field).includes(wanted)
-                    ? wanted
-                    : (a.insertIdx != null ? null : R.pickDefaultFieldSlot?.(field));
-                if (slot != null && slot >= 0) {
-                    champ.slot = slot;
-                    field.splice(R.insertIndexForSlot(field, slot), 0, champ);
-                }
-                else {
-                    delete champ.slot;
-                    field.splice(Math.min(a.insertIdx, field.length), 0, champ);
-                    R.ensureFieldSlots(field);
-                }
-            }
-            else {
-                const insertIdx = a.insertIdx != null
-                    ? a.insertIdx
-                    : R.defaultSummonInsertIndex(field.length);
-                field.splice(Math.min(insertIdx, field.length), 0, champ);
-            }
+            const insertIdx = a.insertIdx != null
+                ? a.insertIdx
+                : R.defaultSummonInsertIndex(field.length);
+            field.splice(Math.min(insertIdx, field.length), 0, champ);
             if (!a.freeAction)
                 p.actions = p.actions - R.championSummonCost(card);
             const fIdx = field.indexOf(champ);
             events.push({ type: "SUMMON", playerId: pid, fieldIdx: fIdx, card: champ, cardName: champ.name });
-            if (card.podridao) {
-                const podChamp = field.splice(fIdx, 1)[0];
-                delete podChamp.podridao;
-                const discard = p.discard || [];
-                discard.push(podChamp);
-                p.discard = discard;
-                events.push({
-                    type: "DESTROY",
-                    p: pid,
-                    i: fIdx,
-                    reason: "podridaoFizzle",
-                    name: podChamp.name,
-                    uid: podChamp.uid,
-                    noVpOnKill: true,
-                });
-                events.push({
-                    type: "PODRIDAO_FIZZLE",
-                    playerId: pid,
-                    category: "champion",
-                    cardName: podChamp.name,
-                    visual: "podridao_fizzle",
-                });
-                break;
-            }
             if (champ.onEnter) {
                 events.push({ type: "ON_ENTER_PENDING", playerId: pid, fieldIdx: fIdx, onEnter: champ.onEnter });
             }
@@ -472,19 +204,6 @@ export function applyAction(state, action, ctx = {}) {
             const defP = next.players[a.defenderPlayerId];
             const defField = defP.field;
             const def = defField[a.defenderIdx];
-            if (a.blocked) {
-                const cost = leg.actionCost ?? R.getAttackActionCost(att, def);
-                if (cost > 0)
-                    p.actions = p.actions - cost;
-                att.tapped = true;
-                att.freeAttack = false;
-                events.push({
-                    type: "COMBAT_BLOCKED",
-                    attacker: { p: pid, i: a.attackerIdx },
-                    defender: { p: a.defenderPlayerId, i: a.defenderIdx },
-                });
-                break;
-            }
             const out = R.combatOutcome(att, def);
             const cost = leg.actionCost ?? R.getAttackActionCost(att, def);
             if (cost > 0)
@@ -498,19 +217,7 @@ export function applyAction(state, action, ctx = {}) {
             });
             if (out.killD) {
                 defField.splice(a.defenderIdx, 1);
-                // Paridade com destroyChampion do cliente: mortos em combate vão ao descarte
-                // (Paladino / Necromancia / etc. no servidor MP).
-                const defDiscard = defP.discard || [];
-                defDiscard.push(def);
-                defP.discard = defDiscard;
-                events.push({
-                    type: "DESTROY",
-                    p: a.defenderPlayerId,
-                    i: a.defenderIdx,
-                    reason: "combat",
-                    card: def.name,
-                    uid: def.uid,
-                });
+                events.push({ type: "DESTROY", p: a.defenderPlayerId, i: a.defenderIdx, reason: "combat" });
                 const noHonor = R.hasNoHonor(def);
                 if (out.pvTo === "attacker" && !noHonor) {
                     const amount = R.combatVictoryPointReward(att);
@@ -527,37 +234,10 @@ export function applyAction(state, action, ctx = {}) {
                         ...burst,
                     });
                 }
-                // Laço de Sangue: atacante (ainda em campo) buffa aliado aleatório.
-                if (!out.killA && (R.hasLacoDeSangue?.(att) || (att.constantEffect === "lacoDeSangue" && !att.silenced))) {
-                    const laco = R.applyLacoDeSangue?.(next, pid, ctx.rng || Math.random);
-                    if (laco && laco.targetI != null) {
-                        events.push({
-                            type: "LACO_DE_SANGUE",
-                            killerP: pid,
-                            killerUid: att.uid,
-                            targetP: pid,
-                            targetI: laco.targetI,
-                            targetName: laco.targetName,
-                            visual: "laco_de_sangue",
-                        });
-                    }
-                }
             }
-            const attHadLaco = !!(out.killD && out.killA && (R.hasLacoDeSangue?.(att)
-                || (att.constantEffect === "lacoDeSangue" && !att.silenced)));
             if (out.killA) {
                 field.splice(a.attackerIdx, 1);
-                const attDiscard = p.discard || [];
-                attDiscard.push(att);
-                p.discard = attDiscard;
-                events.push({
-                    type: "DESTROY",
-                    p: pid,
-                    i: a.attackerIdx,
-                    reason: "combat",
-                    card: att.name,
-                    uid: att.uid,
-                });
+                events.push({ type: "DESTROY", p: pid, i: a.attackerIdx, reason: "combat" });
                 const noHonor = R.hasNoHonor(att);
                 if (out.pvTo === "defender" && !noHonor) {
                     const amount = R.combatVictoryPointReward(def);
@@ -580,76 +260,37 @@ export function applyAction(state, action, ctx = {}) {
                     });
                 }
             }
-            // Empate mútuo: Laço ainda tenta buffar aliados restantes.
-            if (attHadLaco) {
-                const laco = R.applyLacoDeSangue?.(next, pid, ctx.rng || Math.random);
-                if (laco && laco.targetI != null) {
-                    events.push({
-                        type: "LACO_DE_SANGUE",
-                        killerP: pid,
-                        killerUid: att.uid,
-                        targetP: pid,
-                        targetI: laco.targetI,
-                        targetName: laco.targetName,
-                        visual: "laco_de_sangue",
-                    });
-                }
-            }
             break;
         }
         case T.END_TURN: {
             if (!R.canEndTurn(next, pid).ok)
                 return { ok: false, state, events: [], error: "NOT_YOUR_TURN" };
-            // Paridade com endTurn() do cliente: bônus de muralha no fim → avança →
-            // manutenção/saque do PRÓXIMO jogador (não do que passou a vez).
-            if (typeof R.applyWallBonusOnTurnEnd === "function") {
-                R.applyWallBonusOnTurnEnd(next, pid);
+            const maint = R.runTurnMaintenance(next, pid, R.LIMITS);
+            maint.poisonDestroyed.forEach((k) => {
+                events.push({ type: "POISON_KILL", ...k, by: pid });
+            });
+            if (maint.passiveVpGain > 0) {
+                events.push({ type: "VP_GAIN", playerId: pid, amount: maint.passiveVpGain, reason: "maintenance" });
             }
+            if (maint.poisonVpGain > 0) {
+                events.push({ type: "VP_GAIN", playerId: pid, amount: maint.poisonVpGain, reason: "poison" });
+            }
+            maint.returned.forEach((r) => {
+                events.push({ type: "PULLED_RETURN", ...r, toPlayer: pid });
+            });
             const count = next.playersCount ?? next.players.length;
             next.currentPlayer = (pid + 1) % count;
+            // Paridade com endTurn() do cliente: turnNumber sobe a cada volta ao assento 0.
             if (next.currentPlayer === 0) {
                 next.turnNumber = (next.turnNumber ?? 1) + 1;
             }
-            const nextPid = next.currentPlayer;
-            const maint = R.runTurnMaintenance(next, nextPid, R.LIMITS);
-            maint.poisonDestroyed.forEach((k) => {
-                events.push({ type: "POISON_KILL", ...k, by: nextPid });
-            });
-            if (Array.isArray(maint.powerChanges)) {
-                for (const ch of maint.powerChanges) {
-                    if (ch?.targetP == null || ch?.targetI == null)
-                        continue;
-                    events.push({
-                        type: "POWER_CHANGED",
-                        targetP: ch.targetP,
-                        targetI: ch.targetI,
-                        currentPower: ch.currentPower | 0,
-                        reason: ch.reason || "crescimento",
-                    });
-                }
-            }
-            if (maint.passiveVpGain > 0) {
-                events.push({ type: "VP_GAIN", playerId: nextPid, amount: maint.passiveVpGain, reason: "maintenance" });
-            }
-            if (maint.poisonVpGain > 0) {
-                events.push({ type: "VP_GAIN", playerId: nextPid, amount: maint.poisonVpGain, reason: "poison" });
-            }
-            maint.returned.forEach((r) => {
-                events.push({ type: "PULLED_RETURN", ...r, toPlayer: nextPid });
-            });
-            const np = next.players[nextPid];
+            const np = next.players[next.currentPlayer];
             const maxHand = R.LIMITS?.MAX_HAND ?? 8;
             if (!maint.skipDraw && np.hand.length < maxHand && np.deck.length > 0) {
-                const drawn = np.deck.pop();
-                if (drawn) {
-                    if (np.maldicaoForgetNext && drawn?.category === "champion") {
-                        drawn.silencedInHand = true;
-                    }
-                    np.hand.push(drawn);
-                    events.push({ type: "DRAW", playerId: nextPid, reason: "upkeep" });
-                }
+                np.hand.push(np.deck.pop());
+                events.push({ type: "DRAW", playerId: next.currentPlayer, reason: "upkeep" });
             }
-            events.push({ type: "TURN_START", playerId: nextPid });
+            events.push({ type: "TURN_START", playerId: next.currentPlayer });
             break;
         }
         case T.ON_ENTER_RESOLVE: {
@@ -684,36 +325,6 @@ export function applyAction(state, action, ctx = {}) {
             events.push(...(res.events || []));
             break;
         }
-        case T.REACTIVE_CANCEL_ANSWER: {
-            const ER = getEffects();
-            if (!ER?.applyReactiveUse)
-                return { ok: false, state, events: [], error: "NO_REACTIVE" };
-            const res = ER.applyReactiveUse(next, pid, "cancelarUltimate", !!a.use);
-            if (!res.ok)
-                return { ok: false, state, events: [], error: res.error || "REACTIVE_FAILED" };
-            events.push(...(res.events || []));
-            break;
-        }
-        case T.REACTIVE_EXHAUSTION_ANSWER: {
-            const ER = getEffects();
-            if (!ER?.applyReactiveUse)
-                return { ok: false, state, events: [], error: "NO_REACTIVE" };
-            const res = ER.applyReactiveUse(next, pid, "exaustao", !!a.use);
-            if (!res.ok)
-                return { ok: false, state, events: [], error: res.error || "REACTIVE_FAILED" };
-            events.push(...(res.events || []));
-            break;
-        }
-        case T.REACTIVE_COUNTER_ANSWER: {
-            const ER = getEffects();
-            if (!ER?.applyReactiveUse)
-                return { ok: false, state, events: [], error: "NO_REACTIVE" };
-            const res = ER.applyReactiveUse(next, pid, "contramagica", !!a.use);
-            if (!res.ok)
-                return { ok: false, state, events: [], error: res.error || "REACTIVE_FAILED" };
-            events.push(...(res.events || []));
-            break;
-        }
         case T.SURRENDER: {
             const count = next.playersCount ?? next.players.length;
             const opp = ((pid + 1) % count);
@@ -726,335 +337,10 @@ export function applyAction(state, action, ctx = {}) {
             const ER = getEffects();
             if (!ER?.applyTalentFromHand)
                 return { ok: false, state, events: [], error: "NO_TALENT" };
-            const talentHand = p.hand;
-            const talentIdx = resolveSummonHandIdx(talentHand, a.handIdx, a.cardName, a.uid);
-            a.handIdx = talentIdx;
-            const res = ER.applyTalentFromHand(next, pid, talentIdx);
+            const res = ER.applyTalentFromHand(next, pid, a.handIdx);
             if (!res.ok)
                 return { ok: false, state, events: [], error: res.error || "TALENT_FAILED" };
             events.push(...(res.events || []));
-            break;
-        }
-        case T.TALENT_DISCARD: {
-            const ER = getEffects();
-            if (typeof ER?.applyTalentDiscard !== "function") {
-                return { ok: false, state, events: [], error: "NO_TALENT_DISCARD" };
-            }
-            const res = ER.applyTalentDiscard(next, pid);
-            if (!res.ok)
-                return { ok: false, state, events: res.events || [], error: res.error || "TALENT_DISCARD_FAILED" };
-            events.push(...(res.events || []));
-            break;
-        }
-        case T.TALENT_TARGET: {
-            const ER = getEffects();
-            if (typeof ER?.applyTalentTarget !== "function") {
-                return { ok: false, state, events: [], error: "NO_TALENT_TARGET" };
-            }
-            const res = ER.applyTalentTarget(next, pid, a.targetPlayerId ?? a.targetP, a.targetFieldIdx ?? a.targetI, {
-                enemyP: a.enemyP ?? a.enemyPlayerId,
-                enemyI: a.enemyI ?? a.enemyFieldIdx,
-            });
-            if (!res.ok)
-                return { ok: false, state, events: res.events || [], error: res.error || "TALENT_TARGET_FAILED" };
-            if (res.state)
-                Object.assign(next, res.state);
-            events.push(...(res.events || []));
-            break;
-        }
-        case T.FIELD_COMMIT: {
-            const mutations = a.mutations || [];
-            for (const m of mutations) {
-                const op = String(m.op || "");
-                const tp = m.targetP;
-                const ti = m.targetI;
-                const owner = next.players[tp];
-                const field = owner?.field;
-                if (!field) {
-                    return { ok: false, state, events: [], error: "NO_TARGET" };
-                }
-                if (op === "insertToken" || op === "insert") {
-                    const cardSnap = { ...m.card };
-                    if (!cardSnap.uid)
-                        cardSnap.uid = `tok-${Date.now()}-${field.length}`;
-                    if (cardSnap.currentPower == null)
-                        cardSnap.currentPower = cardSnap.power ?? 0;
-                    const idx = ti != null
-                        ? Math.max(0, Math.min(ti | 0, field.length))
-                        : field.length;
-                    field.splice(idx, 0, cardSnap);
-                    events.push({
-                        type: "TOKEN_INSERT",
-                        targetP: tp,
-                        targetI: idx,
-                        cardName: cardSnap.name,
-                        uid: cardSnap.uid,
-                    });
-                    continue;
-                }
-                if (op === "setActions") {
-                    owner.actions = m.actions | 0;
-                    events.push({
-                        type: "ACTIONS_SET",
-                        targetP: tp,
-                        actions: owner.actions,
-                    });
-                    continue;
-                }
-                if (op === "discardToHand") {
-                    const discard = owner.discard || [];
-                    let di = m.discardIdx;
-                    if (di == null || di < 0) {
-                        const cardObj = m.card;
-                        const wantUid = cardObj?.uid || m.uid;
-                        const wantName = cardObj?.name || m.cardName;
-                        if (wantUid) {
-                            di = discard.findIndex((c) => c && c.uid === wantUid);
-                        }
-                        if ((di == null || di < 0) && wantName) {
-                            di = discard.findIndex((c) => c && c.name === wantName);
-                        }
-                    }
-                    if (di == null || di < 0 || di >= discard.length) {
-                        return { ok: false, state, events: [], error: "NO_DISCARD_CARD" };
-                    }
-                    discard.splice(di, 1);
-                    owner.discard = discard;
-                    const handCard = m.card && typeof m.card === "object"
-                        ? { ...m.card }
-                        : {};
-                    delete handCard._summoning;
-                    const hand = owner.hand || [];
-                    hand.push(handCard);
-                    owner.hand = hand;
-                    events.push({
-                        type: "NECROMANCIA",
-                        casterIdx: tp,
-                        card: handCard.name,
-                        visual: "necromancia",
-                    });
-                    continue;
-                }
-                if (op === "returnToHand") {
-                    const card = field?.[ti];
-                    if (!card) {
-                        return { ok: false, state, events: [], error: "NO_TARGET" };
-                    }
-                    field.splice(ti, 1);
-                    const handCard = m.handCard && typeof m.handCard === "object"
-                        ? { ...m.handCard }
-                        : { ...card, tapped: false, freeAttack: false };
-                    delete handCard._summoning;
-                    const hand = owner.hand || [];
-                    // Manual §9: mão cheia (8) → a carta NÃO volta, sai do jogo
-                    // (nem mão, nem descarte).
-                    const maxHand = R.LIMITS?.MAX_HAND ?? 8;
-                    const exiled = hand.length >= maxHand;
-                    if (!exiled)
-                        hand.push(handCard);
-                    owner.hand = hand;
-                    events.push({
-                        type: "SCARE_RETURN",
-                        targetP: tp,
-                        targetI: ti,
-                        cardName: handCard.name,
-                        exiled,
-                        visual: "scare_return",
-                    });
-                    continue;
-                }
-                const card = field?.[ti];
-                if (!card) {
-                    return { ok: false, state, events: [], error: "NO_TARGET" };
-                }
-                if (op === "reducePower") {
-                    const amount = m.amount | 0;
-                    if (typeof R.reduceChampionPower === "function") {
-                        R.reduceChampionPower(card, amount);
-                    }
-                    else {
-                        card.currentPower = Math.max(0, (card.currentPower ?? card.power ?? 0) - amount);
-                    }
-                    events.push({
-                        type: "POWER_REDUCED",
-                        targetP: tp,
-                        targetI: ti,
-                        amount,
-                        powerAfter: card.currentPower,
-                    });
-                    const destroyIfZero = m.destroyIfZero !== false;
-                    if (destroyIfZero && (card.currentPower ?? 0) <= 0) {
-                        field.splice(ti, 1);
-                        const discard = owner.discard || [];
-                        discard.push(card);
-                        owner.discard = discard;
-                        events.push({
-                            type: "DESTROY",
-                            p: tp,
-                            i: ti,
-                            reason: m.reason || "field_commit",
-                            card: card.name,
-                        });
-                        if (m.awardVpTo != null && !m.noVpOnKill) {
-                            const killer = next.players[m.awardVpTo];
-                            if (killer) {
-                                const amountVp = 1;
-                                killer.vp = (killer.vp ?? 0) + amountVp;
-                                events.push({
-                                    type: "VP_GAIN",
-                                    playerId: m.awardVpTo,
-                                    amount: amountVp,
-                                    reason: m.reason || "field_commit",
-                                });
-                            }
-                        }
-                        const burst = R.applyOnDestroyBurst(next, tp, card, m.reason || "field_commit", ctx.rng);
-                        if (burst?.ability) {
-                            events.push({
-                                type: "ON_DESTROY_BURST",
-                                ownerIdx: tp,
-                                source: card.name,
-                                reason: m.reason || "field_commit",
-                                ...burst,
-                            });
-                        }
-                    }
-                }
-                else if (op === "destroy") {
-                    field.splice(ti, 1);
-                    const discard = owner.discard || [];
-                    discard.push(card);
-                    owner.discard = discard;
-                    events.push({
-                        type: "DESTROY",
-                        p: tp,
-                        i: ti,
-                        reason: m.reason || "field_commit",
-                        card: card.name,
-                    });
-                    const noHonor = !m.forceAward && R.hasNoHonor(card);
-                    if (m.awardVpTo != null && !m.noVpOnKill && !noHonor) {
-                        const killer = next.players[m.awardVpTo];
-                        if (killer) {
-                            killer.vp = (killer.vp ?? 0) + 1;
-                            events.push({
-                                type: "VP_GAIN",
-                                playerId: m.awardVpTo,
-                                amount: 1,
-                                reason: m.reason || "field_commit",
-                            });
-                        }
-                    }
-                    const burst = R.applyOnDestroyBurst(next, tp, card, m.reason || "field_commit", ctx.rng);
-                    if (burst?.ability) {
-                        events.push({
-                            type: "ON_DESTROY_BURST",
-                            ownerIdx: tp,
-                            source: card.name,
-                            reason: m.reason || "field_commit",
-                            ...burst,
-                        });
-                    }
-                }
-                else if (op === "setStatus") {
-                    const STATUS_BOOL = [
-                        "frozen", "tapped", "freeAttack", "shielded", "shieldedPermanent",
-                        "barrier", "barrierPermanent", "vulnerable", "silenced", "poisoned",
-                        "fury", "pulled", "inspiracao", "mimico", "wallBuff", "guerraBuff",
-                        "tecnicasSobrepujar", "foreverGrowth", "fireAura", "burning",
-                        "corruptedNoHonor", "furyBonusActive", "podridao", "silencedInHand",
-                        "prisaoPrismatica", "desafianteAtivo", "separado", "muralhaNativa",
-                        "charme",
-                    ];
-                    const STATUS_NUM = [
-                        "frozenTurns", "shieldedTurns", "barrierTurns", "poisonTurns",
-                        "furyTurns", "furyStacks", "guerraBuffTurns", "tecnicasSobrepujarTurns",
-                        "burningTurns", "fireAuraTurns", "currentPower", "poisonedByP", "burningByP",
-                        "charmeTurns", "charmeOriginalOwner",
-                    ];
-                    const STATUS_ANY = [
-                        "abilityType", "abilityName", "abilityDesc", "onEnter", "onDestroy",
-                        "talentEffect", "constantEffect", "summonRitual",
-                        "mimicAbilityName", "mimicAbilityDesc", "mimicOnEnter", "mimicOnDestroy",
-                        "mimicSourceName", "mimicConstantEffect",
-                    ];
-                    const flags = (m.flags || m);
-                    for (const k of STATUS_BOOL) {
-                        if (flags[k] != null)
-                            card[k] = !!flags[k];
-                    }
-                    for (const k of STATUS_NUM) {
-                        if (flags[k] != null)
-                            card[k] = flags[k] | 0;
-                    }
-                    for (const k of STATUS_ANY) {
-                        if (Object.prototype.hasOwnProperty.call(flags, k)) {
-                            card[k] = flags[k];
-                        }
-                    }
-                    events.push({
-                        type: "STATUS_SET",
-                        targetP: tp,
-                        targetI: ti,
-                        flags: { ...flags },
-                    });
-                }
-                else if (op === "transformToken") {
-                    const patch = (m.card || m.flags || m);
-                    const IDENTITY = [
-                        "name", "power", "basePower", "currentPower", "abilityType", "abilityName",
-                        "abilityDesc", "onEnter", "onDestroy", "talentEffect", "summonRitual",
-                        "constantEffect", "isToken", "hidden",
-                    ];
-                    for (const k of IDENTITY) {
-                        if (Object.prototype.hasOwnProperty.call(patch, k)) {
-                            card[k] = patch[k];
-                        }
-                    }
-                    // Limpa status temporários — criatura “renasce” (Transformar / Ursificar).
-                    card.frozen = false;
-                    card.frozenTurns = 0;
-                    card.shielded = false;
-                    card.shieldedTurns = 0;
-                    card.shieldedPermanent = false;
-                    card.freeAttack = false;
-                    card.silenced = false;
-                    card.poisoned = false;
-                    card.poisonTurns = 0;
-                    card.poisonedByP = -1;
-                    card.pulled = false;
-                    card.pulledFromOwner = -1;
-                    card.pulledTurns = 0;
-                    card.wallBuff = false;
-                    card.wallBuffApplied = false;
-                    card.wallBuffSnapshot = 0;
-                    card.foreverGrowth = false;
-                    card.guerraBuff = false;
-                    card.guerraBuffTurns = 0;
-                    card.barrier = false;
-                    card.barrierTurns = 0;
-                    card.barrierPermanent = false;
-                    card.fireAura = false;
-                    card.fireAuraTurns = 0;
-                    card.burning = false;
-                    card.burningTurns = 0;
-                    card.burningByP = undefined;
-                    card.fury = false;
-                    card.furyTurns = 0;
-                    card.furyStacks = 0;
-                    card.furyBonusActive = false;
-                    card.vulnerable = false;
-                    card.corruptedNoHonor = false;
-                    card.prisaoPrismatica = false;
-                    card.desafianteAtivo = false;
-                    events.push({
-                        type: "STATUS_SET",
-                        targetP: tp,
-                        targetI: ti,
-                        flags: { ...patch, transformToken: true },
-                    });
-                }
-            }
             break;
         }
         case T.ULTIMATE_PLAY: {
@@ -1063,212 +349,21 @@ export function applyAction(state, action, ctx = {}) {
                 return { ok: false, state, events: ult.events, error: ult.error || "ULTIMATE_FAILED" };
             return { ok: true, state: ult.state, events: ult.events };
         }
-        case T.UNFREEZE_CONFIRM: {
-            const fIdx = a.fieldIdx;
-            const pl = next.players[pid];
-            const field = pl.field;
-            const card = field?.[fIdx];
-            if (!card?.frozen)
-                return { ok: false, state, events: [], error: "NOT_FROZEN" };
-            const yes = a.yes === true || a.confirmed === true
-                || (a.choiceIndex === 0 && a.yes !== false && a.confirmed !== false);
-            if (yes) {
-                if ((pl.actions | 0) < 1) {
-                    return { ok: false, state, events: [], error: "INSUFFICIENT_ACTIONS" };
-                }
-                pl.actions = (pl.actions | 0) - 1;
-                card.frozen = false;
-                card.frozenTurns = 0;
-                events.push({
-                    type: "STATUS_SET",
-                    targetP: pid,
-                    targetI: fIdx,
-                    flags: { frozen: false, frozenTurns: 0 },
-                });
-                events.push({
-                    type: "UNFREEZE",
-                    playerId: pid,
-                    fieldIdx: fIdx,
-                    visual: "unfreeze",
-                });
-            }
-            break;
-        }
-        case T.NECROMANCIA_PICK: {
-            const casterIdx = (a.casterIdx ?? pid);
-            const owner = next.players[casterIdx];
-            const discard = owner.discard || [];
-            let di = a.discardIndex;
-            if (di == null)
-                di = a.discardIdx;
-            const cardObj = a.card;
-            const wantUid = a.uid || cardObj?.uid;
-            const wantName = a.cardName || cardObj?.name;
-            if ((di == null || di < 0) && wantUid) {
-                di = discard.findIndex((c) => c && c.uid === wantUid);
-            }
-            if ((di == null || di < 0) && wantName) {
-                di = discard.findIndex((c) => c && c.name === wantName);
-            }
-            if (di == null || di < 0 || di >= discard.length) {
-                return { ok: false, state, events: [], error: "NECRO_BAD_CARD" };
-            }
-            const raw = discard.splice(di, 1)[0];
-            owner.discard = discard;
-            const handCard = { ...(cardObj && typeof cardObj === "object" ? cardObj : raw) };
-            // Sanitiza statuses (paridade com resolveNecromanciaChoice no cliente).
-            handCard.frozen = false;
-            handCard.frozenTurns = 0;
-            handCard.tapped = false;
-            handCard.shielded = false;
-            handCard.shieldedTurns = 0;
-            handCard.freeAttack = false;
-            handCard.silenced = false;
-            handCard.poisoned = false;
-            handCard.poisonTurns = 0;
-            handCard.pulled = false;
-            handCard.fury = false;
-            handCard.furyStacks = 0;
-            handCard.barrier = false;
-            handCard.fireAura = false;
-            handCard.burning = false;
-            handCard.vulnerable = false;
-            handCard.corruptedNoHonor = false;
-            // A carta volta como compra fresca: `onEnterConsumed` marca "já entrou em
-            // campo" e bloquearia a Habilidade Instantânea na nova invocação.
-            handCard.onEnterConsumed = false;
-            handCard.hasUsedOnEnter = false;
-            handCard._necromanciaFresh = true;
-            delete handCard._summoning;
-            const hand = owner.hand || [];
-            hand.push(handCard);
-            owner.hand = hand;
-            const ER = getEffects();
-            if (typeof ER?.markOnEnterUsed === "function" && a.fieldIdx != null) {
-                try {
-                    ER.markOnEnterUsed(next, casterIdx, "necromancia");
-                }
-                catch (e) { /* */ }
-            }
-            events.push({
-                type: "NECROMANCIA",
-                casterIdx,
-                card: handCard.name,
-                visual: "necromancia",
-            });
-            break;
-        }
-        case T.ABILITY_TARGET: {
-            const ER = getEffects();
-            if (!ER?.applyOnEnter)
-                return { ok: false, state, events: [], error: "NO_RESOLVE" };
-            const cIdx = (a.casterIdx ?? pid);
-            const fIdx = a.fieldIdx;
-            const resolution = {
-                ...(a.resolution && typeof a.resolution === "object"
-                    ? a.resolution
-                    : {}),
-                rng: ctx.rng || Math.random,
-            };
-            if (a.targetP != null)
-                resolution.targetP = a.targetP;
-            if (a.targetI != null)
-                resolution.targetI = a.targetI;
-            if (a.targetPlayerIdx != null)
-                resolution.targetPlayerIdx = a.targetPlayerIdx;
-            if (a.success != null)
-                resolution.success = a.success;
-            if (a.necromanciaCard)
-                resolution.necromanciaCard = a.necromanciaCard;
-            const abilityKey = String(a.abilityKey || "");
-            if (["fortalecer", "devorar", "imitar", "ursificacao", "corromper"].includes(abilityKey)
-                && resolution.targetI != null) {
-                delete resolution.targetP;
-            }
-            const res = ER.applyOnEnter(next, cIdx, fIdx, resolution);
-            if (!res.ok) {
-                return { ok: false, state, events: res.events || [], error: res.error || "ABILITY_TARGET_FAILED" };
-            }
-            events.push(...(res.events || []));
-            // Imitar → chain auto (Roubar / Pesadelo / Desacelerar) no mesmo ACK.
-            const imitarEv = (res.events || []).find((e) => e && e.type === "IMITAR" && e.copiedOnEnter);
-            if (imitarEv?.copiedOnEnter && imitarEv.copiedOnEnter !== "imitar") {
-                const plan = ER.planOnEnter?.(next, cIdx, fIdx);
-                if (plan?.ok && (plan.mode === "auto" || plan.mode === "none" || plan.mode === "visual_only"
-                    || (plan.mode === "target" && ["roubar", "pesadelo", "desacelerar"].includes(String(imitarEv.copiedOnEnter))))) {
-                    const chainRes = ER.applyOnEnter(next, cIdx, fIdx, autoOnEnterResolution(next, cIdx, fIdx, {
-                        ok: true,
-                        mode: "auto",
-                        ability: imitarEv.copiedOnEnter,
-                    }, ctx.rng || Math.random));
-                    if (chainRes?.ok) {
-                        events.push(...(chainRes.events || []));
-                    }
-                }
-            }
-            break;
-        }
-        case T.ULTIMATE_TARGET: {
-            const ult = applyUltimatePlay(next, { ...a, type: T.ULTIMATE_PLAY, playerId: pid }, ctx.rng || Math.random);
-            if (!ult.ok)
-                return { ok: false, state, events: ult.events, error: ult.error || "ULTIMATE_FAILED" };
-            return { ok: true, state: ult.state, events: ult.events };
-        }
-        case T.MENU_CHOICE: {
-            const kind = String(a.menuKind || a.menuType || a.abilityKey || "");
-            if (kind === "unfreeze" || kind === "UNFREEZE_CONFIRM") {
-                const yes = a.choiceIndex === 0 || a.yes === true || a.confirmed === true;
-                const inner = applyAction(state, {
-                    ...a,
-                    type: T.UNFREEZE_CONFIRM,
-                    yes,
-                    fieldIdx: a.fieldIdx,
-                    playerId: pid,
-                }, ctx);
-                return inner;
-            }
-            if (kind === "target-player" || a.targetPlayerIdx != null || a.abilityKey) {
-                const ER = getEffects();
-                if (!ER?.applyOnEnter)
-                    return { ok: false, state, events: [], error: "NO_RESOLVE" };
-                const cIdx = (a.casterIdx ?? pid);
-                const fIdx = a.fieldIdx;
-                const targets = a.targets;
-                let targetPlayerIdx = a.targetPlayerIdx;
-                if (targetPlayerIdx == null && Array.isArray(targets) && a.choiceIndex != null) {
-                    targetPlayerIdx = targets[a.choiceIndex]?.p;
-                }
-                if (targetPlayerIdx == null && a.choiceIndex != null) {
-                    // Fallback: oponente do caster.
-                    targetPlayerIdx = 1 - cIdx;
-                }
-                const res = ER.applyOnEnter(next, cIdx, fIdx, {
-                    targetPlayerIdx,
-                    rng: ctx.rng || Math.random,
-                });
-                if (!res.ok) {
-                    return { ok: false, state, events: res.events || [], error: res.error || "MENU_CHOICE_FAILED" };
-                }
-                events.push(...(res.events || []));
-                break;
-            }
-            return { ok: false, state, events: [], error: "BAD_MENU" };
-        }
         default: {
             const uiOnly = new Set([
                 T.PLAY_VISUAL,
-                T.PRESENT,
+                T.MENU_CHOICE,
                 T.OPEN_DISCARD,
                 T.ATTACK_START,
                 T.ATTACK_PICK_ATTACKER,
                 T.ATTACK_PICK_DEFENDER,
                 T.REACTIVE_BLOCK_QUERY,
                 T.REACTIVE_PROTECTION_QUERY,
-                T.REACTIVE_CANCEL_QUERY,
-                T.REACTIVE_EXHAUSTION_QUERY,
-                T.REACTIVE_COUNTER_QUERY,
                 T.ABILITY_START,
+                T.ABILITY_TARGET,
+                T.TALENT_TARGET,
                 T.ULTIMATE_START,
+                T.ULTIMATE_TARGET,
                 T.SYNC_STATE,
                 T.LOBBY_CREATE,
                 T.LOBBY_JOIN,
@@ -1276,6 +371,7 @@ export function applyAction(state, action, ctx = {}) {
                 T.SETUP_WIN_POINTS,
                 T.MATCH_START,
                 T.RESTART_MATCH,
+                T.UNFREEZE_CONFIRM,
             ]);
             if (uiOnly.has(a.type)) {
                 return { ok: true, state: next, events: [{ type: "CLIENT_ONLY", actionType: a.type }] };
@@ -1283,21 +379,11 @@ export function applyAction(state, action, ctx = {}) {
             return { ok: false, state, events: [], error: "NOT_IMPLEMENTED" };
         }
     }
-    // Evita winner === undefined (checkWin legado tratava !== null como vitória).
-    if (next.winner === undefined)
-        next.winner = null;
     const winner = R.findWinnerIndex(next);
     if (winner != null) {
         next.winner = winner;
         events.push({ type: "GAME_OVER", winner });
     }
-    else if (next.winner == null) {
-        next.winner = null;
-    }
-    try {
-        R.recalcDesafiante?.(next);
-    }
-    catch (eDes) { /* */ }
     return { ok: true, state: next, events };
 }
 /** Resolução automática de onEnter para simulador / IA (modos auto). */
@@ -1307,9 +393,7 @@ export function autoOnEnterResolution(state, casterIdx, fieldIdx, plan, rng = Ma
     if (!R || !plan?.ok)
         return resolution;
     const mode = plan.mode;
-    if (mode === "none")
-        return resolution;
-    if (mode === "visual_only")
+    if (mode === "none" || mode === "visual_only")
         return resolution;
     if (mode === "necromancia_pick") {
         const disc = state.players[casterIdx]?.discard;
@@ -1325,28 +409,6 @@ export function autoOnEnterResolution(state, casterIdx, fieldIdx, plan, rng = Ma
                 resolution.targetPlayerIdx = p;
                 break;
             }
-        }
-        return resolution;
-    }
-    // Troca Injusta: só Campeão adversário de Poder 2 (manual). Nunca o 1º inimigo.
-    if (ability === "trocaInjusta") {
-        const pool = [];
-        const count = state.playersCount ?? state.players.length;
-        for (let ep = 0; ep < count; ep++) {
-            if (ep === casterIdx)
-                continue;
-            const field = (state.players[ep]?.field || []);
-            field.forEach((c, i) => {
-                if (c && Number(c.currentPower ?? c.power) === 2)
-                    pool.push({ p: ep, i });
-            });
-        }
-        if (pool.length) {
-            const pick = pool[Math.floor(rng() * pool.length)];
-            resolution.targetP = pick.p;
-            resolution.targetI = pick.i;
-            resolution.enemyP = pick.p;
-            resolution.enemyI = pick.i;
         }
         return resolution;
     }
@@ -1393,9 +455,7 @@ export function applyActionWithOnEnter(state, action, ctx = {}) {
             const cIdx = (pe.playerId ?? pe.casterIdx);
             const fIdx = pe.fieldIdx;
             const plan = ER.planOnEnter(st, cIdx, fIdx);
-            // target / necromancia: cliente humano escolhe — não auto-resolver no SUMMON.
-            if (!plan?.ok || plan.mode === "target" || plan.mode === "blocked"
-                || plan.mode === "necromancia_pick")
+            if (!plan?.ok || plan.mode === "target" || plan.mode === "blocked")
                 continue;
             const follow = applyAction(st, {
                 type: T.ON_ENTER_RESOLVE,
