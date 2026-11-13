@@ -1315,8 +1315,12 @@ function applyReactiveUse(state, defOwner, talentEffect, use) {
 function applyTalentFromHand(state, pIdx, handIdx) {
     const p = state.players[pIdx];
     const card = p?.hand?.[handIdx];
-    if (!card || card.category !== "talent") {
+    if (!card || (card.category !== "talent" && card.category !== "reaction")) {
         return { ok: false, state, events: [], error: "NOT_TALENT" };
+    }
+    const leg = R()?.canPlayTalent?.(state, pIdx, handIdx);
+    if (leg && !leg.ok) {
+        return { ok: false, state, events: [], error: leg.code || "TALENT_BLOCKED" };
     }
     const cost = R()?.talentPlayCost?.(card) ?? card.currentPower ?? card.power ?? 0;
     if ((p.actions ?? 0) < cost)

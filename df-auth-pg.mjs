@@ -33,6 +33,13 @@ ALTER TABLE df_players ADD COLUMN IF NOT EXISTS language VARCHAR(8);
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS ach_stats JSONB;
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS ach_claimed JSONB;
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS ach_showcase JSONB;
+-- Migração 2026-11-12-01 (Fase 1 multiplayer — login com Google).
+-- Testada na cópia local do backup antes do deploy; reversível (ver
+-- migrations/2026-11-12-01-google-auth.sql). Contas existentes ficam
+-- provider='email' pelo DEFAULT; google_sub NULL até vincularem o Google.
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS google_sub TEXT;
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'email';
+CREATE UNIQUE INDEX IF NOT EXISTS df_players_google_sub_key ON df_players (google_sub);
 CREATE TABLE IF NOT EXISTS df_sessions (
   token TEXT PRIMARY KEY,
   player_id UUID NOT NULL REFERENCES df_players(id) ON DELETE CASCADE,

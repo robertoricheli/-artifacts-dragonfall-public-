@@ -792,6 +792,37 @@ function defaultSummonInsertIndex(fieldLen) {
     return n % 2 === 1 ? 0 : n;
 }
 /**
+ * Pode jogar talento/reação da mão? (V2: sempre com 6 campeões; um talento ativo por vez.)
+ * Não usa FIELD_FULL — talento não ocupa slot de campeão.
+ */
+function canPlayTalent(state, pIdx, handIdx, opts = {}) {
+    if (!state?.started || state.winner != null) {
+        return { ok: false, code: "GAME_NOT_ACTIVE", reason: "Partida não ativa." };
+    }
+    if (state.currentPlayer !== pIdx && !opts.ignoreTurn) {
+        return { ok: false, code: "NOT_YOUR_TURN", reason: "Não é o turno deste jogador." };
+    }
+    const p = state.players[pIdx];
+    const card = p?.hand?.[handIdx];
+    if (!p || !card)
+        return { ok: false, code: "NO_CARD", reason: "Carta inválida." };
+    if (card.category !== "talent" && card.category !== "reaction") {
+        return { ok: false, code: "NOT_TALENT", reason: "Não é talento/reação." };
+    }
+    if (state.activeTalent) {
+        return {
+            ok: false,
+            code: "TALENT_ACTIVE",
+            reason: "Só um Talento por vez: aguarde o atual ir para o descarte.",
+        };
+    }
+    const cost = talentPlayCost(card);
+    if (!opts.freeAction && (p.actions ?? 0) < cost) {
+        return { ok: false, code: "INSUFFICIENT_ACTIONS", reason: "Ações insuficientes." };
+    }
+    return { ok: true, code: "OK", cost };
+}
+/**
  * Pode invocar campeão da mão?
  * @param {object} state
  * @param {number} pIdx
@@ -815,11 +846,12 @@ function canSummon(state, pIdx, handIdx, opts = {}) {
     const card = p?.hand?.[handIdx];
     if (!p || !card)
         return { ok: false, code: "NO_CARD", reason: "Carta inválida." };
-    if (card.category === "talent") {
+    if (card.category === "talent" || card.category === "reaction") {
         return { ok: false, code: "NOT_CHAMPION", reason: "Não é campeão." };
     }
+    // MAX_FIELD aplica só a campeões (tokens contam). Talento/reação = 7ª carta via canPlayTalent.
     if ((p.field?.length ?? 0) >= effectiveMaxField(p, limits)) {
-        return { ok: false, code: "FIELD_FULL", reason: "Campo cheio." };
+        return { ok: false, code: "FIELD_FULL", reason: "Campo cheio (máx. 6 campeões)." };
     }
     const freeAction = !!opts.freeAction;
     if (card.summonRitual && !freeAction) {
@@ -1634,6 +1666,7 @@ const DfRules = {
     insertIndexForSlot,
     canOnEnterResolve,
     canSummon,
+    canPlayTalent,
     listSummonableHandIndices,
     computePassiveVpGain,
     findWinnerIndex,
