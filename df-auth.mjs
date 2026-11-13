@@ -35,6 +35,9 @@ import {
   claimAchievement,
   validateShowcase,
   achievementsPublic,
+  normalizeStats,
+  normalizeClaimed,
+  progressFor,
 } from "./df-achievements.mjs";
 import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
 import {
@@ -861,6 +864,109 @@ async function authAwardMatchXp(req, body) {
   };
 }
 
+/**
+ * Primeira sincronização (Fase 4): importa o progresso offline de uma
+ * conta NOVA (sem nenhum progresso real) para o servidor — uma única
+ * vez. O PATCH /auth/profile não cobre moedas, jornada, conquistas
+ * nem estatísticas, então sem esta rota o progresso offline de quem
+ * cria a conta depois de jogar offline se perderia. Guarda: a conta
+ * precisa estar vazia (xpTotal 0, coins 0, achClaimed vazio); se já
+ * tiver progresso, 409 ALREADY_SYNCED. Tudo é validado antes de
+ * aplicar: níveis da jornada em prefixo [1..N] até o nível do XP
+ * importado; cada conquista resgatada precisa estar concluída pelos
+ * números importados; baralhos passam pelo normalizeCustomDecks sem
+ * filtro de coleção (o Godot não tem coleção) e as cartas dos baralhos
+ * entram em ownedCards; o avatar e os heróis da jornada entram em
+ * ownedHeroes.
+ */
+async function authProfileImport(req, body) {
+  const limited = allowAuthedAttempt(req);
+  if (limited) return limited;
+  const authed = await authFromHeader(req);
+  if (!authed) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  const player = await withCollection(authed);
+  const hasProgress = (Number(player.xpTotal ?? 0) > 0) || (Math.max(0, player.coins | 0) > 0) || (Array.isArray(player.achClaimed) && player.achClaimed.length > 0);
+  if (hasProgress) {
+    return { status: 409, data: { ok: false, error: "ALREADY_SYNCED", player: playerPublic(player) } };
+  }
+  const xpRaw = Number(body?.xpTotal ?? 0);
+  const coinsRaw = Number(body?.coins ?? 0);
+  if (!Number.isFinite(xpRaw) || !Number.isFinite(coinsRaw) || xpRaw < 0 || coinsRaw < 0 || xpRaw > 1000000 || coinsRaw > 1000000) {
+    return { status: 400, data: { ok: false, error: "BAD_IMPORT" } };
+  }
+  const xpTotal = xpRaw | 0;
+  const coins = coinsRaw | 0;
+  // Jornada: prefixo [1..N], N até o nível do XP importado.
+  const rawLevels = Array.isArray(body?.claimedLevels) ? body.claimedLevels : [];
+  const levels = [...new Set(rawLevels.map((v) => Number(v) | 0))].filter((v) => v >= 1 && v <= JOURNEY_MAX_LEVEL).sort((a, b) => a - b);
+  for (let i = 0; i < levels.length; i++) {
+    if (levels[i] !== i + 1) return { status: 400, data: { ok: false, error: "BAD_CLAIMED_LEVELS" } };
+  }
+  const levelFromXp = statsFromTotalXp(xpTotal).level;
+  if (levels.length > 0 && levels[levels.length - 1] > levelFromXp) {
+    return { status: 400, data: { ok: false, error: "LEVEL_LOCKED" } };
+  }
+  // Estatísticas sanitizadas (mesmas chaves do servidor).
+  const stats = normalizeStats(body?.achStats ?? null);
+  // Baralhos sem filtro de coleção (o cliente Godot não tem coleção).
+  let decks = null;
+  if (body?.customDecks != null) {
+    const norm = normalizeCustomDecks(body.customDecks, null);
+    if (!norm.ok) return { status: 400, data: { ok: false, error: norm.error } };
+    decks = norm.decks;
+  }
+  // Avatar (precisa ser um herói válido).
+  let avatarHeroId = null;
+  if (body?.avatarHeroId != null && String(body.avatarHeroId) !== "") {
+    const hid = String(body.avatarHeroId);
+    if (!HERO_IDS.has(hid)) return { status: 400, data: { ok: false, error: "BAD_AVATAR" } };
+    avatarHeroId = hid;
+  }
+  // Coleção: união do starter com as cartas dos baralhos; heróis:
+  // união com o avatar e os heróis da jornada resgatada.
+  const ownedCards = new Set(Array.isArray(player.ownedCards) ? player.ownedCards.map(String) : []);
+  if (decks) {
+    for (const d of decks) for (const c of d.cards || []) if (c != null && String(c) !== "") ownedCards.add(String(c));
+  }
+  const ownedHeroes = new Set(Array.isArray(player.ownedHeroes) ? player.ownedHeroes.map(String) : []);
+  if (avatarHeroId) ownedHeroes.add(avatarHeroId);
+  for (const lv of levels) {
+    const rw = JOURNEY_REWARDS[lv - 1];
+    if (rw && rw.type === "hero") ownedHeroes.add(rw.heroId);
+  }
+  // Conquistas resgatadas: precisam estar concluídas pelos números importados.
+  const claimed = normalizeClaimed(body?.achClaimed ?? []);
+  const probe = { ...player, xpTotal, coins, claimedLevels: levels, achClaimed: claimed, achStats: stats, ownedCards: [...ownedCards], ownedHeroes: [...ownedHeroes] };
+  const prog = progressFor(probe);
+  for (const id of claimed) {
+    const p = prog[id];
+    if (!p || !p.done) return { status: 400, data: { ok: false, error: "NOT_REACHED", id } };
+  }
+  // Vitrine (opcional): só conquistas resgatadas.
+  let showcase = player.achShowcase ?? [];
+  if (body?.achShowcase != null) {
+    const sc = validateShowcase(body.achShowcase, claimed);
+    if (!sc.ok) return { status: 400, data: { ok: false, error: sc.error } };
+    showcase = sc.showcase;
+  }
+  player.xpTotal = xpTotal;
+  player.coins = coins;
+  player.claimedLevels = levels;
+  player.achClaimed = claimed;
+  player.achStats = stats;
+  player.achShowcase = showcase;
+  player.ownedCards = [...ownedCards];
+  player.ownedHeroes = [...ownedHeroes];
+  if (decks) player.customDecks = decks;
+  if (avatarHeroId) player.avatarHeroId = avatarHeroId;
+  const r = await persistPlayer(player, { expectedRevision: Number(player.profileRevision ?? 0) });
+  if (!r.ok) {
+    if (r.error === "PROFILE_CONFLICT") return { status: 409, data: { ok: false, error: "PROFILE_CONFLICT", player: playerPublic(r.player) } };
+    return { status: 500, data: { ok: false, error: r.error || "SAVE_FAILED" } };
+  }
+  return { status: 200, data: { ok: true, player: playerPublic(r.player) } };
+}
+
 function marketPayload(player, extra = {}) {
   const m = player.market || { cards: [], dailyAt: Date.now() };
   return {
@@ -1162,6 +1268,7 @@ export async function handleAuthHttp(req, res) {
   else if (req.method === "GET" && pathname === "/auth/me") result = await authMe(fakeReq);
   else if (req.method === "PATCH" && pathname === "/auth/profile") result = await authProfile(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/match-xp") result = await authAwardMatchXp(fakeReq, body);
+  else if (req.method === "POST" && pathname === "/auth/profile/import") result = await authProfileImport(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/market") result = await authMarket(fakeReq);
   else if (req.method === "POST" && pathname === "/auth/market/refresh") result = await authMarketRefresh(fakeReq);
   else if (req.method === "POST" && pathname === "/auth/market/buy") result = await authMarketBuy(fakeReq, body);
@@ -1216,6 +1323,11 @@ export function registerAuthRoutes(app) {
 
   app.post("/auth/match-xp", async (req, res) => {
     const r = await authAwardMatchXp(req, req.body || {});
+    res.status(r.status).json(r.data);
+  });
+
+  app.post("/auth/profile/import", async (req, res) => {
+    const r = await authProfileImport(req, req.body || {});
     res.status(r.status).json(r.data);
   });
 
