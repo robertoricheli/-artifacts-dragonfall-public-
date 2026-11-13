@@ -8,6 +8,7 @@ import {
   initAuthStore,
   getAuthStoreMode,
   findPlayerByEmail,
+  findPlayerByGoogleSub,
   getPlayerById,
   insertPlayer,
   persistPlayer,
@@ -18,6 +19,7 @@ import {
   updateDisplayName,
   prunePlayerSessions,
 } from "./df-auth-store.mjs";
+import { verifyGoogleIdToken } from "./df-auth-google.mjs";
 import { createRateLimiter } from "./rate-limit.mjs";
 import {
   recordActivity,
@@ -204,8 +206,17 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
 }
 
 function verifyPassword(password, salt, hash) {
-  const check = crypto.scryptSync(password, salt, 64).toString("hex");
-  return crypto.timingSafeEqual(Buffer.from(check, "hex"), Buffer.from(hash, "hex"));
+  // Contas sem senha (ex.: só Google) nunca validam por senha — 401, nunca 500.
+  try {
+    if (typeof password !== "string" || !salt || !hash) return false;
+    const check = crypto.scryptSync(password, salt, 64).toString("hex");
+    const a = Buffer.from(check, "hex");
+    const b = Buffer.from(String(hash), "hex");
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
 }
 
 function newToken() {
@@ -422,6 +433,147 @@ async function authLogin(req, body) {
   const fresh = await withCollection(await getPlayerById(player.id));
   recordActivity(player.id, "login");
   return { status: 200, data: { ok: true, token, player: playerPublic(fresh || player) } };
+}
+
+/**
+ * Login com Google (Fase 3).
+ * POST /auth/google { idToken, displayName? }
+ * - Valida o ID token do Google (assinatura, emissor, audiência, expiração).
+ * - google_sub já vinculado → entra na conta (login).
+ * - e-mail existe sem google_sub → vincula o Google à conta (o login com
+ *   senha continua funcionando; o nome não muda, salvo se a conta não tem
+ *   nome e o cliente trouxe um nome válido).
+ * - e-mail novo → cria a conta (provider='google', sem senha).
+ * Nome em conflito ou inválido → 409 NAME_TAKEN / 400 NAME_INVALID: o
+ * cliente (Godot) mostra a tela "escolha outro nome" e repete a chamada
+ * com displayName.
+ */
+async function authGoogle(req, body) {
+  const limited = allowAuthAttempt(req, null);
+  if (limited) return limited;
+  const idToken = body?.idToken;
+  if (typeof idToken !== "string" || !idToken) {
+    return { status: 400, data: { ok: false, error: "MISSING_ID_TOKEN" } };
+  }
+  let claims;
+  try {
+    claims = await verifyGoogleIdToken(idToken);
+  } catch (e) {
+    return { status: 401, data: { ok: false, error: e?.code || "INVALID_GOOGLE_TOKEN" } };
+  }
+  if (claims.email_verified !== true) {
+    return { status: 403, data: { ok: false, error: "GOOGLE_EMAIL_UNVERIFIED" } };
+  }
+  const email = normEmail(claims.email);
+  if (!isValidEmail(email)) {
+    return { status: 400, data: { ok: false, error: "EMAIL_INVALID" } };
+  }
+  const wantedName = typeof body?.displayName === "string" ? body.displayName.trim() : "";
+  // 1) Conta já vinculada a este Google → login.
+  const bySub = await findPlayerByGoogleSub(claims.sub);
+  if (bySub) {
+    const token = await createSession(bySub.id);
+    const fresh = await withCollection(await getPlayerById(bySub.id));
+    recordActivity(bySub.id, "login");
+    return { status: 200, data: { ok: true, token, player: playerPublic(fresh || bySub), created: false, linked: false } };
+  }
+  // 2) E-mail existe → vincular.
+  const byEmail = await findPlayerByEmail(email);
+  if (byEmail) {
+    if (byEmail.googleSub && byEmail.googleSub !== claims.sub) {
+      return { status: 409, data: { ok: false, error: "GOOGLE_LINK_CONFLICT" } };
+    }
+    // Nome novo só se a conta ainda não tem nome.
+    let newName = null;
+    if (!byEmail.displayName && wantedName) {
+      if (!isValidDisplayName(wantedName)) {
+        return { status: 400, data: { ok: false, error: "NAME_INVALID" } };
+      }
+      const owner = await getDisplayNameOwner(wantedName.toLowerCase());
+      if (owner && owner !== byEmail.id) {
+        return { status: 409, data: { ok: false, error: "NAME_TAKEN" } };
+      }
+      newName = wantedName;
+    }
+    byEmail.googleSub = claims.sub;
+    if (newName) byEmail.displayName = newName;
+    const saved = await persistPlayer(byEmail);
+    if (!saved.ok) {
+      return { status: 500, data: { ok: false, error: saved.error || "SAVE_FAILED" } };
+    }
+    if (newName) {
+      try {
+        await updateDisplayName(byEmail.id, null, newName);
+      } catch (e) {
+        if (String(e?.message || "") === "NAME_TAKEN") {
+          return { status: 409, data: { ok: false, error: "NAME_TAKEN" } };
+        }
+        throw e;
+      }
+    }
+    const token = await createSession(byEmail.id);
+    const fresh = await withCollection(await getPlayerById(byEmail.id));
+    recordActivity(byEmail.id, "login");
+    return { status: 200, data: { ok: true, token, player: playerPublic(fresh || byEmail), created: false, linked: true } };
+  }
+  // 3) Conta nova.
+  const googleName = typeof claims.name === "string" ? claims.name.trim() : "";
+  const name = wantedName || googleName;
+  if (!isValidDisplayName(name)) {
+    return { status: 400, data: { ok: false, error: "NAME_INVALID" } };
+  }
+  const owner = await getDisplayNameOwner(name.toLowerCase());
+  if (owner) {
+    return { status: 409, data: { ok: false, error: "NAME_TAKEN" } };
+  }
+  const id = newPlayerId();
+  const now = new Date().toISOString();
+  const player = {
+    id,
+    email,
+    passwordSalt: "",
+    passwordHash: "",
+    passwordEnc: null,
+    googleSub: claims.sub,
+    provider: "google",
+    displayName: name,
+    displayNameLocked: false,
+    avatarHeroId: null,
+    hubBackgroundId: null,
+    language: null,
+    customDecks: null,
+    xpTotal: 0,
+    coins: 0,
+    ownedCards: null,
+    market: null,
+    collectionEpoch: 0,
+    ownedHeroes: null,
+    claimedLevels: null,
+    redeemedCodes: null,
+    devUnlockAll: false,
+    achStats: { backfilled: true },
+    achClaimed: [],
+    achShowcase: [],
+    profileRevision: 0,
+    createdAt: now,
+    updatedAt: now,
+  };
+  ensureCollection(player);
+  await insertPlayer(player);
+  try {
+    await updateDisplayName(id, null, name);
+  } catch (e) {
+    if (String(e?.message || "") === "NAME_TAKEN") {
+      // Corrida rara: a conta foi criada sem o nome reservado. A próxima
+      // chamada com outro nome cai no caminho de vínculo e resolve.
+      return { status: 409, data: { ok: false, error: "NAME_TAKEN" } };
+    }
+    throw e;
+  }
+  const token = await createSession(id);
+  const saved = await getPlayerById(id);
+  recordActivity(id, "register");
+  return { status: 200, data: { ok: true, token, player: playerPublic(saved), created: true, linked: false } };
 }
 
 async function authForgotPassword(req, body) {
@@ -1004,6 +1156,7 @@ export async function handleAuthHttp(req, res) {
   let result = null;
   if (req.method === "POST" && pathname === "/auth/register") result = await authRegister(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/login") result = await authLogin(fakeReq, body);
+  else if (req.method === "POST" && pathname === "/auth/google") result = await authGoogle(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/forgot-password") result = await authForgotPassword(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/change-password") result = await authChangePassword(fakeReq, body);
   else if (req.method === "GET" && pathname === "/auth/me") result = await authMe(fakeReq);
@@ -1033,6 +1186,11 @@ export function registerAuthRoutes(app) {
 
   app.post("/auth/login", async (req, res) => {
     const r = await authLogin(req, req.body);
+    res.status(r.status).json(r.data);
+  });
+
+  app.post("/auth/google", async (req, res) => {
+    const r = await authGoogle(req, req.body);
     res.status(r.status).json(r.data);
   });
 

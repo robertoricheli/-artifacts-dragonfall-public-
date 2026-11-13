@@ -63,6 +63,8 @@ function rowToPlayer(row) {
     passwordEnc: row.password_enc,
     displayName: row.display_name,
     displayNameLocked: !!row.display_name_locked,
+    googleSub: row.google_sub ?? null,
+    provider: row.provider ?? "email",
     avatarHeroId: row.avatar_hero_id,
     hubBackgroundId: row.hub_background_id,
     customDecks: row.custom_decks ?? null,
@@ -94,6 +96,8 @@ function playerToRow(p) {
     p.passwordEnc ?? null,
     p.displayName ?? null,
     !!p.displayNameLocked,
+    p.googleSub ?? null,
+    p.provider ?? "email",
     p.avatarHeroId ?? null,
     p.hubBackgroundId ?? null,
     p.customDecks != null ? JSON.stringify(p.customDecks) : null,
@@ -139,6 +143,13 @@ export async function pgGetPlayerById(id) {
   return rowToPlayer(res.rows[0]);
 }
 
+export async function pgFindPlayerByGoogleSub(sub) {
+  const pool = getPgPool();
+  if (!pool || !sub) return null;
+  const res = await pool.query("SELECT * FROM df_players WHERE google_sub = $1 LIMIT 1", [sub]);
+  return rowToPlayer(res.rows[0]);
+}
+
 export async function pgInsertPlayer(player) {
   const pool = getPgPool();
   if (!pool) throw new Error("PG_UNAVAILABLE");
@@ -146,10 +157,11 @@ export async function pgInsertPlayer(player) {
   await pool.query(
     `INSERT INTO df_players
       (id, email, password_salt, password_hash, password_enc, display_name, display_name_locked,
+       google_sub, provider,
        avatar_hero_id, hub_background_id, custom_decks, xp_total, profile_revision, created_at,
        owned_cards, coins, market_state, collection_epoch, owned_heroes, journey_claimed,
        redeemed_codes, dev_unlock_all, language, ach_stats, ach_claimed, ach_showcase)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13::timestamptz,$14::jsonb,$15,$16::jsonb,$17,$18::jsonb,$19::jsonb,$20::jsonb,$21,$22,$23::jsonb,$24::jsonb,$25::jsonb)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15::timestamptz,$16::jsonb,$17,$18::jsonb,$19,$20::jsonb,$21::jsonb,$22::jsonb,$23,$24,$25::jsonb,$26::jsonb,$27::jsonb)`,
     vals,
   );
   return pgGetPlayerById(player.id);
@@ -185,6 +197,7 @@ export async function pgUpdatePlayer(player, { expectedRevision } = {}) {
         market_state = $15::jsonb, collection_epoch = $16, owned_heroes = $17::jsonb,
         journey_claimed = $18::jsonb, redeemed_codes = $19::jsonb, dev_unlock_all = $20,
         language = $21, ach_stats = $22::jsonb, ach_claimed = $23::jsonb, ach_showcase = $24::jsonb,
+        google_sub = $25, provider = $26,
         updated_at = NOW()
        WHERE id = $1`,
       [
@@ -212,6 +225,8 @@ export async function pgUpdatePlayer(player, { expectedRevision } = {}) {
         player.achStats != null ? JSON.stringify(player.achStats) : null,
         player.achClaimed != null ? JSON.stringify(player.achClaimed) : null,
         player.achShowcase != null ? JSON.stringify(player.achShowcase) : null,
+        player.googleSub ?? null,
+        player.provider ?? "email",
       ],
     );
     await client.query("COMMIT");

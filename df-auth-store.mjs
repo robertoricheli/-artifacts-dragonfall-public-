@@ -10,6 +10,7 @@ import {
   initAuthPgSchema,
   pgFindPlayerByEmail,
   pgGetPlayerById,
+  pgFindPlayerByGoogleSub,
   pgInsertPlayer,
   pgUpdatePlayer,
   pgCreateSession,
@@ -101,6 +102,12 @@ export async function findPlayerByEmail(email) {
   if (mode === "postgres") return pgFindPlayerByEmail(email);
   const e = String(email || "").trim().toLowerCase();
   return Object.values(store.players).find((p) => p.email === e) || null;
+}
+
+export async function findPlayerByGoogleSub(sub) {
+  if (!sub) return null;
+  if (mode === "postgres") return pgFindPlayerByGoogleSub(sub);
+  return Object.values(store.players).find((p) => p.googleSub === sub) || null;
 }
 
 export async function getPlayerById(id) {
