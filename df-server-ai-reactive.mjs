@@ -9,9 +9,12 @@
  * escolher o alvo. Todas as animações posteriores entram atrasadas.
  *
  * Aqui o servidor responde no lugar do assento sob IA, usando **exatamente** as
- * mesmas heurísticas do modo Jogador vs IA (`df-ai-controller.js`
- * `aiShouldReactiveBlock` / `aiShouldReactiveProtect`), para a IA substituta
- * agir como a IA offline.
+ * mesmas heurísticas do modo Jogador vs IA (`battle_screen.gd`:
+ * `_ai_wants_block` l.7959, `_ai_wants_protect` l.8142,
+ * `_ai_wants_cancel_ult` l.8220, `_ai_wants_contramagica` l.8170,
+ * `_ai_wants_exaustao` l.8176), para a IA substituta agir como a IA
+ * offline. NÃO existe `df-ai-controller.js` no repositório — o cabeçalho
+ * antigo citava um arquivo inexistente.
  *
  * Escopo: só roda quando `room.aiControlled[seat]` está ativo. Nada aqui toca o
  * modo Jogador vs IA (que resolve tudo no cliente).
@@ -36,19 +39,13 @@ const REQUIRED_TALENT = Object.freeze({
   REACTIVE_COUNTER_QUERY: "contramagica",
 });
 
+// S2-A02 (offline _ai_wants_exaustao l.8176 / _ai_wants_contramagica l.8170):
+// exatamente as 6 + 6 do offline. Nada além.
 const AI_EXAUSTAO_HIGH_VALUE = new Set([
-  "assassinar", "roubar", "charme", "enfraquecer",
-  "bolaDeFogo", "necromancia", "transformarBichinho", "roletaRussa",
-  "pesadelo", "desacelerar", "devorar", "trocaInjusta", "imitar",
-  "corromper", "raioDuplo", "fumacaToxica", "separar", "energizar",
-  "maldicaoSeteMares", "prisaoPrismatica", "invokeDragon", "invokeCubicDragon",
+  "bolaDeFogo", "raioDuplo", "assassinar", "transformarBichinho", "pesadelo", "podridao",
 ]);
 const AI_CONTRAMAGICA_HIGH_VALUE = new Set([
-  "explosao", "medoTalento", "zeroAbsoluto", "podridaoTalento",
-  "chuvaDeCometas", "bolaDeFogoTalento", "doppelganger", "missemagicos",
-  "ressuscitarTalento", "tornadoDeFogo", "prisaoPrismaticaTalento",
-  "maldicaoSeteMaresTalento", "trocaDeLugar", "arsenalDeGuerra",
-  "tecnicasDeCombateTalento", "gritoDeGuerraTalento", "transformarBichinhoTalento",
+  "explosao", "tornadoDeFogo", "missemagicos", "chuvaDeCometas", "medoTalento", "zeroAbsoluto",
 ]);
 
 function handHasTalent(state, seat, effect) {
@@ -58,8 +55,8 @@ function handHasTalent(state, seat, effect) {
 }
 
 /**
- * Paridade com `aiShouldReactiveBlock` do cliente (df-ai-controller.js).
- * Só bloqueia quando o defensor morreria no combate e vale a pena.
+ * S2-A02 (offline _ai_wants_block, battle_screen.gd:7959): bloqueia se o
+ * combate destruiria o defensor, qualquer Poder — sem gate de valor.
  */
 function aiShouldReactiveBlock(attacker, defender) {
   if (!attacker || !defender) return false;
@@ -70,22 +67,26 @@ function aiShouldReactiveBlock(attacker, defender) {
   } catch (e) {
     return false;
   }
-  if (!out || !out.killD) return false;
-  let valueDef = defender.currentPower ?? defender.power ?? 1;
-  if (defender.grows) valueDef += 2;
-  if (defender.over) valueDef += 2;
-  const attPow = attacker.currentPower ?? attacker.power ?? 1;
-  return valueDef >= 2 || attPow >= 3;
+  return !!(out && out.killD);
 }
 
-/** Paridade com `aiShouldReactiveProtect` do cliente. */
-function aiShouldReactiveProtect(defender) {
+/** S2-A02 (offline _ai_wants_protect, battle_screen.gd:8142): protege
+ * só P<=1 ou P>=3. P2 não. */
+function aiShouldReactiveProtect(defender, state, defSeat) {
   if (!defender) return false;
   const pow = defender.currentPower ?? defender.power ?? 1;
-  if (pow <= 1) return true;
-  if (defender.grows) return true;
-  if (defender.over) return true;
-  return pow >= 2;
+  return pow <= 1 || pow >= 3;
+}
+
+/** S2-A02 (offline _ai_wants_cancel_ult, battle_screen.gd:8220): cancela
+ * Ultimates de dano; sem dano direto, só se o próprio campo está frágil
+ * (algum campeão P<=1). */
+function aiShouldCancelUltimate(state, askerSeat, defSeat) {
+  const hero = state.players?.[askerSeat]?.heroDef || null;
+  const utype = hero?.ultimateType || state.players?.[askerSeat]?.ultimateType || "";
+  if (["targetEnemy", "targetEnemyFreeze", "cometStarfall", "incinerate"].includes(utype)) return true;
+  return (state.players?.[defSeat]?.field || []).some((c) => c
+    && (c.currentPower ?? c.power ?? 0) <= 1);
 }
 
 function findDefender(state, seat, action) {
@@ -137,14 +138,24 @@ export function buildAiReactiveAnswer(room, action, askerSeat, opts = {}) {
       const defender = state.players?.[defSeat]?.field?.[action.defenderIdx];
       use = aiShouldReactiveBlock(attacker, defender);
     } else if (type === "REACTIVE_PROTECTION_QUERY") {
-      use = aiShouldReactiveProtect(findDefender(state, defSeat, action));
+      const defender = findDefender(state, defSeat, action);
+      // S2-A02: sem defensor identificado (ex. VINGANÇA, alvo aleatório),
+      // o offline protege se QUALQUER campeão próprio está em risco (P<=1)
+      // ou é forte (P>=3) — _ai_wants_protect com target_uid -1.
+      use = defender
+        ? aiShouldReactiveProtect(defender, state, defSeat)
+        : (state.players?.[defSeat]?.field || []).some((c) => c
+            && ((c.currentPower ?? c.power ?? 0) <= 1 || (c.currentPower ?? c.power ?? 0) >= 3));
     } else if (type === "REACTIVE_CANCEL_QUERY") {
-      // A IA offline valoriza muito Cancelar Ultimate (peso 14 no score):
-      // tendo a carta, cancela.
-      use = true;
+      use = aiShouldCancelUltimate(state, askerSeat, defSeat);
     } else if (type === "REACTIVE_EXHAUSTION_QUERY") {
       const onEnter = action?.onEnter || action?.ability || null;
-      use = !!(onEnter && AI_EXAUSTAO_HIGH_VALUE.has(onEnter));
+      // A-NEW-1a (rodada 5, defesa em profundidade): o campeão silenciado
+      // nunca gera a pergunta (o pending some na origem), mas se uma
+      // pergunta chegar mesmo assim, a IA NÃO gasta a EXAUSTÃO com ela —
+      // a habilidade já está morta.
+      const caster = state.players?.[action?.casterIdx ?? askerSeat]?.field?.[action?.fieldIdx];
+      use = !!(onEnter && AI_EXAUSTAO_HIGH_VALUE.has(onEnter) && !caster?.silenced);
     } else if (type === "REACTIVE_COUNTER_QUERY") {
       const te = action?.talentEffect || null;
       use = !!(te && AI_CONTRAMAGICA_HIGH_VALUE.has(te));

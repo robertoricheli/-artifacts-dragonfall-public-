@@ -32,13 +32,13 @@ const heroDefs = [
         ultimateDesc: 'Invoca um Dragão Azul no seu campo como ação livre. Até 3 usos.',
         ultimateType: 'summonDragon' },
     { id: 'gancho', name: 'Gancho', emoji: '⚓', image: 'heroes/gancho.png', ultimateName: 'Puxão',
-        ultimateDesc: 'Puxa um Campeão adversário com Poder menor que 3 (65% chance de Poder 1, 35% de Poder 2) e o ROUBA permanentemente pro seu campo. Até 3 usos.',
+        ultimateDesc: 'Puxa um Campeão adversário com Poder menor que 3 (50% de chance de Poder 1, 50% de Poder 2) e o ROUBA permanentemente pro seu campo. Até 3 usos.',
         ultimateType: 'hook' },
-    { id: 'paladino', name: 'Paladino', emoji: '🛡️', image: 'heroes/paladino.png', ultimateName: 'O Retorno do Herói',
+    { id: 'paladino', name: 'Paladino', emoji: '🛡️', image: 'heroes/paladino.png', ultimateName: 'Retorno Triunfante',
         ultimateDesc: 'Traz de volta ao campo um Campeão de Poder 2 do seu descarte. Campeões com Habilidade Constante voltam aptos a usá-la; Habilidades Instantâneas não disparam nesta invocação. Até 3 usos.',
         ultimateType: 'resurrect' },
     { id: 'alquimista', name: 'Alquimista', emoji: '⚗️', image: 'heroes/alquimista.png', ultimateName: 'Poção Improvável',
-        ultimateDesc: 'Escolha um Campeão seu: 60% de chance de +2 de Poder ou 40% de -1 (pode destruir se zerar). Até 3 usos.',
+        ultimateDesc: 'Escolha um Campeão seu: 70% de chance de +2 de Poder ou 30% de -1 (pode destruir se zerar). Até 3 usos.',
         ultimateType: 'potion' },
     { id: 'valmont', name: 'Valmont', emoji: '🧛', image: 'heroes/valmont.png', ultimateName: 'Vampirismo',
         ultimateDesc: 'Escolha um Campeão adversário com Poder 2 ou mais. Ele perde 1 Poder e um Campeão aliado aleatório ganha +1 Poder. Até 3 usos.',
@@ -272,6 +272,13 @@ const cardDefs = [
         abilityName: "Aceleração (Talento)",
         abilityDesc: "Faça 1 ação adicional durante este turno.",
         onDestroy: null, onEnter: null, talentEffect: "aceleracao", composedFace: true },
+    // BOLHAS (P2 — paridade): o servidor não tinha o talento (o nome
+    // "BOLHAS" era só do campeão Maldição, abaixo, renomeado para
+    // Oceana — o nome do offline). Espelho do CardDB offline.
+    { name: "BOLHAS", power: 0, category: "talent", abilityType: "talent",
+        abilityName: "Bolhas (Talento)",
+        abilityDesc: "Todos os Campeões na mão do adversário ganham BOLHAS: o primeiro invocado entra sem habilidade.",
+        onDestroy: null, onEnter: null, talentEffect: "bolhasTalento", composedFace: true },
     { name: "MÍSSEIS MÁGICOS", power: 1, category: "talent", abilityType: "talent",
         abilityName: "Mísseis Mágicos (Talento)",
         abilityDesc: "Campeões do adversário são atingidos por mísseis que tem 60% de Chance de reduzir 1 ponto de Poder.",
@@ -297,10 +304,6 @@ const cardDefs = [
         abilityName: "Tornado de Fogo (Talento)",
         abilityDesc: "Escolha 1 Campeão adversário. Ele perderá 1 ponto de Poder por rodada.",
         onDestroy: null, onEnter: null, talentEffect: "tornadoDeFogo", composedFace: true },
-    { name: "MALDIÇÃO DOS SETE MARES", power: 0, category: "talent", abilityType: "talent",
-        abilityName: "Maldição dos Sete Mares (Talento)",
-        abilityDesc: "O Próximo Campeão que o adversário invocar, não terá Habilidade.",
-        onDestroy: null, onEnter: null, talentEffect: "maldicaoSeteMaresTalento", composedFace: true },
     { name: "TROCA DE LUGAR", power: 0, category: "talent", abilityType: "talent",
         abilityName: "Troca de Lugar (Talento)",
         abilityDesc: "Escolha um Campeão aliado P1 e troque por um campeão do adversário P2.",
@@ -312,7 +315,7 @@ const cardDefs = [
     // Lote talentos v1.49.82 — custo 0, faces compostas.
     { name: "PODRIDÃO", power: 0, category: "talent", abilityType: "talent",
         abilityName: "Podridão (Talento)",
-        abilityDesc: "Contamine 5 cartas do BARALHO do adversário. As cartas contaminadas são inúteis quando chegam à mão do alvo.",
+        abilityDesc: "Contamine 2 cartas do BARALHO do adversário. Elas viram Cartas Apodrecidas.",
         onDestroy: null, onEnter: null, talentEffect: "podridaoTalento", composedFace: true },
     // Token gerado por Podridão — fora do Arsenal/baralho inicial.
     { name: "APODRECIDA", power: 0, category: "talent", abilityType: "talent",
@@ -320,7 +323,7 @@ const cardDefs = [
         abilityDesc: "Carta Apodrecida. Descarte-a!",
         onDestroy: null, onEnter: null, talentEffect: "apodrecidaDescarte",
         hidden: true, composedFace: true },
-    { name: "RESSUSCITAR", power: 0, category: "talent", abilityType: "talent",
+    { name: "RESSUSCITAR", power: 1, category: "talent", abilityType: "talent",
         abilityName: "Ressuscitar (Talento)",
         abilityDesc: "O último Campeão P2 seu destruído, retorna a seu campo.",
         onDestroy: null, onEnter: null, talentEffect: "ressuscitarTalento", composedFace: true },
@@ -362,15 +365,18 @@ const cardDefs = [
         abilityName: "Transformar em Bichinho",
         abilityDesc: "Reduza o Poder de um Campeão pela metade, transformando-o em Bichinho, ou em Alguma coisa pior.",
         onDestroy: null, onEnter: "transformarBichinho", composedFace: true },
-    // MALDIÇÃO DOS SETE MARES (BOLHAS / TUBARÃO BORRIFANTE):
-    { name: "BOLHAS", power: 1, category: "champion", abilityType: "instant",
-        abilityName: "Maldição dos Sete Mares",
+    // BOLHAS (Oceana / TUBARÃO BORRIFANTE):
+    // (P2: o campeão chamava-se "BOLHAS" e colidia com o talento
+    // BOLHAS — renomeado para Oceana, o nome do offline. C-A15: a
+    // habilidade voltou a ser "bolhas", igual ao offline.)
+    { name: "Oceana", power: 1, category: "champion", abilityType: "instant",
+        abilityName: "Bolhas",
         abilityDesc: "O próximo campeão que seu Adversário invocar, não terá habilidade.",
-        onDestroy: null, onEnter: "maldicaoSeteMares", composedFace: true },
+        onDestroy: null, onEnter: "bolhas", composedFace: true },
     { name: "TUBARÃO BORRIFANTE", power: 2, category: "champion", abilityType: "instant",
-        abilityName: "Maldição dos Sete Mares",
+        abilityName: "Bolhas",
         abilityDesc: "O próximo campeão que seu Adversário invocar, não terá habilidade.",
-        onDestroy: null, onEnter: "maldicaoSeteMares", composedFace: true },
+        onDestroy: null, onEnter: "bolhas", composedFace: true },
     // IMITAR (WU-KONG / ENIGMA): escolhe um Campeão ALIADO
     // (excluindo o próprio invocador) e COPIA a habilidade dele
     // (onEnter, onDestroy, abilityType, abilityName, abilityDesc).
@@ -456,14 +462,6 @@ const cardDefs = [
         abilityName: "Guardião",
         abilityDesc: "Campeões aliados ganham Proteção!",
         onDestroy: null, onEnter: "guardiao", composedFace: true },
-    { name: "TOXINA", power: 1, category: "champion", abilityType: "instant",
-        abilityName: "Fumaça Tóxica",
-        abilityDesc: "Os Campeões adversários ficam vulneráveis e são destruídos quando recebem qualquer redução de poder.",
-        onDestroy: null, onEnter: "fumacaToxica", composedFace: true },
-    { name: "MARTIS", power: 2, category: "champion", abilityType: "instant",
-        abilityName: "Fumaça Tóxica",
-        abilityDesc: "Os Campeões adversários ficam vulneráveis e são destruídos quando recebem qualquer redução de poder.",
-        onDestroy: null, onEnter: "fumacaToxica", composedFace: true },
     { name: "ANTI-MAGOS", power: 2, category: "champion", abilityType: "constant",
         abilityName: "Aura Anti-Magia",
         abilityDesc: "Ao entrar, recebe Barreira permanente. Bloqueia redução de Poder sem perder o status.",
@@ -534,11 +532,11 @@ const cardDefs = [
         onDestroy: null, onEnter: "roletaRussa", composedFace: true },
     { name: "SHINOBI", power: 1, category: "champion", abilityType: "instant",
         abilityName: "Podridão",
-        abilityDesc: "Contamine 5 cartas do BARALHO do adversário. As cartas contaminadas são inúteis quando chegam à mão do alvo.",
+        abilityDesc: "Contamine 2 cartas do BARALHO do adversário. Elas viram Cartas Apodrecidas.",
         onDestroy: null, onEnter: "podridao", composedFace: true },
     { name: "KORUSBELLA", power: 2, category: "champion", abilityType: "instant",
         abilityName: "Podridão",
-        abilityDesc: "Contamine 5 cartas do BARALHO do adversário. As cartas contaminadas são inúteis quando chegam à mão do alvo.",
+        abilityDesc: "Contamine 2 cartas do BARALHO do adversário. Elas viram Cartas Apodrecidas.",
         onDestroy: null, onEnter: "podridao", composedFace: true },
     { name: "TEMPESTA", power: 1, category: "champion", abilityType: "instant",
         abilityName: "Raio Duplo",
@@ -623,7 +621,7 @@ const cardDefs = [
         onDestroy: null, onEnter: "charme", composedFace: true },
     // TOKENS de Ursificação / Transformar em Bichinho. `hidden:true`
     // mantém estas cartas FORA da Lista de Cartas E FORA do baralho.
-    { name: "BANJO", power: 0, category: "champion", abilityType: "constant",
+    { name: "URSO PESADO", power: 0, category: "champion", abilityType: "constant",
         abilityName: "Pesado Demais",
         abilityDesc: "Precisa de 2 Ações para Atacar. Não pode Atacar Campeões Resistentes.",
         onDestroy: null, onEnter: null, hidden: true, composedFace: true },

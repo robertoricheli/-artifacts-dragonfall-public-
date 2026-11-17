@@ -5,11 +5,19 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+// D-10 (Lote F): o cérebro usava `pl.maxUltimateUses ?? 1` — campo nunca
+// inicializado (df-match-init só põe `ultimateUses: 0`) — a IA só usava
+// 1 Ultimate por partida, enquanto o motor permite 3–4
+// (getMaxUltimateUses). Usar a mesma fonte do motor.
+import { getEffectiveMaxUltimateUses } from "../motor/df-ultimate-resolve.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const MAX_FIELD = 6;
-const MAX_HAND = 10;
+// F7-11 D13: MAX_HAND é 8 no jogo (GameState.MAX_HAND) — o 10 fazia a
+// substituta usar a CONJURAÇÃO com a mão cheia (gasto à toa) e liberava
+// a compra com 8-9 cartas.
+const MAX_HAND = 8;
 const MAX_ACTIONS = 3;
 
 let _profile = null;
@@ -32,11 +40,15 @@ export function loadHardProfile() {
   _profile = {
     version: 1,
     globals: { attackScoreMul: 1.08, summonScoreMul: 0.98, drawPenalty: -5, ultimateBias: 1.08 },
+    // D-N14 (offline _best_summon, ai_brain.gd:447-745): os pesos vivos
+    // são os do offline. Vários ramos usam valores literais no código
+    // (condicionais P1/usável — sem um único peso); as chaves mortas
+    // (fieldSlotBonus, rapidezAttackFollowUp, fumacaOnlyP1Penalty) foram
+    // removidas com os ramos que as usavam.
     onEnter: {
-      invokeDragon: 10, rapidez: 13, fortalecer: 9, devourar: 8, summonRitual: 23,
-      bolaDeFogo: 14, fumacaToxica: 15, raioDuplo: 16, auraDeFogo: 13, auraAntiMagia: 10,
-      assassinar: 16, pesadelo: 7, roubar: 10, desacelerar: 9, sobrepujar: 6, fieldSlotBonus: 15,
-      rapidezAttackFollowUp: 28, summonBlocksKillPenalty: 55, fumacaOnlyP1Penalty: 16,
+      invokeDragon: 7, rapidez: 7, summonRitual: 23,
+      raioDuplo: 8, auraAntiMagia: 4,
+      sobrepujar: 6,
     },
     attack: {
       cleanKillBase: 28, cleanKillPerDefPower: 10, lastChampionBonus: 45,
@@ -75,24 +87,23 @@ export function enemyFieldCount(state, seat) {
   return n;
 }
 
-function enemyHasNonP1(state, seat) {
-  for (let p = 0; p < (state.playersCount || 2); p++) {
-    if (p === seat) continue;
-    for (const c of state.players[p]?.field || []) {
-      if (c && (c.currentPower ?? c.power ?? 0) > 1) return true;
-    }
-  }
-  return false;
+/** S2-A08 (offline ai_brain.gd:19-44): placar do ponto de vista de `seat`.
+ *  VP x3 + Poder em campo x1 + cartas na mão x0,5. Positivo = na frente. */
+export function evaluateAiPosition(state, seat) {
+  const me = state.players[seat] || {};
+  const foe = state.players[humanSeat(state, seat)] || {};
+  const vpDiff = (me.vp ?? 0) - (foe.vp ?? 0);
+  const pow = (pl) => (pl.field || []).reduce((s, c) => s + (c ? (c.currentPower ?? c.power ?? 0) : 0), 0);
+  const handDiff = (me.hand?.length ?? 0) - (foe.hand?.length ?? 0);
+  return vpDiff * 3 + (pow(me) - pow(foe)) + handDiff * 0.5;
 }
 
-function enemyHasP1(state, seat) {
-  for (let p = 0; p < (state.playersCount || 2); p++) {
-    if (p === seat) continue;
-    for (const c of state.players[p]?.field || []) {
-      if (c && (c.currentPower ?? c.power ?? 0) === 1) return true;
-    }
-  }
-  return false;
+/** S2-A08: mitigacao (<= -4) / campo (>= +4) / equilibrio. */
+export function aiMode(state, seat) {
+  const s = evaluateAiPosition(state, seat);
+  if (s <= -4) return "mitigacao";
+  if (s >= 4) return "campo";
+  return "equilibrio";
 }
 
 function enemyHasHand(state, seat) {
@@ -103,15 +114,12 @@ function enemyHasHand(state, seat) {
   return false;
 }
 
-function combatOutcome(att, def) {
-  const ap = att.currentPower ?? att.power ?? 0;
-  const dp = def.currentPower ?? def.power ?? 0;
-  return { killD: ap >= dp, killA: dp >= ap, ap, dp };
-}
+// D-N11: o combatOutcome ingênuo (killD: ap >= dp) foi removido — todos
+// os usos agora passam por combatOutcomeOverpower (empate + Sobrepujar).
 
 function isOverpower(c) {
   return !!(c && (c.abilityName === "Sobrepujar" || c.constantEffect === "sobrepujar"
-    || c.tecnicasSobrepujar || c.warOverpower));
+    || c.tecnicasSobrepujar));
 }
 
 function hasInvestida(c) {
@@ -121,12 +129,6 @@ function hasInvestida(c) {
 }
 function hasLaco(c) {
   return !!(c && (c.constantEffect === "lacoDeSangue" || c.abilityName === "Laço de Sangue"));
-}
-function hasLegado(c) {
-  return !!(c && (c.onDestroy === "legado" || c.abilityName === "Legado"));
-}
-function hasVinganca(c) {
-  return !!(c && (c.onDestroy === "vinganca" || c.abilityName === "Vingança"));
 }
 function hasInspirar(c) {
   return !!(c && (c.constantEffect === "inspirar" || c.abilityName === "Inspirar"));
@@ -144,13 +146,73 @@ function enemyHasPowerAtLeast(state, seat, minPow) {
   }
   return false;
 }
+
+/** Adversários sem contar o próprio enfeitiçado (offline `foes`). */
+function foesExcludingCharmed(state, seat) {
+  const out = [];
+  for (let p = 0; p < (state.playersCount || 2); p++) {
+    if (p === seat) continue;
+    (state.players[p]?.field || []).forEach((c, i) => {
+      if (c && !(c.charme && c.charmeOriginalOwner === seat)) out.push({ p, i, c });
+    });
+  }
+  return out;
+}
+
+/** D-N09/D-N10 (offline _only_p1_targets, ai_brain.gd:269-287): todos os
+ *  alvos VÁLIDOS são P1 — a carta é pulada de vez (nem como último recurso). */
+function onlyP1Targets(state, seat, oe) {
+  const foes = foesExcludingCharmed(state, seat);
+  if (!foes.length) return false;
+  if (oe === "incendiar") {
+    const valid = foes.filter((t) => !(t.c.barrier || t.c.barrierPermanent));
+    return valid.length > 0 && valid.every((t) => (t.c.currentPower ?? t.c.power ?? 0) === 1);
+  }
+  return foes.every((t) => (t.c.currentPower ?? t.c.power ?? 0) === 1);
+}
+
+function foeHasP1NoBarrier(state, seat) {
+  return foesExcludingCharmed(state, seat).some((t) =>
+    (t.c.currentPower ?? t.c.power ?? 0) === 1 && !(t.c.barrier || t.c.barrierPermanent));
+}
+
+function hasBolaTarget(state, seat) {
+  return foesExcludingCharmed(state, seat).some((t) =>
+    !(t.c.barrier || t.c.barrierPermanent)
+    && !(t.c.podridao || t.c.name === "APODRECIDA")
+    && (t.c.currentPower ?? t.c.power ?? 0) >= 1);
+}
+
+function hasUnpoisonedFoe(state, seat) {
+  return foesExcludingCharmed(state, seat).some((t) => !t.c.poisoned);
+}
+
+function hasUnimprisonedFoe(state, seat) {
+  return foesExcludingCharmed(state, seat).some((t) => !t.c.prisaoPrismatica);
+}
+
+function hasUnburnedNonBarrierFoe(state, seat) {
+  return foesExcludingCharmed(state, seat).some((t) =>
+    !t.c.burning && !(t.c.barrier || t.c.barrierPermanent));
+}
+
+function hasValidSepararTarget(state, seat) {
+  return foesExcludingCharmed(state, seat).some((t) =>
+    (t.c.currentPower ?? t.c.power ?? 0) === 2
+    && !t.c.inspiracao && !t.c.wallBuff && (t.c.furyStacks ?? 0) <= 0);
+}
+
+function hasFoePower(state, seat, pw) {
+  return foesExcludingCharmed(state, seat).some((t) =>
+    (t.c.currentPower ?? t.c.power ?? 0) === pw);
+}
 function hasLegalAttackTarget(state, seat, attackerStub) {
   if (!attackerStub) return false;
-  const att = { ...attackerStub, tapped: false, frozen: false, pulled: false };
+  const att = { ...attackerStub, tapped: false, frozen: false };
   for (let ep = 0; ep < (state.playersCount || 2); ep++) {
     if (ep === seat) continue;
     for (const d of state.players[ep]?.field || []) {
-      if (!d || d.shielded || d.pulled) continue;
+      if (!d || d.shielded) continue;
       if (!shouldAttack(att, d)) continue;
       return true;
     }
@@ -165,7 +227,6 @@ function canSameTurnAttackAfterSummon(state, seat, card, actionsAfter) {
     ...card,
     tapped: false,
     frozen: false,
-    pulled: false,
     freeAttack: free || !!card.freeAttack,
   };
   if (hasDesafiante(card) && fieldCount(state, seat) === 0) {
@@ -180,12 +241,11 @@ function canAllyFollowUpAttackAfterGrant(state, seat, actionsAfter, grant) {
   const field = state.players[seat]?.field || [];
   if (!field.length) return false;
   for (const c of field) {
-    if (!c || c.tapped || c.frozen || c.pulled) continue;
+    if (!c || c.tapped || c.frozen) continue;
     const stub = {
       ...c,
       tapped: false,
       frozen: false,
-      pulled: false,
     };
     if (grant === "tecnicas") stub.tecnicasSobrepujar = true;
     if (grant === "grito") stub.fury = true;
@@ -206,36 +266,28 @@ export function summonPremiseBlocked(state, seat, card, actionsAfter) {
     if (fc <= 0 || enemyFc <= 0 || aa < 1) return true;
     if (!canAllyFollowUpAttackAfterGrant(state, seat, aa, "tecnicas")) return true;
   }
+  // D-N06 (offline _oe_usable("gritoDeGuerra"), ai_brain.gd:381-382): o
+  // GRITO só exige aliados — o gate de follow-up era do TÉCNICAS, não
+  // do GRITO (o comentário antigo afirmava o contrário e estava errado;
+  // _can_attack_after_tecnicas só vale para TÉCNICAS, ai_brain.gd:243-267).
   if (oe === "gritoDeGuerra") {
-    if (fc <= 0 || enemyFc <= 0 || aa < 1) return true;
-    if (!canAllyFollowUpAttackAfterGrant(state, seat, aa, "grito")) return true;
+    if (fc <= 0) return true;
   }
-  if (oe === "charme" || oe === "prisaoPrismatica" || oe === "incendiar") {
+  // D-N08 (offline _oe_usable("charme"), ai_brain.gd:384-385): o CHARME
+  // só exige adversários — rouba P1 também. O P2+ sai daqui (o pick
+  // prefere o mais forte, com fallback para P1).
+  if (oe === "prisaoPrismatica" || oe === "incendiar") {
     if (!enemyHasPowerAtLeast(state, seat, 2)) return true;
   }
-  if (hasLaco(card)) {
-    if (fc < 1 || !canSameTurnAttackAfterSummon(state, seat, card, aa)) return true;
-  }
-  if (hasDesafiante(card)) {
-    if (fc > 0 || !canSameTurnAttackAfterSummon(state, seat, card, aa)) return true;
-  }
-  if (hasInvestida(card)) {
-    if (!canSameTurnAttackAfterSummon(state, seat, card, aa)) return true;
-  }
-  if (oe === "furia") {
-    if (!canSameTurnAttackAfterSummon(state, seat, card, aa)) return true;
-  }
-  if (hasLegado(card)) {
-    if (fc < 1 || !canSameTurnAttackAfterSummon(state, seat, card, aa)) return true;
-  }
-  if (hasVinganca(card)) {
-    if (enemyFc < 2 || !canSameTurnAttackAfterSummon(state, seat, card, aa)) return true;
-  }
-  if (hasInspirar(card)) {
-    if (fc < 2) return true;
-  }
-  if (isOverpower(card)) {
-    if (!canSameTurnAttackAfterSummon(state, seat, card, aa)) return true;
+  // S2-M15: DESAFIANTE / VINGANÇA / LEGADO / INSPIRAR / FÚRIA / LAÇO /
+  // INVESTIDA / SOBREPUJAR não são gates no offline — são só bônus de
+  // score em _best_summon (ai_brain.gd). Os blocos acima foram removidos.
+  // S2-B19 (offline ai_brain.gd:363): o FILHOTE precisa de espaço DEPOIS
+  // da invocação — com 5 em campo, o invocador não é invocado. NÃO mudar
+  // invokeDragonBlocked (df-rules.js:13): ela vale p/ o humano também.
+  // (só invokeDragon existe nos dados — o nome cúbico morreu no C-B13.)
+  if (oe === "invokeDragon") {
+    if (fc >= MAX_FIELD - 1) return true;
   }
   return false;
 }
@@ -243,8 +295,96 @@ export function summonPremiseBlocked(state, seat, card, actionsAfter) {
 export function championSummonCost(c) {
   const p = c?.currentPower ?? c?.power ?? 0;
   if (p <= 1) return 1;
-  if (p === 2) return 1;
-  return 2;
+  // R-04 parcial (D-N02; motor df-rules.js:39-45; offline cobra o Poder
+  // atual): P2 custa 2, P3 custa 3, P4 custa 4 — sem teto.
+  return p;
+}
+
+/** U-D01/U-D05 (rodada 3, offline ai_brain.gd:322-430 _oe_usable): o
+ *  onEnter desta carta TERIA efeito agora? "Inútil" = sem efeito — o
+ *  offline põe a carta no trilho inútil (só entra sem mais nada jogável),
+ *  não veta. O -9999 fica só para os vetos reais (GATE_8, bolhas/pesadelo
+ *  2×, roleta, D-N09). */
+function onEnterUsable(state, seat, oe, actionsAfter = 0) {
+  if (!oe) return true;
+  const fc = fieldCount(state, seat);
+  const enemyFc = enemyFieldCount(state, seat);
+  const pl = state.players[seat];
+  switch (oe) {
+    case "assassinar": return foeHasP1NoBarrier(state, seat);
+    case "transformarBichinho": return foesExcludingCharmed(state, seat).some((t) =>
+      (t.c.currentPower ?? t.c.power ?? 0) >= 2 && !(t.c.barrier || t.c.barrierPermanent));
+    case "separar": return hasValidSepararTarget(state, seat);
+    case "mordidaVenenosa":
+    case "fumacaToxica": return hasUnpoisonedFoe(state, seat);
+    case "rajadaCongelante": return enemyFc > 0;
+    case "prisaoPrismatica": return hasUnimprisonedFoe(state, seat);
+    case "bolaDeFogo": return hasBolaTarget(state, seat);
+    case "incendiar": return hasUnburnedNonBarrierFoe(state, seat);
+    case "necromancia": return (pl?.discard?.length || 0) > 0;
+    case "raioDuplo": return hasBolaTarget(state, seat);
+    case "energizar": {
+      const maxUlt = getEffectiveMaxUltimateUses(pl, pl?.heroId);
+      return (pl?.ultimateUses ?? 0) < maxUlt && !pl?.usedUltimateThisTurn;
+    }
+    case "invokeDragon": return fc < MAX_FIELD - 1;
+    case "fortalecer": return (pl?.field || []).some((c) => c && !(c.podridao || c.name === "APODRECIDA"));
+    case "ursificacao": return fc > 0;
+    case "devorar": return (pl?.field || []).some((c) => c && !(c.podridao || c.name === "APODRECIDA"));
+    // F7-11 D4: o nativo Sem Honra É alvo válido de CORROMPER — o offline
+    // só exclui quem já tem o flag `corrupted` (ai_brain.gd: _best_talent
+    // e _oe_usable "corromper"); o onDestroy nativo não exclui.
+    case "corromper": return (pl?.field || []).some((c) => c && !(c.corruptedNoHonor || c.corrupted));
+    case "roubar":
+    case "bolhas": return enemyHasHand(state, seat);
+    case "pesadelo": return true;
+    case "enfraquecer": return (state.players[humanSeat(state, seat)]?.vp ?? 0) > 0;
+    case "podridao": return (state.players[humanSeat(state, seat)]?.deck?.length || 0) > 0;
+    case "gritoDeGuerra":
+    case "guardiao": return fc > 0;
+    case "charme": return enemyFc > 0;
+    case "trocaInjusta": return hasFoePower(state, seat, 2);
+    case "tecnicasDeCombate": return canAllyFollowUpAttackAfterGrant(state, seat, actionsAfter, "tecnicas");
+    case "roletaRussa": return enemyFc > fc;
+    case "imitar": return imitarUsable(state, seat, actionsAfter);
+    default: return true;
+  }
+}
+
+/** U-D05 (rodada 3, offline ai_brain.gd _oe_usable("imitar") +
+ *  _imitar_would_replay_marked): o IMITAR vale se há um aliado copiável
+ *  cujo instant copiado vale — ou um aliado sem instant (copiar a
+ *  constante vale). Não vale se o único copiável é um BOLHAS/PESADELO
+ *  já usado neste turno (o replay seria no-op — D-N07) nem se o aliado
+ *  é Ritual, silenciado ou outro IMITAR. */
+function imitarUsable(state, seat, actionsAfter = 0) {
+  const allies = state.players[seat]?.field || [];
+  const used = state.aiBolhasPesadeloUsed || new Set();
+  for (const a of allies) {
+    if (!a || a.silenced || a.summonRitual) continue;
+    if (a.abilityName === "Ritual" || a.abilityName === "Ritual Superior") continue;
+    const oe = a.onEnter;
+    if (oe === "imitar") continue;
+    if (!oe) return true; // sem instant — copiar a constante vale
+    if ((oe === "bolhas" || oe === "pesadelo") && used.has(oe)) continue;
+    if (onEnterUsable(state, seat, oe, actionsAfter)) return true;
+  }
+  return false;
+}
+
+// F7-11 D2 — espelho de _imitar_would_replay_marked (ai_brain.gd:303-314):
+// há um aliado copiável cujo instant é BOLHAS/PESADELO já usado neste
+// turno? (Sem nome, Ritual ou silêncio não é copiável.)
+function imitarWouldReplayMarked(state, seat) {
+  const allies = state.players[seat]?.field || [];
+  const used = state.aiBolhasPesadeloUsed || new Set();
+  for (const a of allies) {
+    if (!a) continue;
+    if (!a.abilityName || a.abilityName === "Ritual" || a.abilityName === "Ritual Superior" || a.silenced) continue;
+    const copied = a.onEnter || "";
+    if ((copied === "bolhas" || copied === "pesadelo") && used.has(copied)) return true;
+  }
+  return false;
 }
 
 function talentPlayCost(c) {
@@ -274,15 +414,47 @@ function hasCleanKill(state, seat) {
   if (!pl) return false;
   for (let ai = 0; ai < (pl.field || []).length; ai++) {
     const att = pl.field[ai];
-    if (!att || att.tapped || att.frozen || att.pulled) continue;
+    if (!att || att.tapped || att.frozen) continue;
     for (let ep = 0; ep < (state.playersCount || 2); ep++) {
       if (ep === seat) continue;
       for (let di = 0; di < (state.players[ep]?.field || []).length; di++) {
         const def = state.players[ep].field[di];
-        if (!def || def.shielded || def.pulled) continue;
-        const o = combatOutcome(att, def);
+        if (!def || def.shielded) continue;
+        // D-N11: o empate com Sobrepujar só no atacante é abate limpo
+        // (offline _combat_outcome) — o combatOutcome ingênuo tratava
+        // como troca mútua e o scoreAttackAction desvalorizava o ataque.
+        const o = combatOutcomeOverpower(att, def);
         if (o.killD && !o.killA) return true;
       }
+    }
+  }
+  return false;
+}
+
+// D-M15-1 (offline game_state.gd _is_resistente; df-rules.js:76 isResistente):
+// o hard-brain é puro (sem import do motor) — predicado local.
+function isResistenteServer(f) {
+  return !!(f && f.abilityName === "Resistente" && !f.silenced);
+}
+
+/** S2-M15 (offline ai_brain.gd:15-16 + _can_summon_and_attack): os 8
+ *  campeões de ataque imediato só entram quando a IA pode invocar E
+ *  atacar com eles no mesmo turno. */
+const GATE_8 = new Set(["GRISELDA", "KUMIKO", "POPPY", "A DUELISTA",
+  "GAMER", "ARCADIA", "CAVALEIRO SANGUINÁRIO", "SCARLET"]);
+export function gate8CanSummonAndAttack(state, seat, card, actionsAfter) {
+  const pw = card.currentPower ?? card.power ?? 0;
+  const investida = hasInvestida(card);
+  for (let p = 0; p < (state.playersCount || 2); p++) {
+    if (p === seat) continue;
+    for (const f of (state.players[p]?.field || [])) {
+      if (!f) continue;
+      if ((f.currentPower ?? f.power ?? 0) > pw) continue;
+      if (f.shielded) continue;
+      if (f.charme && f.charmeOriginalOwner === seat) continue;
+      if (investida && isResistenteServer(f)) continue;
+      const atkCost = investida ? 0 : (isResistenteServer(f) ? 2 : 1);
+      if ((actionsAfter ?? 0) >= atkCost) return true;
     }
   }
   return false;
@@ -294,120 +466,172 @@ export function scoreSummonCard(state, seat, card, handIdx, opts = {}) {
   const pl = state.players[seat];
   const fc = fieldCount(state, seat);
   const enemyFc = enemyFieldCount(state, seat);
-  const summonMul = g("summonScoreMul", 1);
   const pow = card.currentPower ?? card.power ?? 0;
   const cost = championSummonCost(card);
   const actionsAfter = (pl?.actions ?? 0) - cost;
-  if (summonPremiseBlocked(state, seat, card, actionsAfter)) return -9999;
-  let score = pow * 4 * summonMul;
+  // U-D01 (rodada 3): a premissa bloqueada NÃO veta mais — a carta cai no
+  // trilho "inútil" (-6 no ramo, como o offline) e só entra sem mais nada
+  // jogável. O predicado summonPremiseBlocked continua (exportado e
+  // testado pelo check-s2-m15.mjs); só deixa de ser veto de score.
+  // 8M (offline _best_summon, ai_brain.gd): base Poder×10 (era Poder×4).
+  let score = pow * 10;
   const needTempoKill = hasCleanKill(state, seat);
-  if (needTempoKill && actionsAfter < 1 && !card.summonRitual) {
-    score -= onEnterW("summonBlocksKillPenalty", 55);
-  }
-  if (humanNearWin(state, seat) && actionsAfter < 1 && cost >= 2) {
-    score -= 90;
-  }
+  // D10 (D-F7-4, decisão dela 17/11 ~10:05, opção (a) REMOVER): os pesos
+  // −55 (invocar bloquearia um abate limpo) e −90 (humano perto de vencer)
+  // foram removidos — o offline não os tem; a substituta invoca e perde o
+  // abate, igual ao offline.
+  // S2-M15: GATE_8 — os 8 só entram com ataque no mesmo turno.
+  if (GATE_8.has(card.name) && !gate8CanSummonAndAttack(state, seat, card, actionsAfter))
+    return -9999;
   const oe = card.onEnter;
-  if (oe === "invokeDragon" || oe === "invokeCubicDragon") score += onEnterW("invokeDragon", 10);
-  if (oe === "rapidez") {
-    score += onEnterW("rapidez", 13);
-    if (enemyFc > 0 && (actionsAfter + 1) >= 1) score += onEnterW("rapidezAttackFollowUp", 28);
-    else if (enemyFc > 0) score += 20;
+  // D-N07 (offline _best_summon + ai_bolhas_pesadelo_used, ai_brain.gd:447-560,
+  // 1.51.65 T10): BOLHAS/PESADELO nunca 2× no mesmo turno — nem como
+  // último recurso (a 2ª aplicação é idempotente).
+  if ((oe === "bolhas" || oe === "pesadelo")
+      && (state.aiBolhasPesadeloUsed || new Set()).has(oe)) return -9999;
+  // D-N14 (offline _best_summon, ai_brain.gd:447-745): pesos alinhados ao
+  // offline, ramo por ramo. "Inútil" sem -6 no offline = sem bônus aqui
+  // (a carta continua jogável como corpo); com -6 no offline = -6 aqui.
+  if (oe === "invokeDragon") score += fc < MAX_FIELD - 1 ? 7 : -6;
+  if (oe === "rapidez") score += 7;
+  if (oe === "forja") score += 7;
+  if (oe === "fortalecer") {
+    const allies = pl.field || [];
+    if (allies.some((c) => c && (c.currentPower ?? c.power ?? 0) === 1 && !(c.podridao || c.name === "APODRECIDA"))) score += 14;
+    else if (allies.some((c) => c && !(c.podridao || c.name === "APODRECIDA"))) score += 4;
   }
-  if (oe === "fortalecer" && fc > 0) score += onEnterW("fortalecer", 9);
-  if (oe === "devorar" && fc > 0) score += onEnterW("devourar", 8);
-  if (card.summonRitual) score += onEnterW("summonRitual", 23) + pow * 4;
-  if (oe === "bolaDeFogo") score += onEnterW("bolaDeFogo", 14);
-  if (oe === "fumacaToxica" && enemyFc > 0) {
-    score += enemyHasNonP1(state, seat)
-      ? onEnterW("fumacaToxica", 15)
-      : -onEnterW("fumacaOnlyP1Penalty", 16);
+  if (oe === "devorar") {
+    const allies = pl.field || [];
+    if (allies.some((c) => c && (c.currentPower ?? c.power ?? 0) === 1)) score += 14;
+    else if (fc > 0) score += 4;
   }
-  if (oe === "raioDuplo" && enemyFc > 0) score += onEnterW("raioDuplo", 16);
-  if (oe === "auraDeFogo" && fc > 0) score += onEnterW("auraDeFogo", 13);
-  if (oe === "auraAntiMagia") score += onEnterW("auraAntiMagia", 10);
+  if (oe === "ursificacao") {
+    const allies = pl.field || [];
+    if (allies.some((c) => c && (c.currentPower ?? c.power ?? 0) === 1 && !c.urso_pesado && c.name !== "URSO PESADO")) score += 14;
+    else if (fc > 0) score += 4;
+  }
+  if (oe === "corromper") {
+    const allies = pl.field || [];
+    // F7-11 D4: ver o `case "corromper"` acima — o nativo Sem Honra conta.
+    if (allies.some((c) => c && (c.currentPower ?? c.power ?? 0) === 1 && !(c.corruptedNoHonor || c.corrupted))) score += 14;
+    else if (allies.some((c) => c && !(c.corruptedNoHonor || c.corrupted))) score += 4;
+  }
+  // F7-11 D12: sem bônus de ritual — o offline pontua o ritual como corpo
+  // comum (Poder×10 - custo×2); o +23 + Poder×4 fazia a substituta
+  // preferir o ritual a um corpo melhor (TIAMAT 59 vs WYVERN 31).
+  if (oe === "bolaDeFogo") {
+    if (foeHasP1NoBarrier(state, seat)) score += 14;
+    else if (hasBolaTarget(state, seat)) score += 8;
+    else score -= 6;
+  }
+  if (oe === "transformarBichinho") {
+    score += foesExcludingCharmed(state, seat).some((t) =>
+      (t.c.currentPower ?? t.c.power ?? 0) >= 2 && !(t.c.barrier || t.c.barrierPermanent)) ? 8 : -6;
+  }
+  if (oe === "fumacaToxica") {
+    // D-N09: só P1 em campo = pular de vez (nem como último recurso).
+    if (onlyP1Targets(state, seat, "fumacaToxica")) return -9999;
+    score += hasUnpoisonedFoe(state, seat) ? 8 : -6;
+  }
+  if (oe === "raioDuplo") score += hasBolaTarget(state, seat) ? 8 : -6;
+  if (oe === "auraAntiMagia") score += 4;
   if (oe === "assassinar") {
-    score += onEnterW("assassinar", 16);
-    score += enemyHasP1(state, seat) ? 35 : -12;
+    // F7-11 D1 (offline _best_summon, ai_brain.gd:550-559): sem P1
+    // adversário sem barreira, o assassino é PULADO de vez — nem como
+    // último recurso (mesmo padrão do INCENDIAR/mordida, D-N09).
+    if (!foeHasP1NoBarrier(state, seat)) return -9999;
+    score += 10;
   }
-  if (oe === "mordidaVenenosa" && enemyFc > 0) {
-    score += enemyHasNonP1(state, seat) ? 13 : -18;
+  if (oe === "mordidaVenenosa") {
+    // D-N09: só P1 em campo = pular de vez (nem como último recurso).
+    if (onlyP1Targets(state, seat, "mordidaVenenosa")) return -9999;
+    score += hasUnpoisonedFoe(state, seat) ? 8 : -6;
   }
-  if (oe === "pesadelo") score += onEnterW("pesadelo", 7);
-  if (oe === "roubar") {
-    score += enemyHasHand(state, seat) ? onEnterW("roubar", 10) : -8;
-  }
-  if (oe === "desacelerar") {
-    const opp = state.players[humanSeat(state, seat)];
-    score += opp && !opp.skipNextAction ? onEnterW("desacelerar", 9) : -6;
-  }
-  if (oe === "incendiar") {
-    if (!enemyHasPowerAtLeast(state, seat, 2)) return -9999;
-    score += 14;
-  }
-  if (oe === "charme") {
-    if (!enemyHasPowerAtLeast(state, seat, 2)) return -9999;
-    score += 16;
+  if (oe === "rajadaCongelante") {
+    // D-N09: idem MORDIDA.
+    if (onlyP1Targets(state, seat, "rajadaCongelante")) return -9999;
+    score += enemyFc > 0 ? 8 : -6;
   }
   if (oe === "prisaoPrismatica") {
-    if (!enemyHasPowerAtLeast(state, seat, 2)) return -9999;
-    score += 16;
+    if (onlyP1Targets(state, seat, "prisaoPrismatica")) return -9999;
+    score += hasUnimprisonedFoe(state, seat) ? 8 : -6;
   }
-  if (oe === "guardiao" && fc > 0) score += 12;
-  if (oe === "furia") {
-    if (!canSameTurnAttackAfterSummon(state, seat, card, actionsAfter)) return -9999;
-    score += 26;
+  if (oe === "separar") score += hasValidSepararTarget(state, seat) ? 8 : -6;
+  if (oe === "energizar") {
+    const maxUlt = getEffectiveMaxUltimateUses(pl, pl.heroId);
+    score += ((pl.ultimateUses ?? 0) < maxUlt && !pl.usedUltimateThisTurn) ? 5 : -6;
   }
-  if (oe === "gritoDeGuerra") {
-    if (fc <= 0 || enemyFc <= 0 || actionsAfter < 1) return -9999;
-    if (!canAllyFollowUpAttackAfterGrant(state, seat, actionsAfter, "grito")) return -9999;
-    score += 11 + fc * 3;
+  if (oe === "enfraquecer") {
+    const hs = humanSeat(state, seat);
+    score += ((state.players[hs]?.vp ?? 0) > 0) ? 5 : -6;
   }
-  if (oe === "tecnicasDeCombate") {
-    if (fc <= 0 || enemyFc <= 0 || actionsAfter < 1) return -9999;
-    if (!canAllyFollowUpAttackAfterGrant(state, seat, actionsAfter, "tecnicas")) return -9999;
-    score += 18 + fc * 5;
+  if (oe === "podridao") {
+    const hs = humanSeat(state, seat);
+    score += ((state.players[hs]?.deck?.length ?? 0) > 0) ? 5 : -6;
   }
-  if (oe === "defensor") score += 10;
-  if (oe === "necromancia") score += 8;
+  if (oe === "trocaInjusta") score += hasFoePower(state, seat, 2) ? 6 : -4;
+  if (oe === "pesadelo") score += 5;
+  if (oe === "roubar") score += enemyHasHand(state, seat) ? 5 : -6;
+  if (oe === "bolhas") score += enemyHasHand(state, seat) ? 5 : -6;
+  if (oe === "desacelerar") score += 5;
+  if (oe === "incendiar") {
+    // D-N10: só P1 válidos (sem barreira) = pular de vez.
+    if (onlyP1Targets(state, seat, "incendiar")) return -9999;
+    score += hasUnburnedNonBarrierFoe(state, seat) ? 8 : -6;
+  }
+  if (oe === "charme") {
+    // D-N08: +6 com adversários (rouba P1 também), -4 sem.
+    score += enemyFc > 0 ? 6 : -4;
+  }
+  if (oe === "guardiao" && fc > 0) score += 4;
+  if (oe === "furia") score += 4;
+  if (oe === "gritoDeGuerra") score += fc > 0 ? 4 : -6;
+  if (oe === "tecnicasDeCombate") score += canAllyFollowUpAttackAfterGrant(state, seat, actionsAfter, "tecnicas") ? 10 : -6;
+  if (oe === "defensor") score += 4;
+  // U-D05 (rodada 3, offline _oe_usable("imitar") + _imitar_would_replay_marked):
+  // +8 com aliado copiável cujo instant vale (ou sem instant — copiar a
+  // constante vale); -6 sem aliado copiável ou só replay de BOLHAS/PESADELO
+  // já usado no turno.
+  // F7-11 D2 (offline _best_summon, ai_brain.gd:561-573): com aliado
+  // copiável útil, +8; se o ÚNICO instant copiável é BOLHAS/PESADELO já
+  // usado no turno, PULA de vez (o re-disparo aconteceria na tela);
+  // sem aliado copiável, -6 (inútil, entra como corpo).
+  if (oe === "imitar") {
+    if (imitarUsable(state, seat, actionsAfter)) score += 8;
+    else if (imitarWouldReplayMarked(state, seat)) return -9999;
+    else score -= 6;
+  }
+  // 8M (offline _best_summon): necromancia +5 SÓ com carta no descarte
+  // (era +8 fixo, sem checar). Sem descarte, −6 — o offline a rebaixa a
+  // "inútil" (só entra sem mais nada jogável); aqui, sem tier de inútil,
+  // a penalidade a desprioriza sem vetar.
+  if (oe === "necromancia") score += ((pl.discard?.length || 0) > 0 ? 5 : -6);
   if (oe === "roletaRussa") {
     // JAMAIS: rival sem campeões ou IA com mais/igual campeões que o rival.
     if (enemyFc <= 0 || enemyFc <= fc) return -9999;
-    score += 18;
+    score += 2;
   }
-  if (hasInvestida(card)) {
-    if (!canSameTurnAttackAfterSummon(state, seat, card, actionsAfter)) return -9999;
-    score += 30;
-  }
-  if (hasLaco(card)) {
-    if (fc < 1 || !canSameTurnAttackAfterSummon(state, seat, card, actionsAfter)) return -9999;
-    score += 28;
-  }
-  if (hasDesafiante(card)) {
-    if (fc > 0 || !canSameTurnAttackAfterSummon(state, seat, card, actionsAfter)) return -9999;
-    score += 48;
-  }
-  if (hasLegado(card)) {
-    if (fc < 1 || !canSameTurnAttackAfterSummon(state, seat, card, actionsAfter)) return -9999;
-    score += 24;
-  }
-  if (hasVinganca(card)) {
-    if (enemyFc < 2 || !canSameTurnAttackAfterSummon(state, seat, card, actionsAfter)) return -9999;
-    score += 24;
-  }
-  if (hasInspirar(card)) {
-    if (fc < 2) return -9999;
-    score += 22 + fc * 2;
-  }
-  if (isOverpower(card)) {
-    if (!canSameTurnAttackAfterSummon(state, seat, card, actionsAfter)) return -9999;
-    score += onEnterW("sobrepujar", 28);
-  }
-  // Encher campo (inimigo vazio / poucas peças).
-  if (fc < 2) score += onEnterW("fieldSlotBonus", 15);
-  if (enemyFc === 0 && fc < MAX_FIELD) score += 18 + (MAX_FIELD - fc) * 3;
-  // Evita encher com lixo sem habilidade quando já tem 2+.
-  if (fc >= 2 && !oe && !card.summonRitual) score -= 25;
+  // 8M (offline _best_summon, ai_brain.gd): constantes valiosas — espelho
+  // exato. Os bônus ENORMES que estavam aqui (investida +30, laço +28,
+  // desafiante +48, legado/vingança +24, inspirar +22, sobrepujar +28)
+  // NÃO existem no offline e afogavam a base — removidos (gap t_948/t_946).
+  // Sobrepujar: sem bônus no offline (grep 0 em ai_brain.gd) — removido.
+  if (hasLaco(card) || hasInvestida(card) || card.constantEffect === "recompensaDupla") score += 5;
+  if (hasDesafiante(card) && fc === 0) score += 6;
+  if (hasInspirar(card)) score += 3;
+  // muralha: +3 (offline) — campo "muralhaNativa || constantEffect muralha"
+  if (card.muralhaNativa || card.constantEffect === "muralha") score += 3;
+  // Crescimento +4 / Sem Honra +2 (offline _best_summon, ability_name).
+  if (card.abilityName === "Crescimento") score += 4;
+  if (card.abilityName === "Sem Honra") score += 2;
+  // legado/vingança: sem bônus no offline (só o Poder conta) — nada aqui.
+  // D-N14: os bônus de "encher campo" (fc<2 +15, inimigo vazio +18+(6-fc)*3)
+  // e o -25 para campeão sem onEnter com fc>=2 NÃO existem no offline —
+  // removidos.
+  // 8M (offline _best_summon): menos custo×2. Usa o `cost` desta função
+  // (championSummonCost local do cérebro) — ver plano sobre a divergência
+  // desse custo local com o motor (P2→1 vs P2→2), fora deste escopo.
+  score -= cost * 2;
   if (opts.bestHandIdx === handIdx) score += 400;
   if (opts.plainHandIdx === handIdx) score += 200;
   return score;
@@ -417,49 +641,136 @@ export function scoreSummonCard(state, seat, card, handIdx, opts = {}) {
  * Espelha aiShouldAttack do vs-IA: jamais ataca campeão de Poder maior.
  * Sobrepujar no defensor com poder igual também é recusado (manual §17).
  */
+// D-M13-1: DfRules.combatOutcome == _combat_outcome offline (Sobrepujar no
+// empate). O combatOutcome local do brain é ingênuo (killD: ap >= dp) —
+// NÃO usá-lo onde o empate com Sobrepujar importa (pickWinAttack).
+function combatOutcomeOverpower(att, def) {
+  const ap = att.currentPower ?? att.power ?? 0;
+  const dp = def.currentPower ?? def.power ?? 0;
+  const oa = isOverpower(att);
+  const od = isOverpower(def);
+  if (ap > dp) return { killD: true, killA: false, ap, dp };
+  if (ap < dp) return { killD: false, killA: true, ap, dp };
+  if (oa && !od) return { killD: true, killA: false, ap, dp, over: true };
+  if (!oa && od) return { killD: false, killA: true, ap, dp, over: true };
+  if (oa && od) return { killD: false, killA: false, ap, dp };
+  return { killD: true, killA: true, ap, dp };
+}
+
+// S2-M13 (offline _no_vp, ai_brain.gd:1095): corrompido não dá PV mesmo
+// silenciado; silenciado desativa o Sem Honra nativo/copiado.
+function noVpOnDestroy(c) {
+  if (!c) return false;
+  if (c.corruptedNoHonor || c.corrupted) return true;
+  if (c.silenced) return false;
+  return c.onDestroy === "noHonor" || c.abilityName === "Sem Honra";
+}
+
+/** S2-M13 (offline _win_attack, ai_brain.gd:963): ataque que vence AGORA.
+ *  Retorna ATTACK_RESOLVE ou null. Prefere abate limpo; mútuo só fallback.
+ *  Usa combatOutcomeOverpower (Sobrepujar no empate, como o offline). */
+export function pickWinAttack(state, seat) {
+  const pl = state.players[seat];
+  const win = state.winPoints ?? state.selectedWinPoints ?? 10;
+  const statused = state.aiStatusedUids || new Set();
+  let mutual = null;
+  for (let ai = 0; ai < (pl.field || []).length; ai++) {
+    const att = pl.field[ai];
+    if (!att || att.tapped || att.frozen) continue;
+    for (let ep = 0; ep < (state.playersCount || 2); ep++) {
+      if (ep === seat) continue;
+      for (let di = 0; di < (state.players[ep]?.field || []).length; di++) {
+        const def = state.players[ep].field[di];
+        if (!def || def.shielded) continue;
+        if (statused.has(def.uid)) continue; // S2-M13: nunca no statusado
+        if (!shouldAttack(att, def)) continue;
+        const { killD, killA } = combatOutcomeOverpower(att, def);
+        if (!killD) continue;
+        const vpGain = noVpOnDestroy(def) ? 0
+          : ((att.constantEffect === "recompensaDupla" && !att.silenced) ? 2 : 1);
+        if ((pl.vp ?? 0) + vpGain < win) continue;
+        const atk = { type: "ATTACK_RESOLVE", playerId: seat,
+          attackerIdx: ai, defenderPlayerId: ep, defenderIdx: di };
+        if (!killA) return atk;
+        if (!mutual) mutual = atk;
+      }
+    }
+  }
+  return mutual;
+}
+
 export function shouldAttack(attacker, defender) {
   if (!attacker || !defender) return false;
-  if (defender.shielded || defender.pulled) return false;
-  if (attacker.tapped || attacker.frozen || attacker.pulled) return false;
+  if (defender.shielded) return false;
+  if (attacker.tapped || attacker.frozen) return false;
   const aPow = attacker.currentPower ?? attacker.power ?? 0;
   const dPow = defender.currentPower ?? defender.power ?? 0;
   const overA = isOverpower(attacker);
   const overD = isOverpower(defender);
   if (aPow < dPow) return false;
+  // U-D02 (rodada 3, offline _best_attack): o empate Sobrepujar×Sobrepujar
+  // é um ataque válido (nem morre ninguém, score 5) — o offline ataca.
+  if (aPow === dPow && overA && overD) return true;
   if (overD && aPow <= dPow) return false;
-  if (aPow === dPow && overA && overD) return false;
   if (aPow > dPow) return true;
   if (aPow === dPow && overA && !overD) return true;
   if (aPow === dPow && !overA && !overD) return true;
   return false;
 }
 
+/** U-D04 (rodada 3): custo do ataque espelhando o motor getAttackActionCost
+ *  (df-rules.js:1156) — urso→2, prisão→2, freeAttack→0, Resistente→2,
+ *  Pesado→2, senão 1. O cérebro é puro (sem import do motor). */
+function attackActionCost(att, def) {
+  if (att && (att.urso_pesado || att.name === "URSO PESADO")) return 2;
+  if (att && att.prisaoPrismatica) return 2;
+  if (att && att.freeAttack && !(att.abilityName === "Pesado Demais" && !att.silenced) && !att.prisaoPrismatica) return 0;
+  let cost = 1;
+  if (def && def.abilityName === "Resistente" && !def.silenced) cost = 2;
+  if (att && att.abilityName === "Pesado Demais" && !att.silenced) cost = Math.max(cost, 2);
+  return cost;
+}
+
 export function scoreAttackAction(state, seat, action) {
   const pl = state.players[seat];
   const att = pl?.field?.[action.attackerIdx];
   const def = state.players[action.defenderPlayerId]?.field?.[action.defenderIdx];
-  if (!att || !def || def.shielded || def.pulled) return -9999;
-  if (att.tapped || att.frozen || att.pulled) return -9999;
+  if (!att || !def || def.shielded) return -9999;
+  if (att.tapped || att.frozen) return -9999;
   if (!shouldAttack(att, def)) return -9999;
-  const { killD, killA, ap, dp } = combatOutcome(att, def);
-  const atkMul = g("attackScoreMul", 1);
-  // Não suicidar sem necessidade.
-  if (!killD && killA && dp > ap + 1) return -40;
+  // D-N11: ver hasCleanKill — o empate com Sobrepujar é abate limpo.
+  const { killD, killA, ap, dp } = combatOutcomeOverpower(att, def);
+  // S2-M13 (offline _best_attack): não DESTRUIR no mesmo turno o campeão
+  // que a IA statusou (o status seria desperdiçado). Atacar sem destruir
+  // continua valendo — por isso o veto é só no ramo killD.
+  if (killD && (state.aiStatusedUids || new Set()).has(def.uid)) return -9999;
+  // U-D04 (rodada 3, offline _best_attack ai_brain.gd:1017-1090, fórmula
+  // exata — sem o +700, sem o ×1,08 e sem os bônus +45/+80/+25, que
+  // invertiam o ranking: matar P1 valia menos que matar P2, e a mútua
+  // P3xP3 valia mais que a P1xP1).
+  const vpGain = killD && !noVpOnDestroy(def)
+    ? ((att.constantEffect === "recompensaDupla" && !att.silenced) ? 2 : 1)
+    : 0;
+  let score;
   if (killD && !killA) {
-    let score = atkW("cleanKillBase", 28) + dp * atkW("cleanKillPerDefPower", 10);
-    if (fieldCount(state, action.defenderPlayerId) <= 1) {
-      score += atkW("lastChampionBonus", 45);
-    }
-    if (humanNearWin(state, seat)) score += 80;
-    if (isOverpower(att)) score += 25;
-    return score * atkMul + 700;
+    score = 100 + vpGain * 10 + dp * 2;
+  } else if (killD && killA) {
+    // S2-A08 (offline _best_attack): em CAMPO a troca mútua é pulada,
+    // EXCETO P1xP1; em MITIGAÇÃO limpar o campo vale +30.
+    const mode = aiMode(state, seat);
+    if (mode === "campo" && !(ap === 1 && dp === 1)) return -9999;
+    score = 40 + vpGain * 10 + (dp - ap) * 2;
+    if (mode === "mitigacao") score += 30;
+  } else if (killA) {
+    score = -50;
+  } else {
+    // Empate (Sobrepujar×Sobrepujar): nem morre ninguém.
+    score = 5;
   }
-  if (killD && killA) {
-    return (ap * atkW("tradeKillPerPower", 5) - atkW("tradePenalty", 12)) * atkMul + 40;
-  }
-  // Pressão / Sobrepujar empate.
-  if (ap === dp && isOverpower(att)) return 120 * atkMul;
-  return 25 + (ap - dp) * 3;
+  if (ap === 1) score += 15;
+  if (dp === 1 && killD) score += 15;
+  score -= attackActionCost(att, def) * 3;
+  return score;
 }
 
 export function scoreDrawAction(state, seat) {
@@ -467,8 +778,22 @@ export function scoreDrawAction(state, seat) {
   if (!pl) return -9999;
   const deckLeft = pl.deckCount != null ? pl.deckCount : (pl.deck?.length ?? 0);
   if (deckLeft <= 0 || (pl.hand?.length || 0) >= MAX_HAND) return -9999;
-  if (hasCleanKill(state, seat)) return -100;
-  if (humanNearWin(state, seat)) return -80;
+  // D-N21 (offline next_action passo 4, ai_brain.gd:49-152): só compra se
+  // não há carta barata jogável na mão ou a mão tem ≤ 2 cartas — senão,
+  // joga a carta barata em vez de comprar.
+  const hand = pl.hand || [];
+  const actions = pl.actions ?? 0;
+  const fc = fieldCount(state, seat);
+  let hasCheap = false;
+  for (const c of hand) {
+    if (!c || c.podridao || c.name === "APODRECIDA") continue;
+    const cost = c.category === "talent" ? talentPlayCost(c) : championSummonCost(c);
+    if (cost <= actions && (c.category === "talent" || fc < MAX_FIELD)) { hasCheap = true; break; }
+  }
+  if (hasCheap && hand.length > 2) return -9999;
+  // F7-11 D9: sem os vetos -100 (abate limpo travado) e -80 (humano perto
+  // de vencer) — o offline compra no passo 4 (o passo de ataque já passou);
+  // os vetos faziam a substituta passar o turno com a mão vazia.
   if (enemyFieldCount(state, seat) > 0 && fieldCount(state, seat) > 0) {
     return g("drawPenalty", -5) + 8;
   }
@@ -495,21 +820,101 @@ function scoreTalentStart(state, seat, action) {
   const cost = talentPlayCost(card);
   if ((state.players[seat]?.actions ?? 0) < cost) return -9999;
   const te = card.talentEffect;
-  const enemyFc = enemyFieldCount(state, seat);
+  const pl = state.players[seat];
   const fc = fieldCount(state, seat);
+  // D-N13 (offline _best_talent, ai_brain.gd:805-961): os gates de talento
+  // do offline — sem eles, a IA jogava talentos sem efeito (e, antes do
+  // fix D-N01, travava a partida). `foes` exclui o próprio enfeitiçado.
+  const foes = foesExcludingCharmed(state, seat);
+  const enemyFc = foes.length;
+  const enemyHand = (state.players[humanSeat(state, seat)]?.hand?.length ?? 0);
+  const mark = state.aiBolhasPesadeloUsed || new Set();
+  const actionsAfter = (pl?.actions ?? 0) - cost;
   if (te === "aceleracao") {
-    if ((state.players[seat]?.actions ?? 0) >= MAX_ACTIONS) return -9999;
+    // U-B09 (rodada 5): o offline joga com 3 ações (play=true) e o resolve
+    // soma +1 SEM teto (game_state.gd:4862); o motor também não tem teto.
     return 40;
   }
-  if (te === "barreira") return fc > 0 ? 35 : -9999;
-  if (te === "fortalecerTalento") return fc > 0 ? 32 : -9999;
-  if (te === "bolaDeFogoTalento") return enemyFc > 0 ? 45 : -9999;
-  if (te === "explosao") return enemyHasNonP1(state, seat) ? 48 : -9999;
-  if (te === "zeroAbsoluto") return enemyFc > 0 ? 42 : -9999;
-  if (te === "medoTalento") return enemyFc > 0 ? 38 : -9999;
-  if (te === "baforadaVenenosa") return enemyHasNonP1(state, seat) ? 36 : -9999;
+  if (te === "chuvaDeCometas") return enemyFc > fc ? 8 : -9999;
+  if (te === "barreira") return (fc > 0 && enemyFc > 0) ? 35 : -9999;
+  // D-N07: BOLHAS talento exige mão adversária E a marca livre.
+  if (te === "bolhasTalento") return (enemyHand > 0 && !mark.has("bolhas")) ? 8 : -9999;
+  if (te === "doppelganger") {
+    const hasP2 = (pl.field || []).some((c) => c && (c.currentPower ?? c.power ?? 0) === 2);
+    return (fc > 0 && fc < MAX_FIELD && hasP2) ? 34 : -9999;
+  }
+  if (te === "investidaTalento") {
+    const ok = (pl.field || []).some((c) => c && !c.tapped
+      && (c.currentPower ?? c.power ?? 0) !== 1 && !hasInvestida(c));
+    return ok ? 8 : -9999;
+  }
+  if (te === "corromperTalento") {
+    // U-B10 (rodada 5): o offline só exclui quem já tem o flag `corrupted`
+    // ("corromper nunca 2x") — aliado nativo Sem Honra (onDestroy noHonor)
+    // é jogado e o efeito é desperdiçado, igual ao offline.
+    const ok = (pl.field || []).some((c) => c && !c.corrupted);
+    return ok ? 8 : -9999;
+  }
+  if (te === "ressuscitarTalento") {
+    // U-B05 (rodada 5): o offline só escolhe com P2 no descarte E espaço
+    // no campo (ai_brain.gd:901-902). Sem o gate, a IA jogava, a recusa
+    // NO_P2_DISCARD avançava a fase e ela perdia os outros talentos.
+    const hasP2 = (pl.discard || []).some((c) => c
+      && c.category === "champion" && (c.power ?? 0) === 2);
+    return (hasP2 && fc < MAX_FIELD) ? 8 : -9999;
+  }
+  if (te === "tornadoDeFogo") {
+    // U-B08 (rodada 5): o offline exige adversário sem Barreira E Poder
+    // diferente de 1 E sem queimadura (ai_brain.gd:845-847).
+    const ok = foes.some((t) => !(t.c.barrier || t.c.barrierPermanent)
+      && (t.c.currentPower ?? t.c.power ?? 0) !== 1
+      && !(t.c.burning || (t.c.burningTurns ?? 0) > 0));
+    return ok ? 8 : -9999;
+  }
+  if (te === "tecnicasDeCombateTalento") {
+    return canAllyFollowUpAttackAfterGrant(state, seat, actionsAfter, "tecnicas") ? 8 : -9999;
+  }
+  if (te === "gritoDeGuerraTalento") return fc > 0 ? 8 : -9999;
+  if (te === "explosao") {
+    const ok = foes.some((t) => (t.c.currentPower ?? t.c.power ?? 0) !== 1
+      && !(t.c.barrier || t.c.barrierPermanent));
+    return ok ? 48 : -9999;
+  }
+  if (te === "zeroAbsoluto") {
+    const ok = foes.some((t) => t.c.frozen || (t.c.currentPower ?? t.c.power ?? 0) >= 2);
+    return ok ? 42 : -9999;
+  }
+  if (te === "medoTalento") {
+    const ok = foes.some((t) => (t.c.currentPower ?? t.c.power ?? 0) === 2);
+    return ok ? 38 : -9999;
+  }
+  if (te === "trocaDeLugar") {
+    const hasP1 = (pl.field || []).some((c) => c && (c.currentPower ?? c.power ?? 0) === 1);
+    const hasP2 = foes.some((t) => (t.c.currentPower ?? t.c.power ?? 0) === 2);
+    return (hasP1 && hasP2) ? 8 : -9999;
+  }
+  if (te === "podridaoTalento") {
+    const hs = humanSeat(state, seat);
+    return ((state.players[hs]?.deck?.length ?? 0) > 0) ? 8 : -9999;
+  }
+  if (te === "enfraquecerTalento") {
+    const hs = humanSeat(state, seat);
+    return ((state.players[hs]?.vp ?? 0) > 0) ? 8 : -9999;
+  }
+  if (te === "invocarDragaoTalento") return fc < MAX_FIELD ? 8 : -9999;
+  if (te === "bolaDeFogoTalento") {
+    const ok = foes.some((t) => !(t.c.barrier || t.c.barrierPermanent));
+    return ok ? 45 : -9999;
+  }
+  if (te === "baforadaVenenosa") {
+    const ok = foes.some((t) => (t.c.currentPower ?? t.c.power ?? 0) !== 1 && !t.c.poisoned);
+    return ok ? 36 : -9999;
+  }
   if (te === "missemagicos") return enemyFc > 0 ? 44 : -9999;
-  if (te === "doppelganger") return fc > 0 && fc < MAX_FIELD ? 34 : -9999;
+  if (te === "fortalecerTalento") {
+    const ok = (pl.field || []).some((c) => c && !(c.podridao || c.name === "APODRECIDA"));
+    return ok ? 32 : -9999;
+  }
   return 8;
 }
 
@@ -523,30 +928,74 @@ export function pickBestHardAction(state, seat, legal, opts = {}) {
     return { type: "END_TURN", playerId: seat, _score: -9999 };
   }
   // Metas para boost de "melhor summon".
+  // U-D01 (rodada 3, offline _best_summon ai_brain.gd:447-560): dois
+  // trilhos — o ÚTIL vence sempre; o INÚTIL (onEnter sem efeito) só entra
+  // sem mais nada jogável. Antes, o maior score ganhava e a inútil
+  // (ex.: LICH 10) vencia a útil (ex.: COME PEDRA 8).
   let bestSummonIdx = null;
   let bestSummonScore = -Infinity;
-  let plainIdx = null;
-  let plainScore = -Infinity;
+  let bestUselessIdx = null;
+  let bestUselessScore = -Infinity;
   for (const a of legal) {
     if (a?.type !== "SUMMON") continue;
     const card = state.players[seat]?.hand?.[a.handIdx];
     const s = scoreSummonCard(state, seat, card, a.handIdx, {});
-    if (s > bestSummonScore) {
+    if (s <= -9999) continue;
+    const actionsAfter = (state.players[seat]?.actions ?? 0) - championSummonCost(card);
+    const useless = !onEnterUsable(state, seat, card?.onEnter, actionsAfter);
+    if (!useless && s > bestSummonScore) {
       bestSummonScore = s;
       bestSummonIdx = a.handIdx;
     }
+    if (useless && s > bestUselessScore) {
+      bestUselessScore = s;
+      bestUselessIdx = a.handIdx;
+    }
+  }
+  if (bestSummonIdx == null) {
+    bestSummonIdx = bestUselessIdx;
+    bestSummonScore = bestUselessScore;
+  }
+  // Plain: o melhor summon pelo score REAL, no trilho (útil primeiro).
+  // O Poder×3−custo escolhia o maior corpo e ignorava o score — o
+  // offline invoca o melhor disponível pelo score, não o maior corpo.
+  // O plain nunca supera o melhor (raw <= bestSummonScore): o boost +200
+  // não pode furar o +400 do trilho útil. E nunca força um -9999.
+  let plainIdx = null;
+  let plainScore = -Infinity;
+  let plainUselessIdx = null;
+  let plainUselessScore = -Infinity;
+  for (const a of legal) {
+    if (a?.type !== "SUMMON") continue;
+    const card = state.players[seat]?.hand?.[a.handIdx];
+    const s = scoreSummonCard(state, seat, card, a.handIdx, {});
+    if (s <= -9999 || s > bestSummonScore) continue;
     // Plain: sem onEnter que exige inimigo, ou qualquer quando board vazio.
     const needsEnemy = card && [
       "bolaDeFogo", "assassinar", "fumacaToxica", "raioDuplo", "mordidaVenenosa",
       "incendiar", "pesadelo", "roubar", "desacelerar", "corromper",
     ].includes(card.onEnter);
-    if (!needsEnemy || enemyFieldCount(state, seat) > 0) {
-      const ps = (card?.currentPower ?? card?.power ?? 0) * 3 - championSummonCost(card);
-      if (ps > plainScore) {
-        plainScore = ps;
+    // S2-M15: o fallback plain NÃO pode furar o GATE_8 (os 8 só entram com
+    // ataque no mesmo turno) — sem isto, o campo vazio forçava a GRISELDA
+    // mesmo sem alvo atacável.
+    const actionsAfterPlain = (state.players[seat]?.actions ?? 0) - championSummonCost(card);
+    const gate8Blocked = card && GATE_8.has(card.name)
+      && !gate8CanSummonAndAttack(state, seat, card, actionsAfterPlain);
+    if ((!needsEnemy || enemyFieldCount(state, seat) > 0) && !gate8Blocked) {
+      const useless = !onEnterUsable(state, seat, card?.onEnter, actionsAfterPlain);
+      if (!useless && s > plainScore) {
+        plainScore = s;
         plainIdx = a.handIdx;
       }
+      if (useless && s > plainUselessScore) {
+        plainUselessScore = s;
+        plainUselessIdx = a.handIdx;
+      }
     }
+  }
+  if (plainIdx == null) {
+    plainIdx = plainUselessIdx;
+    plainScore = plainUselessScore;
   }
   const meta = { bestHandIdx: bestSummonIdx, plainHandIdx: plainIdx };
 
@@ -579,6 +1028,20 @@ export function pickBestHardAction(state, seat, legal, opts = {}) {
     : { type: "END_TURN", playerId: seat, _score: -9999 };
 }
 
+/** S2-M13 passo 2 (offline ai_brain.gd: next_action): a ordem das fases
+ *  separa as categorias — invocar, depois talento, depois Ultimate, depois
+ *  atacar, depois comprar. Os wrappers delegam ao pickBestHardAction com a
+ *  lista filtrada (mesmo floor, mesmo fallback plain, sem mudar os scores). */
+export function pickBestSummon(state, seat, legal, opts = {}) {
+  return pickBestHardAction(state, seat, (legal || []).filter((a) => a?.type === "SUMMON"), opts);
+}
+export function pickBestAttack(state, seat, legal, opts = {}) {
+  return pickBestHardAction(state, seat, (legal || []).filter((a) => a?.type === "ATTACK_RESOLVE"), opts);
+}
+export function pickDraw(state, seat, legal) {
+  return pickBestHardAction(state, seat, (legal || []).filter((a) => a?.type === "DRAW_CARD"), { minScore: 0 });
+}
+
 /** Heurística de alvo on-enter (estilo aiPickOnEnterResolution, sem peeks). */
 export function pickOnEnterResolution(state, seat, ability, casterIdx, fieldIdx) {
   const gatherEnemy = (pred) => {
@@ -586,7 +1049,11 @@ export function pickOnEnterResolution(state, seat, ability, casterIdx, fieldIdx)
     for (let p = 0; p < (state.playersCount || 2); p++) {
       if (p === casterIdx) continue;
       (state.players[p]?.field || []).forEach((c, i) => {
-        if (c && (!pred || pred(c, p, i))) out.push({ p, i, c });
+        // D-N04: o próprio enfeitiçado nunca é alvo (o motor recusa) —
+        // vale para TODOS os pools de inimigo (bola, rajada, mordida,
+        // separar, troca injusta, charme, prisão...).
+        if (!c || (c.charme && c.charmeOriginalOwner === casterIdx)) return;
+        if (!pred || pred(c, p, i)) out.push({ p, i, c });
       });
     }
     return out;
@@ -607,12 +1074,15 @@ export function pickOnEnterResolution(state, seat, ability, casterIdx, fieldIdx)
   if (ability === "trocaInjusta") {
     const pool = gatherEnemy((c) => Number(c.currentPower ?? c.power) === 2);
     if (!pool.length) return {};
-    const pick = pool[Math.floor(Math.random() * pool.length)];
+    // D-N20 (offline auto_pick_uid): o pool já vem em ordem de campo —
+    // empate P2 pega o 1º (determinístico, sem Math.random).
+    const pick = pool[0];
     return { targetP: pick.p, targetI: pick.i, enemyP: pick.p, enemyI: pick.i };
   }
   if (ability === "charme") {
-    let pool = gatherEnemy((c) => c && !c.charme && !c.pulled
-      && (c.currentPower ?? c.power ?? 0) >= 2);
+    // D-N08 (offline _oe_usable("charme")): basta haver adversários —
+    // rouba P1 também; o mais forte primeiro, com fallback para P1.
+    let pool = gatherEnemy(() => true);
     if (!pool.length) return null;
     pool.sort((a, b) => (b.c.currentPower ?? 0) - (a.c.currentPower ?? 0));
     return { targetP: pool[0].p, targetI: pool[0].i };
@@ -628,21 +1098,34 @@ export function pickOnEnterResolution(state, seat, ability, casterIdx, fieldIdx)
     const maxF = 6;
     let pool = gatherEnemy((c) => c && (c.currentPower ?? c.power) === 2);
     pool = pool.filter((t) => (state.players[t.p]?.field?.length ?? 0) < maxF);
+    // D-N05 (offline _pode_separar): sem INSPIRAR, sem MURALHA, sem FÚRIA
+    // — o motor recusa, e o sort antigo PREFERIA o inválido (INSPIRAR é
+    // constantEffect). O válido mais forte primeiro (empate P2 → 1º).
+    pool = pool.filter((t) => !t.c.inspiracao && !t.c.wallBuff && (t.c.furyStacks ?? 0) <= 0);
     if (!pool.length) return null;
-    pool.sort((a, b) => {
-      const sa = (a.c.onEnter || a.c.onDestroy || a.c.constantEffect) ? 1 : 0;
-      const sb = (b.c.onEnter || b.c.onDestroy || b.c.constantEffect) ? 1 : 0;
-      return sb - sa;
-    });
+    pool.sort((a, b) => (b.c.currentPower ?? 0) - (a.c.currentPower ?? 0));
     return { targetP: pool[0].p, targetI: pool[0].i };
   }
   if (ability === "corromper") {
-    const allies = gatherAlly((c) => c && !(c.corruptedNoHonor || c.onDestroy === "noHonor")
+    // F7-11 D4: o nativo Sem Honra É alvo válido de CORROMPER (o offline
+    // só exclui quem já tem o flag `corrupted`).
+    const allies = gatherAlly((c) => c && !c.corruptedNoHonor
       && (c.currentPower ?? c.power ?? 0) === 1);
     if (!allies.length) return null;
     return { targetP: allies[0].p, targetI: allies[0].i };
   }
-  if (ability === "bolaDeFogo" || ability === "assassinar" || ability === "incendiar"
+  if (ability === "bolaDeFogo") {
+    // D-N03 (offline auto_pick_uid, game_state.gd:2200-2205): a BOLA mira
+    // o mais FRACO com Poder ≥1, nunca apodrecida, nunca Barreira (o motor
+    // recusa — o pick explícito sobrescrevia o fallback correto).
+    let pool = gatherEnemy((c) => !c.shielded && !(c.barrier || c.barrierPermanent)
+      && !(c.podridao || c.name === "APODRECIDA")
+      && (c.currentPower ?? c.power ?? 0) >= 1);
+    if (!pool.length) return null;
+    pool.sort((a, b) => (a.c.currentPower ?? 0) - (b.c.currentPower ?? 0));
+    return { targetP: pool[0].p, targetI: pool[0].i };
+  }
+  if (ability === "assassinar" || ability === "incendiar"
       || ability === "mordidaVenenosa"
       || ability === "rajadaCongelante" || ability === "transformarBichinho") {
     // Proteção bloqueia ataques; Assassinar/Transformar ignoram Proteção
@@ -651,14 +1134,28 @@ export function pickOnEnterResolution(state, seat, ability, casterIdx, fieldIdx)
       ? gatherEnemy(() => true)
       : gatherEnemy((c) => !c.shielded);
     if (ability === "assassinar") {
-      pool = pool.filter((t) => (t.c.currentPower ?? t.c.power ?? 0) === 1);
+      // C-M10: a IA nunca mira P1 com Barreira (o resolve rejeitaria).
+      pool = pool.filter((t) => (t.c.currentPower ?? t.c.power ?? 0) === 1 && !t.c.barrier && !t.c.barrierPermanent);
     }
     if (ability === "mordidaVenenosa") {
-      pool = pool.filter((t) => !t.c.poisoned && (t.c.currentPower ?? t.c.power ?? 0) > 1);
+      // D-N04: a MORDIDA nunca mira Barreira (o motor recusa).
+      pool = pool.filter((t) => !t.c.poisoned && (t.c.currentPower ?? t.c.power ?? 0) > 1
+        && !t.c.barrier && !t.c.barrierPermanent);
     }
     if (ability === "incendiar") {
       pool = pool.filter((t) => !(t.c.barrier || t.c.barrierPermanent)
         && (t.c.currentPower ?? t.c.power ?? 0) >= 2);
+      // D-N10 (offline _status_target_ok): prefere alvo sem queimadura.
+      const clean = pool.filter((t) => !t.c.burning);
+      if (clean.length) pool = clean;
+    }
+    if (ability === "rajadaCongelante") {
+      // D-N04: a RAJADA nunca mira Barreira; prefere alvo sem
+      // congelamento (offline _status_target_ok — mirar um já-congelado
+      // é abate, então o fallback usa o pool inteiro).
+      pool = pool.filter((t) => !t.c.barrier && !t.c.barrierPermanent);
+      const clean = pool.filter((t) => !t.c.frozen);
+      if (clean.length) pool = clean;
     }
     if (ability === "transformarBichinho") {
       pool = pool.filter((t) => (t.c.currentPower ?? t.c.power ?? 0) >= 2 && !t.c.barrier);
@@ -669,14 +1166,29 @@ export function pickOnEnterResolution(state, seat, ability, casterIdx, fieldIdx)
   }
   if (ability === "fortalecer" || ability === "devorar" || ability === "ursificacao"
       || ability === "imitar") {
-    const allies = gatherAlly(() => true);
+    let allies = gatherAlly(() => true);
+    // S2-M14: FORTALECER nunca mira apodrecida; URSIFICAÇÃO nunca mira urso
+    // (o motor recusa — a ação seria desperdiçada).
+    if (ability === "fortalecer") allies = allies.filter((t) => !(t.c.podridao || t.c.name === "APODRECIDA"));
+    if (ability === "ursificacao") allies = allies.filter((t) => t.c.name !== "URSO PESADO" && !t.c.urso_pesado);
+    // R-08 (offline auto_pick_uid, game_state.gd:2178): DEVORAR nunca
+    // mira a APODRECIDA (Poder 0) — o motor recusa (INVALID_TARGET,
+    // df-rules.js:685-688) e a resolução do on-enter é desperdiçada.
+    if (ability === "devorar") allies = allies.filter((t) => !(t.c.podridao || t.c.name === "APODRECIDA"));
     if (!allies.length) return null;
     if (ability === "devorar") {
       allies.sort((a, b) => (a.c.currentPower ?? 0) - (b.c.currentPower ?? 0));
     } else if (ability === "fortalecer") {
-      allies.sort((a, b) => (b.c.currentPower ?? 0) - (a.c.currentPower ?? 0));
+      // R-07 (offline auto_pick_uid, game_state.gd:2155-2157; 1.51.55
+      // item 3): FORTALECER mira o aliado mais FRACO, não o mais forte.
+      allies.sort((a, b) => (a.c.currentPower ?? 0) - (b.c.currentPower ?? 0));
     } else {
-      allies.sort((a, b) => (b.c.currentPower ?? 0) - (a.c.currentPower ?? 0));
+      // R-07: URSIFICAÇÃO também mira o mais FRACO (offline, idem);
+      // IMITAR mantém o mais forte (não é alvo de buff).
+      if (ability === "ursificacao")
+        allies.sort((a, b) => (a.c.currentPower ?? 0) - (b.c.currentPower ?? 0));
+      else
+        allies.sort((a, b) => (b.c.currentPower ?? 0) - (a.c.currentPower ?? 0));
     }
     return { targetP: allies[0].p, targetI: allies[0].i };
   }
@@ -689,6 +1201,10 @@ export function pickOnEnterResolution(state, seat, ability, casterIdx, fieldIdx)
 export function listTalentPlays(state, seat) {
   const pl = state.players[seat];
   if (!pl?.hand?.length) return [];
+  // U-D03 (rodada 3, offline _best_talent): com o campo cheio (6) o
+  // offline segura o talento — a 7ª carta do campo só pode ser talento
+  // ou reação JOGADA PELO HUMANO; a IA não a joga com o campo cheio.
+  if (fieldCount(state, seat) >= MAX_FIELD) return [];
   const plays = [];
   for (let i = 0; i < pl.hand.length; i++) {
     const c = pl.hand[i];
@@ -710,36 +1226,129 @@ export function listTalentPlays(state, seat) {
       _score: score,
       _talentEffect: c.talentEffect,
     };
-    // Anexa alvo sugerido para o follow-up.
+    // Anexa alvo sugerido para o follow-up (D-N01: TODOS os talentos com
+    // mira precisam de _target — sem ele o follow-up nunca era construído
+    // e o talento travava a partida; os AUTO resolvem sem alvo).
     const te = c.talentEffect;
-    if (te === "bolaDeFogoTalento" || te === "explosao" || te === "zeroAbsoluto"
-        || te === "medoTalento" || te === "baforadaVenenosa") {
-      const minP = te === "explosao" ? 2 : 1;
-      const pool = [];
-      for (let p = 0; p < (state.playersCount || 2); p++) {
-        if (p === seat) continue;
-        (state.players[p]?.field || []).forEach((ch, fi) => {
-          if (!ch || ch.shielded) return;
-          const pw = ch.currentPower ?? ch.power ?? 0;
-          if (pw < minP) return;
-          if (te === "baforadaVenenosa" && (pw <= 1 || ch.poisoned)) return;
-          pool.push({ p, i: fi, pw });
-        });
-      }
+    const foes = [];
+    for (let p = 0; p < (state.playersCount || 2); p++) {
+      if (p === seat) continue;
+      (state.players[p]?.field || []).forEach((ch, fi) => {
+        if (!ch || ch.shielded) return;
+        // D-N04: o próprio enfeitiçado nunca é alvo.
+        if (ch.charme && ch.charmeOriginalOwner === seat) return;
+        foes.push({ p, i: fi, ch, pw: ch.currentPower ?? ch.power ?? 0 });
+      });
+    }
+    const noBarrier = (t) => !(t.ch.barrier || t.ch.barrierPermanent);
+    if (te === "bolaDeFogoTalento") {
+      // D-N03: a BOLA (talento) mira o mais FRACO ≥1, sem Barreira.
+      const pool = foes.filter((t) => t.pw >= 1 && noBarrier(t)
+        && !(t.ch.podridao || t.ch.name === "APODRECIDA"));
+      if (!pool.length) continue;
+      pool.sort((a, b) => a.pw - b.pw);
+      play._target = { targetP: pool[0].p, targetI: pool[0].i };
+    }
+    if (te === "explosao") {
+      const pool = foes.filter((t) => t.pw >= 2 && noBarrier(t));
+      if (!pool.length) continue;
+      pool.sort((a, b) => b.pw - a.pw);
+      play._target = { targetP: pool[0].p, targetI: pool[0].i };
+    }
+    if (te === "zeroAbsoluto") {
+      if (!foes.length) continue;
+      foes.sort((a, b) => b.pw - a.pw);
+      play._target = { targetP: foes[0].p, targetI: foes[0].i };
+    }
+    if (te === "medoTalento") {
+      // D-N13: AMEDRONTAR só vale em P2 exato (nunca P1).
+      const pool = foes.filter((t) => t.pw === 2);
+      if (!pool.length) continue;
+      play._target = { targetP: pool[0].p, targetI: pool[0].i };
+    }
+    if (te === "baforadaVenenosa") {
+      const pool = foes.filter((t) => t.pw > 1 && !t.ch.poisoned);
+      if (!pool.length) continue;
+      pool.sort((a, b) => b.pw - a.pw);
+      play._target = { targetP: pool[0].p, targetI: pool[0].i };
+    }
+    if (te === "transformarBichinhoTalento") {
+      const pool = foes.filter((t) => t.pw >= 2 && noBarrier(t));
+      if (!pool.length) continue;
+      pool.sort((a, b) => b.pw - a.pw);
+      play._target = { targetP: pool[0].p, targetI: pool[0].i };
+    }
+    if (te === "prisaoPrismaticaTalento") {
+      const pool = foes.filter((t) => t.pw >= 2 && !t.ch.prisaoPrismatica);
+      if (!pool.length) continue;
+      pool.sort((a, b) => b.pw - a.pw);
+      play._target = { targetP: pool[0].p, targetI: pool[0].i };
+    }
+    if (te === "tornadoDeFogo") {
+      const pool = foes.filter((t) => noBarrier(t));
       if (!pool.length) continue;
       pool.sort((a, b) => b.pw - a.pw);
       play._target = { targetP: pool[0].p, targetI: pool[0].i };
     }
     if (te === "fortalecerTalento") {
+      // R-07 parcial (D-N12; offline auto_pick_uid, game_state.gd:2165-2178):
+      // FORTALECER mira o aliado mais FRACO, sem teto de Poder, nunca
+      // apodrecida (o motor recusa — e o talento travava, D-N01).
       let best = null;
-      let bestP = -1;
+      let bestP = Infinity;
       (pl.field || []).forEach((ch, fi) => {
-        if (!ch) return;
+        if (!ch || ch.podridao || ch.name === "APODRECIDA") return;
         const pw = ch.currentPower ?? ch.power ?? 0;
-        if (pw > bestP && pw < 4) {
+        if (pw < bestP) {
           bestP = pw;
           best = fi;
         }
+      });
+      if (best == null) continue;
+      play._target = { targetP: seat, targetI: best };
+    }
+    if (te === "investidaTalento") {
+      const pool = [];
+      (pl.field || []).forEach((ch, fi) => {
+        if (!ch || ch.tapped) return;
+        const pw = ch.currentPower ?? ch.power ?? 0;
+        if (pw === 1 || hasInvestida(ch)) return;
+        pool.push({ i: fi, pw });
+      });
+      if (!pool.length) continue;
+      pool.sort((a, b) => b.pw - a.pw);
+      play._target = { targetP: seat, targetI: pool[0].i };
+    }
+    if (te === "trocaDeLugar") {
+      let best = null;
+      (pl.field || []).forEach((ch, fi) => {
+        if (best == null && ch && (ch.currentPower ?? ch.power ?? 0) === 1) best = fi;
+      });
+      if (best == null) continue;
+      play._target = { targetP: seat, targetI: best };
+    }
+    if (te === "corromperTalento") {
+      // U-B10 (rodada 5): espelho do gate do score — o offline só exclui
+      // quem já tem o flag `corrupted`; o nativo Sem Honra é alvo válido
+      // (o efeito é desperdiçado, igual ao offline).
+      let best = null;
+      let bestP = Infinity;
+      (pl.field || []).forEach((ch, fi) => {
+        if (!ch || ch.corrupted) return;
+        if (ch.podridao || ch.name === "APODRECIDA") return;
+        const pw = ch.currentPower ?? ch.power ?? 0;
+        if (pw < bestP) {
+          bestP = pw;
+          best = fi;
+        }
+      });
+      if (best == null) continue;
+      play._target = { targetP: seat, targetI: best };
+    }
+    if (te === "doppelganger") {
+      let best = null;
+      (pl.field || []).forEach((ch, fi) => {
+        if (best == null && ch && (ch.currentPower ?? ch.power ?? 0) === 2) best = fi;
       });
       if (best == null) continue;
       play._target = { targetP: seat, targetI: best };
@@ -759,7 +1368,7 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
   const hero = pl.heroDef || null;
   const heroId = hero?.id || pl.heroId;
   if (!heroId) return null;
-  const maxUlt = pl.maxUltimateUses ?? 1;
+  const maxUlt = getEffectiveMaxUltimateUses(pl, heroId);
   if ((pl.ultimateUses ?? 0) >= maxUlt || pl.usedUltimateThisTurn) return null;
   const ultType = hero?.ultimateType || pl.ultimateType;
   if (!ultType) return null;
@@ -774,26 +1383,38 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
 
   if (ultType === "targetEnemy" || ultType === "targetEnemyFreeze") {
     if (ultType === "targetEnemyFreeze" && !forceEndOfTurn) return null;
-    const pool = [];
+    // D-N16/D-N17 (offline _ult_damage_worth_it, ai_brain.gd:161-242): o
+    // GATE olha o mais forte INCLUINDO congelados (CONGELAR) e Protegidos
+    // (BOMBA); só o PICK exclui o que o motor não aceita. O comentário
+    // antigo afirmava o contrário (que o pool devia excluir congelados)
+    // e estava errado — o gate do offline inclui o congelado.
+    const gatePool = [];
+    const pickPool = [];
     for (let p = 0; p < (state.playersCount || 2); p++) {
       if (p === seat) continue;
       (state.players[p]?.field || []).forEach((c, i) => {
-        if (c && !c.shielded) pool.push({ p, i, pw: c.currentPower ?? c.power ?? 0, frozen: !!c.frozen });
+        // S2-A10: fora o próprio enfeitiçado (offline: foes exclui _own_charmed).
+        if (!c || (c.charme && c.charmeOriginalOwner === seat)) return;
+        gatePool.push({ p, i, pw: c.currentPower ?? c.power ?? 0, frozen: !!c.frozen });
+        if (!c.shielded && !(ultType === "targetEnemyFreeze" && c.frozen))
+          pickPool.push({ p, i, pw: c.currentPower ?? c.power ?? 0, frozen: !!c.frozen });
       });
     }
-    if (!pool.length) return null;
-    if (ultType === "targetEnemyFreeze") {
-      pool.sort((a, b) => (b.frozen ? 1 : 0) - (a.frozen ? 1 : 0) || b.pw - a.pw);
-    } else {
-      pool.sort((a, b) => b.pw - a.pw);
-    }
-    return { ...base, targetP: pool[0].p, targetI: pool[0].i };
+    if (!gatePool.length || !pickPool.length) return null;
+    gatePool.sort((a, b) => b.pw - a.pw);
+    pickPool.sort((a, b) => b.pw - a.pw);
+    // BOMBA (offline _ult_damage_worth_it): só se o mais forte for P<=1.
+    if (ultType === "targetEnemy" && gatePool[0].pw > 1) return null;
+    // CONGELAR (offline): só no mais forte P>=2 NÃO-congelado.
+    if (ultType === "targetEnemyFreeze" && (gatePool[0].pw < 2 || gatePool[0].frozen)) return null;
+    return { ...base, targetP: pickPool[0].p, targetI: pickPool[0].i };
   }
   if (ultType === "targetAllyShield") {
     // Bastion: Proteção em todos os aliados de Poder 1 — usa no fim do turno.
     if (!forceEndOfTurn) return null;
+    // D-N18 (offline next_action): basta qualquer P1 — a Proteção renova.
     const anyP1 = (pl.field || []).some((c) => c
-      && (c.currentPower ?? c.power) === 1 && !c.shielded && !c.shieldedPermanent);
+      && (c.currentPower ?? c.power) === 1);
     if (!anyP1) return null;
     return { ...base, targetP: null, targetI: null };
   }
@@ -802,7 +1423,7 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     for (let p = 0; p < (state.playersCount || 2); p++) {
       if (p === seat) continue;
       (state.players[p]?.field || []).forEach((c, i) => {
-        if (!c || c.barrier || c.barrierPermanent || c.burning || c.pulled) return;
+        if (!c || c.barrier || c.barrierPermanent || c.burning) return;
         const pw = c.currentPower ?? c.power ?? 0;
         if (pw >= 2) pool.push({ p, i, pw });
       });
@@ -813,57 +1434,60 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
   }
   if (ultType === "targetAlly" || ultType === "targetAllyFreeAttack") {
     if (ultType === "targetAllyFreeAttack" && !forceEndOfTurn) return null;
+    // U-D06 (rodada 3, offline use_ultimate game_state.gd:1449-1485):
+    // FORTALECER mira o mais forte entre os NÃO-apodrecidos; INVESTIDA
+    // mira o mais forte entre os NÃO-apodrecidos E NÃO-cansados. Antes, o
+    // mais forte ganhava sem filtro — o motor recusava e o uso ficava
+    // PRESERVADO (o offline GASTA o uso à toa; aqui o filtro torna o caso
+    // inalcançável na prática).
     const field = pl.field || [];
     if (!field.length) return null;
-    let idx = 0;
+    let idx = -1;
     let best = -1;
-    let found = false;
     field.forEach((c, i) => {
       if (!c) return;
+      if (c.podridao || c.name === "APODRECIDA") return;
+      if (ultType === "targetAllyFreeAttack" && c.tapped) return;
       const pw = c.currentPower ?? c.power ?? 0;
       if (pw > best) {
         best = pw;
         idx = i;
-        found = true;
       }
     });
-    if (!found) return null;
+    if (idx < 0) return null;
     return { ...base, targetP: seat, targetI: idx };
   }
   if (ultType === "drawCard") {
-    const bias = g("ultimateBias", 1);
-    const handThresh = bias >= 1.12 ? 4 : 3;
+    // D-N15 (offline next_action, ai_brain.gd:49-152): a Ultimate de compra
+    // é usada SEMPRE (só a mão cheia veta) — o gate de mão/ações guardava
+    // a carta à toa.
     if ((pl.hand?.length || 0) >= MAX_HAND) return null;
-    if ((pl.hand?.length || 0) < handThresh || (pl.actions ?? 0) > 0) {
-      return { ...base, targetP: null, targetI: null };
-    }
-    return null;
+    return { ...base, targetP: null, targetI: null };
   }
   // Ultimates sem alvo / auto.
   if (ultType === "fireAndIce") {
     const hs = humanSeat(state, seat);
-    const humanChamps = (state.players[hs]?.field || []).filter(Boolean).length;
-    if (humanChamps <= 1) return null;
-    let anyNonPoison = false;
-    for (let p = 0; p < (state.playersCount || 2); p++) {
-      if (p === seat) continue;
-      for (const c of (state.players[p]?.field || [])) {
-        if (c && !c.poisoned) { anyNonPoison = true; break; }
-      }
-      if (anyNonPoison) break;
-    }
-    if (!anyNonPoison) return null;
+    // S2-A10 (offline): recusa SÓ adversário único P1. Veneno não entra no gate.
+    const foes = (state.players[hs]?.field || []).filter((c) => c
+      && !(c.charme && c.charmeOriginalOwner === seat));
+    if (!foes.length) return null;
+    if (foes.length === 1 && (foes[0].currentPower ?? foes[0].power ?? 0) === 1) return null;
     return { ...base, targetP: null, targetI: null };
   }
   if (ultType === "banish") {
-    // Outra Dimensão: regra P≤2; IA só bane Poder impresso 2 (nunca P=1).
     const pool = [];
     for (let p = 0; p < (state.playersCount || 2); p++) {
       if (p === seat) continue;
       (state.players[p]?.field || []).forEach((c, i) => {
-        if (!c || c.shielded || c.pulled) return;
-        const printed = c.basePower ?? c.power ?? 0;
-        if (printed !== 2) return;
+        if (!c) return;
+        // (C5-03, rodada 9) a mira offline (ultBanir) só exige P≤2
+        // e o motor aceita banir o protegido (championBanishable só
+        // olha o Poder) — o veto a `shielded` guardava um banimento
+        // válido; a IA nunca usava OUTRA DIMENSÃO num protegido.
+        if (c.charme && c.charmeOriginalOwner === seat) return;
+        // S2-A10 (offline): BANIR qualquer P<=2 ATUAL (não só impresso 2).
+        const cur = c.currentPower ?? c.power ?? 0;
+        if (cur > 2) return;
         pool.push({ p, i, noHonor: !!(c.noHonor || c.corrupted) });
       });
     }
@@ -871,15 +1495,263 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     pool.sort((a, b) => (a.noHonor ? 1 : 0) - (b.noHonor ? 1 : 0));
     return { ...base, targetP: pool[0].p, targetI: pool[0].i };
   }
-  if (["summonDragon", "thunderDiscard", "wallProtect", "poison", "warOverpower",
-    "cometStarfall", "hook", "potion", "vampirism",
-    "scareReturn", "resurrect"].includes(ultType)) {
-    if (!forceEndOfTurn && ultType === "scareReturn") {
-      if (enemyFieldCount(state, seat) <= 0) return null;
-    }
+  if (ultType === "infinitePower") {
+    // S2-A09 (offline ai_brain.gd:84-85): FORÇA INFINITA vale com qualquer
+    // aliado em campo. (C5-05, rodada 9) o gate antigo exigia um aliado
+    // sem Crescimento — o offline usa e gasta o uso à toa; o motor
+    // aceita (validate só exige campo não vazio; o apply não faz nada
+    // de novo quando todos já têm Crescimento).
+    if (!(pl.field || []).length)
+      return null;
     return { ...base, targetP: null, targetI: null };
   }
+  if (ultType === "reuseInstant") {
+    // S2-A09 (offline ai_brain.gd:87-92 + _reuse_candidate_ok): só vale
+    // com um aliado de Habilidade Instantânea, sem SILÊNCIO — e nunca
+    // re-dispara BOLHAS/PESADELO já usados neste turno. O motor
+    // (canReuseInstant) valida o alvo de verdade no ULTIMATE_PLAY.
+    const usedThisTurn = pl.onEnterUsedThisTurn || [];
+    let idx = -1;
+    (pl.field || []).forEach((c, i) => {
+      if (idx >= 0 || !c || c.silenced || c.abilityType !== "instant" || !c.onEnter)
+        return;
+      if ((c.onEnter === "bolhas" || c.onEnter === "pesadelo") && usedThisTurn.includes(c.onEnter))
+        return;
+      idx = i;
+    });
+    if (idx < 0)
+      return null;
+    return { ...base, targetP: seat, targetI: idx };
+  }
+  if (ultType === "trickerySwap") {
+    // S2-A09 (offline ai_brain.gd:123-126): precisa de um aliado de Poder
+    // 1 (o alvo) e de um P2 adversário (sem contar o próprio enfeitiçado).
+    // O motor escolhe o P2 (prioriza P2, depois 3+, depois 1).
+    let allyIdx = -1;
+    (pl.field || []).forEach((c, i) => {
+      if (allyIdx >= 0 || !c)
+        return;
+      if ((c.currentPower ?? c.power ?? 0) === 1)
+        allyIdx = i;
+    });
+    if (allyIdx < 0)
+      return null;
+    const hs = humanSeat(state, seat);
+    const foeHasP2 = (state.players[hs]?.field || []).some((c) => c
+      && (c.currentPower ?? c.power ?? 0) === 2
+      && !(c.charme && c.charmeOriginalOwner === seat));
+    if (!foeHasP2)
+      return null;
+    return { ...base, targetP: seat, targetI: allyIdx };
+  }
+  // S2-A10 — gates offline (ai_brain.gd: _ult_damage_worth_it / next_action).
+  if (ultType === "potion") {
+    // POÇÃO: só em P2 exato não-apodrecido, nunca P1.
+    const hasP2 = (pl.field || []).some((c) => c && (c.currentPower ?? c.power ?? 0) === 2
+      && !(c.podridao || c.name === "APODRECIDA"));
+    if (!hasP2) return null;
+    // (C5-01, rodada 9) o pick devolvia alvo nulo e o motor recusava
+    // com TARGET_REQUIRED — espelha o auto_pick_uid offline (ultPocao):
+    // o mais fraco entre os não-apodrecidos com Poder >= 2.
+    const pool = (pl.field || [])
+      .map((c, i) => ({ c, i, pw: c.currentPower ?? c.power ?? 0 }))
+      .filter((t) => t.c && t.pw >= 2 && !(t.c.podridao || t.c.name === "APODRECIDA"));
+    if (!pool.length) return null;
+    pool.sort((a, b) => a.pw - b.pw);
+    return { ...base, targetP: seat, targetI: pool[0].i };
+  }
+  if (ultType === "thunderDiscard") {
+    // TROVOADA: só se o adversário tiver cartas na mão.
+    const hs = humanSeat(state, seat);
+    if (!((state.players[hs]?.hand?.length ?? 0) > 0)) return null;
+    return { ...base, targetP: null, targetI: null };
+  }
+  if (ultType === "cometStarfall") {
+    // COMETA: só se o adversário perde mais P1 que a IA E tem mais campeões.
+    const myP1 = (pl.field || []).filter((c) => c && (c.currentPower ?? c.power ?? 0) <= 1).length;
+    const hs = humanSeat(state, seat);
+    const foes = (state.players[hs]?.field || []).filter((c) => c
+      && !(c.charme && c.charmeOriginalOwner === seat));
+    const foeP1 = foes.filter((c) => (c.currentPower ?? c.power ?? 0) <= 1).length;
+    if (!(foeP1 > myP1 && foes.length > (pl.field || []).length)) return null;
+    return { ...base, targetP: null, targetI: null };
+  }
+  if (ultType === "hook") {
+    // PUXÃO (C5-02, decisão dela 17/11 ~06:04): espaço no próprio
+    // campo + alvo P1/P2 — COM OU SEM Proteção (temporária ou
+    // permanente), não-apodrecida. Único critério: Poder 1 ou 2.
+    // BARREIRA não bloqueia (offline, 1.51.65 T7).
+    if ((pl.field || []).length >= MAX_FIELD) return null;
+    const hs = humanSeat(state, seat);
+    const ok = (state.players[hs]?.field || []).some((c) => c
+      && [1, 2].includes(c.currentPower ?? c.power ?? 0)
+      && !(c.podridao || c.name === "APODRECIDA")
+      && !(c.charme && c.charmeOriginalOwner === seat));
+    if (!ok) return null;
+    return { ...base, targetP: null, targetI: null };
+  }
+  if (ultType === "poison") {
+    // ENVENENAR (offline): vale com qualquer adversário em campo.
+    if (enemyFieldCount(state, seat) <= 0) return null;
+    // (C5-01, rodada 9) o pick devolvia alvo nulo e o motor recusava
+    // com TARGET_REQUIRED — espelha o auto_pick_uid offline
+    // (ultEnvenenar): o mais forte entre os adversários, menos o
+    // próprio enfeitiçado.
+    const foes = foesExcludingCharmed(state, seat);
+    if (!foes.length) return null;
+    foes.sort((a, b) => (b.c.currentPower ?? b.c.power ?? 0) - (a.c.currentPower ?? a.c.power ?? 0));
+    return { ...base, targetP: foes[0].p, targetI: foes[0].i };
+  }
+  if (ultType === "vampirism") {
+    // VAMPIRISMO: adversário P2+ E aliado não-apodrecida.
+    const foes = foesExcludingCharmed(state, seat)
+      .filter((t) => (t.c.currentPower ?? t.c.power ?? 0) >= 2);
+    const allyOk = (pl.field || []).some((c) => c && !(c.podridao || c.name === "APODRECIDA"));
+    if (!foes.length || !allyOk) return null;
+    // (C5-01, rodada 9) o pick devolvia alvo nulo e o motor recusava
+    // com TARGET_REQUIRED — espelha o auto_pick_uid offline: o mais
+    // forte P2+ entre os adversários, menos o próprio enfeitiçado.
+    foes.sort((a, b) => (b.c.currentPower ?? b.c.power ?? 0) - (a.c.currentPower ?? a.c.power ?? 0));
+    return { ...base, targetP: foes[0].p, targetI: foes[0].i };
+  }
+  if (ultType === "scareReturn") {
+    // AMEDRONTAR (offline): só com P2 exato (nunca P1).
+    const foes = foesExcludingCharmed(state, seat)
+      .filter((t) => (t.c.currentPower ?? t.c.power ?? 0) === 2);
+    if (!foes.length) return null;
+    // (C5-01, rodada 9) o pick devolvia alvo nulo e o motor recusava
+    // com TARGET_REQUIRED — espelha o auto_pick_uid offline
+    // (ultAssustar): o mais forte entre os P2 (o pool offline é P≤2
+    // e a porta exige um P2 exato, então o mais forte é sempre P2).
+    return { ...base, targetP: foes[0].p, targetI: foes[0].i };
+  }
+  if (ultType === "summonDragon") {
+    // INVOCAR DRAGÃO (offline): precisa de espaço livre no próprio campo.
+    if ((pl.field || []).length >= MAX_FIELD) return null;
+    return { ...base, targetP: null, targetI: null };
+  }
+  if (ultType === "resurrect") {
+    // RESSUSCITAR (offline): P2 no descarte + espaço no campo.
+    const ok = (pl.discard || []).some((c) => c && c.category === "champion"
+      && (c.power ?? c.basePower ?? 0) === 2) && (pl.field || []).length < MAX_FIELD;
+    if (!ok) return null;
+    return { ...base, targetP: null, targetI: null };
+  }
+  // Os dois tipos mortos (C-B01): nenhum dos 21 heróis (df-data.js:5-66) tem
+  // esses tipos e o offline também não tem ramo — removidos do catch-all.
   return null;
+}
+
+const REMOVAL_TALENTS = new Set(["bolaDeFogoTalento", "explosao", "tornadoDeFogo",
+  "baforadaVenenosa", "missemagicos", "transformarBichinhoTalento",
+  "prisaoPrismaticaTalento", "medoTalento", "zeroAbsoluto", "chuvaDeCometas"]);
+const BUFF_TALENTS = new Set(["fortalecerTalento", "investidaTalento", "doppelganger",
+  "corromperTalento", "tecnicasDeCombateTalento", "gritoDeGuerraTalento", "barreira"]);
+
+// S2-A08 — espelho de _removal_kill_value (ai_brain.gd:746): quanto Poder
+// adversário o talento tira do campo AGORA (0 = nada agora, ex. veneno/queimadura).
+export function removalKillValue(state, seat, eff) {
+  const foes = [];
+  for (let p = 0; p < (state.playersCount || 2); p++) {
+    if (p === seat) continue;
+    for (const c of (state.players[p]?.field || [])) {
+      if (c && !(c.charme && c.charmeOriginalOwner === seat)) foes.push(c);
+    }
+  }
+  if (!foes.length) return 0;
+  const pw = (c) => c.currentPower ?? c.power ?? 0;
+  const hasBarrier = (c) => !!(c.barrier || (c.barrierTurns ?? 0) > 0);
+  const isFrozen = (c) => !!(c.frozen || (c.frozenTurns ?? 0) > 0);
+  switch (eff) {
+    case "bolaDeFogoTalento":
+      return foes.some((c) => pw(c) === 1 && !hasBarrier(c)) ? 1 : 0;
+    case "explosao": {
+      let best = 0;
+      for (const c of foes) if (!hasBarrier(c) && pw(c) <= 2) best = Math.max(best, pw(c));
+      return best;
+    }
+    case "missemagicos":
+    case "chuvaDeCometas":
+      return foes.some((c) => pw(c) === 1 && !hasBarrier(c)) ? 1 : 0;
+    case "transformarBichinhoTalento": {
+      let best = 0;
+      for (const c of foes) if (!hasBarrier(c) && pw(c) >= 2) best = Math.max(best, pw(c) - 1);
+      return best;
+    }
+    case "prisaoPrismaticaTalento": {
+      let best = 0;
+      for (const c of foes) best = Math.max(best, pw(c));
+      return best;
+    }
+    case "medoTalento": {
+      let best = 0;
+      for (const c of foes) if (pw(c) <= 2) best = Math.max(best, pw(c));
+      return best;
+    }
+    case "zeroAbsoluto": {
+      let best = 0;
+      for (const c of foes) if (isFrozen(c)) best = Math.max(best, pw(c));
+      return best;
+    }
+    case "tornadoDeFogo":
+    case "baforadaVenenosa":
+      return 0;
+    default:
+      return 0;
+  }
+}
+
+/** S2-A08 (offline _best_talent): mitigação -> melhor remoção primeiro;
+ *  campo -> reforço primeiro, remoção só se matar alguém (kill>=1). */
+// F7-11 D5-D8 — espelho de _best_talent (ai_brain.gd:813-970): a ORDEM DA
+// MÃO decide, nunca o score fixo. best_removal só com valor de abate > 0
+// (empate = 1º da mão, `>` estrito — uma remoção sem abate nunca vence o
+// CORROMPER); best_corromper = CORROMPER com P1 não corrompido em campo.
+// mitigação: melhor remoção → CORROMPER → 1ª remoção → 1º da mão.
+// campo: CORROMPER → 1º reforço → melhor remoção (se matar ≥1) → nada.
+// equilíbrio: CORROMPER → 1º da mão.
+export function pickTalentByMode(state, seat, talents) {
+  const mode = aiMode(state, seat);
+  const hand = state.players[seat]?.hand || [];
+  const byEffect = (t) => hand[t.handIdx]?.talentEffect;
+  const allies = state.players[seat]?.field || [];
+  const hasP1Uncorrupted = allies.some((c) => c
+    && (c.currentPower ?? c.power ?? 0) === 1 && !c.corrupted);
+  let first = null;
+  let firstRemoval = null;
+  let bestRemoval = null;
+  let bestRemovalValue = 0;
+  let firstBuff = null;
+  let bestCorromper = null;
+  for (const t of talents) {
+    if (first == null) first = t;
+    const eff = byEffect(t);
+    if (eff === "corromperTalento" && bestCorromper == null && hasP1Uncorrupted) {
+      bestCorromper = t;
+    }
+    if (REMOVAL_TALENTS.has(eff)) {
+      if (firstRemoval == null) firstRemoval = t;
+      const kv = removalKillValue(state, seat, eff);
+      if (kv > bestRemovalValue) {
+        bestRemovalValue = kv;
+        bestRemoval = t;
+      }
+    } else if (BUFF_TALENTS.has(eff) && firstBuff == null) {
+      firstBuff = t;
+    }
+  }
+  if (mode === "mitigacao") {
+    if (bestRemoval) return bestRemoval;
+    if (bestCorromper) return bestCorromper;
+    if (firstRemoval) return firstRemoval;
+  } else if (mode === "campo") {
+    if (bestCorromper) return bestCorromper;
+    if (firstBuff) return firstBuff;
+    if (bestRemoval && bestRemovalValue >= 1) return bestRemoval;
+    return null;
+  }
+  if (bestCorromper) return bestCorromper;
+  return first;
 }
 
 /**
@@ -893,8 +1765,10 @@ export function pickNextAction(state, seat, phaseCtx = {}) {
   if (phase === "talent") {
     const talents = listTalentPlays(state, seat);
     if (!talents.length) return null;
-    talents.sort((a, b) => (b._score || 0) - (a._score || 0));
-    return talents[0];
+    // F7-11 D5-D8: SEM ordenar por score — o pickTalentByMode decide pela
+    // ordem da mão (espelho de _best_talent); a lista já vem na ordem da mão.
+    // S2-A08 (offline _best_talent): o modo escolhe a categoria do talento.
+    return pickTalentByMode(state, seat, talents);
   }
   if (phase === "ult_early") {
     return pickUltimate(state, seat, false);
@@ -918,6 +1792,15 @@ export const DfAiHardBrain = {
   resetHardProfileCache,
   fieldCount,
   enemyFieldCount,
+  evaluateAiPosition,
+  aiMode,
+  removalKillValue,
+  pickTalentByMode,
+  gate8CanSummonAndAttack,
+  pickWinAttack,
+  pickBestSummon,
+  pickBestAttack,
+  pickDraw,
   scoreSummonCard,
   summonPremiseBlocked,
   shouldAttack,

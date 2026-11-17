@@ -23,8 +23,8 @@ export const PHASE2_AUTHORITATIVE_TYPES = Object.freeze([
   "ULTIMATE_TARGET",
   "MENU_CHOICE",
   "NECROMANCIA_PICK",
-  "UNFREEZE_CONFIRM",
   "TALENT_TARGET",
+  "TALENT_AUTO",
 ]);
 
 /** Tipos aplicados no servidor — espelha DfEngine.applyAction (motor TS). */
@@ -34,6 +34,7 @@ export const AUTHORITATIVE_TYPES = new Set([
   "ATTACK_RESOLVE",
   "END_TURN",
   "ON_ENTER_RESOLVE",
+  "RITUAL_EXHAUSTED",
   "REACTIVE_BLOCK_ANSWER",
   "REACTIVE_PROTECTION_ANSWER",
   "REACTIVE_CANCEL_ANSWER",
@@ -195,11 +196,11 @@ function normalizeOnEnterVisual(ev) {
   if (out.cardName == null && out.card != null) {
     out.cardName = typeof out.card === "string" ? out.card : (out.card.name || null);
   }
-  // fire_aura / barrier_grant / guardian aliases
+  // barrier_grant / guardian aliases
   if (out.indices == null && Array.isArray(out.picks)) {
     /* keep picks */
   }
-  if (kind === "fire_aura" || kind === "barrier_grant") {
+  if (kind === "barrier_grant") {
     if (out.ownerP == null && out.casterIdx != null) out.ownerP = out.casterIdx;
     if (!out.indices && Array.isArray(out.indices) === false && Array.isArray(ev.indices)) {
       out.indices = ev.indices;
@@ -247,14 +248,12 @@ function mapEventTypeToVisual(ev) {
     DESACELERAR: "desacelerar",
     MORDIDA_VENENOSA: "mordida_venenosa",
     PESADELO: "pesadelo",
-    MALDICAO_SETE_MARES: "maldicao_sete_mares",
     FUMACA_TOXICA: "fumaca_toxica",
     NECROMANCIA: "necromancia",
     RAPIDEZ: "wings",
     FORJA: "card_draw",
     FORTALECER: "strong_arm",
     GUARDIAO: "guardian",
-    AURA_DE_FOGO: "fire_aura",
     AURA_ANTI_MAGIA: "barrier_grant",
     RAIO_DUPLO: "raio_duplo",
     DRAW: "card_draw",
@@ -302,6 +301,8 @@ function mapEventTypeToVisual(ev) {
     BOLA_DE_FOGO: "bola_de_fogo",
     TRANSFORM_VULN_DESTROY: "transformar_bichinho",
     POISON_KILL: "poison_kill",
+    BURN_TICK: "burn_tick",
+    BURN_KILL: "burn_kill",
   };
   const kind = TYPE_KIND[ev.type];
   if (!kind) return null;
@@ -334,18 +335,23 @@ function mapEventTypeToVisual(ev) {
     if (out.ownerIdx == null && out.p != null) out.ownerIdx = out.p;
     if (out.fieldIdx == null && out.i != null) out.fieldIdx = out.i;
   }
+  // Em Chamas: idem (tick e kill).
+  if (kind === "burn_tick" || kind === "burn_kill") {
+    if (out.ownerIdx == null && out.p != null) out.ownerIdx = out.p;
+    if (out.fieldIdx == null && out.i != null) out.fieldIdx = out.i;
+  }
   return out;
 }
 
 /** Kinds que podem rodar em paralelo no peer (FX). */
 const PARALLEL_FX_KINDS = new Set([
   "pesadelo", "wings", "roubar", "desacelerar", "strong_arm",
-  "bola_de_fogo", "assassinar", "maldicao_sete_mares",
+  "bola_de_fogo", "assassinar",
   "devour", "imitar", "ursificacao", "transformar_bichinho", "fury",
-  "fire_aura", "guardiao", "guardian", "fumaca_toxica", "raio_duplo",
+  "guardiao", "guardian", "fumaca_toxica", "raio_duplo",
   "explosao", "zero_absoluto", "barrier_grant", "baforada_venenosa",
   "incendiar", "mordida_venenosa", "poison", "land_impact", "card_draw",
-  "combat_telegraph",
+  "combat_telegraph", "burn_tick",
   "misseis_magicos", "divine_protection", "cancel_ultimate",
   "blocked_attack", "vinganca", "necromancia", "thunder_discard",
   "aceleracao", "rajada_congelante", "rajada_congelante_destroy",
@@ -356,13 +362,94 @@ const PARALLEL_FX_KINDS = new Set([
 const BOARD_SERIAL_KINDS = new Set([
   "talent_cast", "talent_discard", "summon_land", "combat", "destroy",
   "dragon_token_summon", "scare_return", "doppel_clone", "troca_injusta",
-  "poison_kill",
+  "poison_kill", "burn_kill",
 ]);
+
+/**
+ * U-B07 / E-N1 Opção 1 (rodada 5): envelope só-visual de uma habilidade ou
+ * talento que reduz Poder, para viajar COM a suspensão da PROTEÇÃO DIVINA
+ * (ack do ator + query do defensor) — a animação toca e o box aparece
+ * DURANTE ela, igual ao offline. O envelope NUNCA carrega mudança de
+ * estado (fieldPatches zerados — a suspensão não muda nada; o dano só cai
+ * na retomada). Devolve null quando a ação não é uma das 7 fontes.
+ */
+export function buildProtecaoVisualEnvelope(action, state, seatHint) {
+  if (!action || typeof action !== "object") return null;
+  const seat = action.playerId ?? seatHint ?? action.casterIdx ?? 0;
+  const tp = action.targetP ?? action.targetPlayerId;
+  const ti = action.targetI ?? action.targetFieldIdx;
+  if (tp == null || ti == null) return null;
+  let ev = null;
+  if (action.type === "ABILITY_TARGET") {
+    const key = action.abilityKey || "";
+    const fieldIdx = action.fieldIdx ?? action.casterIdx;
+    if (key === "bolaDeFogo") ev = { type: "BOLA_DE_FOGO", casterIdx: seat, fieldIdx, targetP: tp, targetI: ti, visual: "bola_de_fogo" };
+    else if (key === "assassinar") ev = { type: "ASSASSINAR", casterIdx: seat, fieldIdx, targetP: tp, targetI: ti, visual: "assassinar" };
+    else if (key === "transformarBichinho") ev = { type: "TRANSFORMAR_BICHINHO", casterIdx: seat, fieldIdx, targetP: tp, targetI: ti, visual: "transformar_bichinho" };
+    else if (key === "incendiar") ev = { type: "INCENDIAR", casterIdx: seat, fieldIdx, targetP: tp, targetI: ti, visual: "incendiar" };
+  } else if (action.type === "TALENT_TARGET") {
+    const te = action.talentEffect || "";
+    if (te === "bolaDeFogoTalento") ev = { type: "TALENT_BOLA_DE_FOGO", targetP: tp, targetI: ti, visual: "bola_de_fogo" };
+    else if (te === "explosao") ev = { type: "TALENT_EXPLOSAO", targetP: tp, targetI: ti, visual: "explosao" };
+    else if (te === "transformarBichinhoTalento") ev = { type: "TALENT_TRANSFORMAR_BICHINHO", targetP: tp, targetI: ti, visual: "transformar_bichinho" };
+  }
+  if (!ev) return null;
+  const envelope = buildPresentationEnvelope([ev], action);
+  if (!envelope) return null;
+  // A suspensão não muda o estado: zerar os patches (o INCENDIAR geraria
+  // o patch burning:true no alvo antes da resposta).
+  const out = { ...envelope, fieldPatches: [] };
+  if (Array.isArray(out.visuals)) {
+    out.visuals = out.visuals.map((v) => (v && typeof v === "object" ? { ...v, fieldPatches: [] } : v));
+  }
+  return out;
+}
 
 /**
  * Monta envelope de apresentação a partir dos events do motor.
  * Clientes aplicam fieldPatches (após VFX quando deferBoardApply) sem confiar em snapshots.
  */
+/**
+ * S2-M10: duração estimada (ms) de cada kind visual, p/ o gate da IA.
+ * Valores medidos no plano do Lote C (raízes ult_*) ou estimativa
+ * conservadora (duração da VFX no cliente + margem). Sem entrada aqui, o
+ * fallback é FALLBACK_VISUAL_MS (o comportamento atual). A ROLETA RUSSA
+ * dura 6 s (ciclo completo, MANUAL_DE_REGRAS) — é o kind mais longo.
+ * As Ultimates NÃO geram kind no envelope (a VFX delas vem do
+ * ultimateType da ação) — a duração delas está em ULTIMATE_DURATION_MS.
+ */
+const VISUAL_DURATION_MS = Object.freeze({
+  combat: 1500, blocked_attack: 1500, summon: 1050, summon_land: 1050,
+  destroy: 500, talent_cast: 800, talent_discard: 500,
+  bola_de_fogo: 1500, explosao: 2000, raio_duplo: 1500,
+  zero_absoluto: 2000, rajada_congelante: 1500, rajada_congelante_destroy: 2000,
+  mordida_venenosa: 1500, baforada_venenosa: 1700, misseis_magicos: 2500,
+  incendiar: 2000, fumaca_toxica: 1500, assassinar: 1500, imitar: 1500,
+  ursificacao: 1500, transformar_bichinho: 1500, corrupt: 1500, devour: 1500,
+  roubar: 1500, desacelerar: 1500, pesadelo: 1500, necromancia: 1500,
+  podridao: 1500, podridao_fizzle: 1000, strong_arm: 1500, wings: 1500,
+  guardian: 1500, guardiao: 1500, shield: 1500, barrier_grant: 1500,
+  barrier_block: 1000, fury: 1500, tecnicas_combate: 2000,
+  roleta_russa: 6500, legado: 1500, vinganca: 2000,
+  poison: 1500, poison_kill: 1500, burn_tick: 1000, burn_kill: 1500,
+  card_draw: 1000, thunder_discard: 2900, divine_protection: 1500,
+  cancel_ultimate: 1500, aceleracao: 1000, combat_telegraph: 500,
+  land_impact: 1000, dragon_token_summon: 1800,
+  doppel_clone: 2000, doppel_cast: 2000, scare_return: 1750,
+  troca_injusta: 1500,
+});
+/** S2-M10: duração (ms) de cada Ultimate, por ultimateType (Lote C). */
+const ULTIMATE_DURATION_MS = Object.freeze({
+  targetEnemy: 2500, targetEnemyFreeze: 2500, targetAlly: 2500,
+  targetAllyFreeAttack: 2000, drawCard: 2000, targetAllyShield: 2700,
+  trickerySwap: 1100, thunderDiscard: 2900, fireAndIce: 2000,
+  summonDragon: 1800, hook: 1600, resurrect: 1400, potion: 2000,
+  vampirism: 2000, banish: 1600, poison: 1700, infinitePower: 2500,
+  scareReturn: 1750, cometStarfall: 1800, incinerate: 2000,
+  reuseInstant: 1500,
+});
+const FALLBACK_VISUAL_MS = 2500;
+
 export function buildPresentationEnvelope(events = [], action = null, meta = {}) {
   const visuals = [];
   const fieldPatches = [];
@@ -463,7 +550,8 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
             || n.kind === "transformar_bichinho"
             || n.kind === "bola_de_fogo" || n.kind === "incendiar"
             || n.kind === "explosao" || n.kind === "misseis_magicos"
-            || n.kind === "poison_kill" || n.kind === "vinganca") {
+            || n.kind === "poison_kill" || n.kind === "vinganca"
+            || n.kind === "burn_tick" || n.kind === "burn_kill") {
           deferBoardApply = true;
         }
       }
@@ -479,7 +567,8 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
             || mapped.kind === "incendiar" || mapped.kind === "explosao"
             || mapped.kind === "misseis_magicos" || mapped.kind === "poison_kill"
             || mapped.kind === "rajada_congelante_destroy"
-            || mapped.kind === "transformar_bichinho" || mapped.kind === "vinganca") {
+            || mapped.kind === "transformar_bichinho" || mapped.kind === "vinganca"
+            || mapped.kind === "burn_tick" || mapped.kind === "burn_kill") {
           deferBoardApply = true;
         }
       }
@@ -577,28 +666,17 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
         }
       }
     }
-    // BARRIER_BLOCKED: remove barreira no alvo (após VFX).
-    if (ev.type === "BARRIER_BLOCKED" && ev.targetP != null && ev.targetI != null) {
-      const patch = {
-        targetP: ev.targetP,
-        targetI: ev.targetI,
-        barrier: false,
-        barrierTurns: 0,
-      };
-      fieldPatches.push(patch);
-      deferBoardApply = true;
-      const last = visuals[visuals.length - 1];
-      if (last && last.kind === "barrier_block" && !last.fieldPatches?.length) {
-        last.fieldPatches = [patch];
-      }
-    }
+    // C-A17: BARRIER_BLOCKED significa "bloqueou e a Barreira FICOU" — não
+    // há patch de consumo (o bloco antigo zerava barrier/barrierTurns no
+    // modelo do cliente após o VFX, re-consumindo a Barreira pela porta
+    // dos fundos). O visual "barrier_block" (mapa :303) continua intacto.
     // RAJADA freeze: status gelo.
     if (ev.type === "RAJADA_CONGELANTE_FREEZE" && ev.targetP != null && ev.targetI != null) {
       const patch = {
         targetP: ev.targetP,
         targetI: ev.targetI,
         frozen: true,
-        frozenTurns: 2,
+        frozenTurns: 1,
       };
       fieldPatches.push(patch);
       deferBoardApply = true;
@@ -699,18 +777,6 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
       }
       deferBoardApply = true;
     }
-    // AURA DE FOGO.
-    if (ev.type === "AURA_DE_FOGO" && Array.isArray(ev.indices) && ev.casterIdx != null) {
-      for (const i of ev.indices) {
-        fieldPatches.push({
-          targetP: ev.casterIdx,
-          targetI: i,
-          fireAura: true,
-          fireAuraTurns: 3,
-        });
-      }
-      deferBoardApply = true;
-    }
     // DEVORAR: buff no caster + remoção da presa (VFX antes do remove no peer).
     if (ev.type === "DEVOUR" && ev.casterIdx != null && ev.devouredI != null) {
       const preyI = ev.devouredI | 0;
@@ -779,12 +845,34 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
         visuals.push({
           kind: "vinganca",
           ownerP: ev.ownerIdx,
+          // R-05 (parcial): o uid da fonte (o vingador destruído) — o
+          // motor já emite ev.uid; o envelope o descartava e o cliente
+          // animava a carta errada. O cliente lê sourceUid primeiro.
+          sourceUid: ev.uid || null,
           targetP: t.p,
           targetI: t.i,
           powerAfter: t.currentPower,
           fieldPatches: t.removed
             ? [{ targetP: t.p, targetI: t.i, removed: true }]
             : [{ targetP: t.p, targetI: t.i, currentPower: t.currentPower }],
+        });
+        deferBoardApply = true;
+      }
+      // C-A07 (Lote F): a redução da VINGANÇA agora é pendente
+      // (pendingReduction), não aplicada inline — `applied` vem
+      // vazio e o visual nunca era emitido (regressão: o marcador
+      // vinganca_fx sumiu — t_753 / t_907 VINGANÇA). Emite o visual
+      // a partir do alvo pendente; a redução em si chega depois
+      // (suspensão/resume) com seu próprio evento e patch.
+      const pr = ev.pendingReduction;
+      if ((ev.applied || []).length === 0 && pr && pr.targetP != null && pr.targetI != null) {
+        visuals.push({
+          kind: "vinganca",
+          ownerP: ev.ownerIdx,
+          sourceUid: ev.uid || null,
+          targetP: pr.targetP,
+          targetI: pr.targetI,
+          fieldPatches: [],
         });
         deferBoardApply = true;
       }
@@ -858,7 +946,16 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
     }
   }
 
-  if (!visuals.length && !fieldPatches.length) return null;
+  // S2-M10: quanto tempo o cliente leva para tocar este envelope — o maior
+  // kind visual, ou a duração da Ultimate (a ação carrega o ultimateType).
+  // Uma Ultimate sem visuals AINDA gera envelope (só com durationMs): a VFX
+  // dela toca no cliente a partir da ação, e o gate da IA precisa da duração.
+  const ultDur = (action?.type === "ULTIMATE_PLAY" || action?.type === "ULTIMATE_TARGET")
+    ? (ULTIMATE_DURATION_MS[action?.ultimateType] ?? FALLBACK_VISUAL_MS)
+    : 0;
+  if (!visuals.length && !fieldPatches.length && !ultDur) return null;
+  const visualsDur = visuals.reduce((m, v) => Math.max(m,
+    VISUAL_DURATION_MS[v?.kind] ?? FALLBACK_VISUAL_MS), 0);
   return {
     visuals,
     fieldPatches,
@@ -867,6 +964,7 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
     causeActionType: action?.type || meta.causeActionType || null,
     seed: meta.seed != null ? meta.seed : null,
     applyPolicy: deferBoardApply ? "after_vfx" : "with_vfx",
+    durationMs: Math.max(visualsDur, ultDur),
   };
 }
 
@@ -897,22 +995,33 @@ export function projectStateForSeat(state, viewerSeat) {
 }
 
 /**
+ * C-B03: fog nos EVENTOS — o oponente nunca recebe a identidade de carta
+ * comprada. O dono recebe o evento integral (a carta é dele). O formato
+ * fog é o mesmo da mão projetada: { fog: true, category: "hidden" }.
+ * type/playerId/reason/burned são preservados (o cliente conta os saques
+ * por assento). viewerSeat -1 (replay público, sem espectador definido)
+ * esconde TODOS os DRAWs com carta.
+ */
+export function projectEventsForSeat(events, viewerSeat) {
+  if (!Array.isArray(events)) return events;
+  return events.map((ev) => {
+    if (!ev || ev.type !== "DRAW" || ev.playerId === viewerSeat) return ev;
+    if (!ev.card) return ev; // upkeep DRAW já não traz carta
+    return { ...ev, card: { fog: true, category: "hidden" } };
+  });
+}
+
+/**
  * Aplica ação no estado da sala (fonte da verdade no servidor).
  */
-export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
+export function applyAuthoritativeAction(room, seat, action, snapshot = null, opts = {}) {
   if (!action?.type) return { ok: false, error: "BAD_ACTION" };
 
   if (!room.eventLog) room.eventLog = [];
 
   if (UI_ONLY_TYPES.has(action.type)) {
-    // Cancel Ultimate: enquanto o defensor responde, barrar ULTIMATE_PLAY do caster.
-    if (action.type === "REACTIVE_CANCEL_QUERY") {
-      const casterSeat = action.attOwner ?? action.casterP ?? action.queryFrom;
-      if (casterSeat != null) {
-        if (!room.mpCancelPending) room.mpCancelPending = Object.create(null);
-        room.mpCancelPending[casterSeat | 0] = Date.now();
-      }
-    }
+    // QUERY UI-only: só repasse (a suspensão server-side vive em
+    // room.mpPendingReactive — df-reactive-suspend.mjs). Sem janelas.
     const presentationEnvelope = buildPresentationEnvelope([], action);
     return {
       ok: true,
@@ -930,27 +1039,37 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
     return { ok: false, error: "NO_GAME_STATE" };
   }
 
-  const { DfEngine } = getEngine();
+  const { DfEngine, DfRules, DfData, DfEffects } = getEngine();
   const shaped = { ...action, playerId: seat };
+
+  // C-A05/C-A06/C-A07/C-A08 (Lote F): suspensão reativa. Uma ANSWER com
+  // qid diferente do pendente atual é descartada (resposta fora do
+  // prazo — o pendente já expirou ou outra pergunta está aberta).
+  if (shaped.type.startsWith("REACTIVE_") && shaped.type.endsWith("_ANSWER")
+      && room.mpPendingReactive && shaped.qid != null
+      && shaped.qid !== room.mpPendingReactive.qid) {
+    return { ok: false, error: "REACTIVE_EXPIRED" };
+  }
+  // Enquanto há pergunta aberta, nenhuma outra ação autoritativa entra
+  // (o estado sob a ação suspensa não pode mudar — o actionSeq é a
+  // guarda da retomada). Exceções: a própria ANSWER e o SURRENDER.
+  if (room.mpPendingReactive && AUTHORITATIVE_TYPES.has(shaped.type)
+      && !shaped.type.endsWith("_ANSWER") && shaped.type !== "SURRENDER") {
+    return { ok: false, error: "REACTIVE_PENDING" };
+  }
 
   // SYNC: cosmético — nunca merge de snapshot de tabuleiro.
   if (shaped.type === "SYNC_STATE") {
     return applySyncStateCosmetic(room, seat, shaped);
   }
 
-  // Cancelar Ultimate (MP): barrar ULTIMATE_PLAY após cancel ou enquanto QUERY pendente.
-  if (shaped.type === "ULTIMATE_PLAY") {
-    const pendingAt = room.mpCancelPending?.[seat];
-    if (pendingAt && (Date.now() - pendingAt) < 20000) {
-      return { ok: false, error: "ULTIMATE_CANCEL_PENDING" };
-    }
-    const cancelledAt = room.mpUltimateCancelled?.[seat];
-    if (cancelledAt && (Date.now() - cancelledAt) < 120000) {
-      delete room.mpUltimateCancelled[seat];
-      if (room.mpCancelPending) delete room.mpCancelPending[seat];
-      return { ok: false, error: "ULTIMATE_CANCELLED" };
-    }
-  }
+  // C-A05 (Lote F): SEM lockout. O cancelamento da Ultimate gasta o uso
+  // (spendUltimateCancelled, motor) em vez de barrar as próximas 120 s.
+  // A suspensão vive em room.mpPendingReactive (§0.2 da proposta 01);
+  // ULTIMATE_PLAY / ULTIMATE_TARGET nunca mais são rejeitados por terem
+  // sido cancelados. Os códigos ULTIMATE_CANCELLED / ULTIMATE_CANCEL_PENDING
+  // foram removidos do protocolo (não reutilizar — um cliente velho os
+  // interpretaria como lockout).
 
   // Proteção Divina: barrar FIELD_COMMIT reducePower no alvo protegido.
   if (shaped.type === "FIELD_COMMIT" && room.mpProtectedTarget) {
@@ -970,7 +1089,117 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
 
   const v = DfEngine.validateAction(state, shaped);
   if (v.ok === false && v.code && v.code !== "DELEGATE") {
-    return { ok: false, error: v.code || v.error || "ILLEGAL" };
+    // C-N4 (rodada 3): a REUTILIZAÇÃO com instantânea inválida GASTA o uso
+    // (fizzle) — o fizzle mora em applyUltimatePlay e esta pré-validação
+    // barraria antes (a rodada 2 o pôs no motor, mas a autoridade nunca o
+    // alcançava). Delega o INVALID_TARGET do reuseInstant com alvo próprio
+    // existente para o motor (espelho do applyAction, df-engine.js:375-385).
+    // As demais Ultimates continuam rejeitadas aqui (uso preservado).
+    // C-N4 (rodada 4, t_961): a delegação da rodada 3 tinha DOIS buracos
+    // e nunca disparava no caminho real do jogador — (a) só casava
+    // ULTIMATE_PLAY, mas o cliente envia ULTIMATE_TARGET para ultimates
+    // com mira (online_battle.gd:2874); (b) lia `shaped.ultimateType`,
+    // mas o cliente NUNCA envia ultimateType (só heroId/targetP/targetI
+    // — online_battle.gd:2874/2926, online_actions.gd:999/1003). O tipo
+    // é derivado do heroId (mesmo padrão do bloco de suspensão abaixo).
+    const pid0 = shaped.playerId ?? state.currentPlayer;
+    const heroId0 = shaped.heroId || state.players[pid0]?.heroId;
+    const heroDef0 = (DfData?.heroDefs || []).find((h) => h && h.id === heroId0);
+    const ut0 = shaped.ultimateType || heroDef0?.ultimateType;
+    const isReuseFizzle = (shaped.type === "ULTIMATE_PLAY" || shaped.type === "ULTIMATE_TARGET")
+      && v.code === "INVALID_TARGET"
+      && ut0 === "reuseInstant"
+      && shaped.targetP === pid0
+      && state.players[pid0]?.field?.[shaped.targetI];
+    if (!isReuseFizzle) {
+      return { ok: false, error: v.code || v.error || "ILLEGAL" };
+    }
+  }
+
+  // C-A05/C-A06 (Lote F): a Ultimate resolve SOB SUSPENSÃO — o defensor
+  // é perguntado ANTES do efeito (e o uso só é gasto na retomada).
+  // O cliente novo marca a ação com `reactiveServerDriven: true` e NÃO
+  // pergunta antes de enviar; sem a marca (cliente velho, que já
+  // perguntou), aplica direto. A IA do servidor é sempre server-driven
+  // (opts.serverAi — C-A08). A emissão da QUERY e o timer vivem em
+  // index.mjs / df-reactive-suspend.mjs (a autoridade só decide).
+  // opts.resume: retomada de uma suspensão — nunca re-suspender.
+  // C-A05: CANCELAR ULTIMATE primeiro. C-A06: sem CANCELAR, a PROTEÇÃO
+  // DIVINA é perguntada DIRETO (só BOMBA/VAMPIRISMO — targetEnemy/
+  // vampirism; COMETA/FOGO E GELO/INCINERAR fora do escopo, D-2) — no
+  // offline as duas perguntas são independentes.
+  if ((shaped.type === "ULTIMATE_PLAY" || shaped.type === "ULTIMATE_TARGET")
+      && (shaped.reactiveServerDriven === true || opts?.serverAi === true)
+      && !room.mpPendingReactive && !opts?.resume) {
+    const defSeat = 1 - seat;
+    const canAsk = DfRules?.canOfferCancelUltimate?.(state, defSeat, seat);
+    if (canAsk?.ok) {
+      // NÃO aplicar ainda: guardar a ação inteira e devolver "suspenso".
+      return {
+        ok: true, suspended: true, suspendKind: "cancelUltimate",
+        deferredAction: shaped, defenderSeat: defSeat, askerSeat: seat,
+        committed: false,
+        state, events: [],
+      };
+    }
+    const heroId = shaped.heroId || state.players?.[seat]?.heroId;
+    const heroDef = (DfData?.heroDefs || []).find((h) => h && h.id === heroId);
+    const ut = shaped.ultimateType || heroDef?.ultimateType;
+    if ((ut === "targetEnemy" || ut === "vampirism")
+        && DfRules?.canOfferReactiveProtection?.(state, defSeat, seat)?.ok) {
+      return {
+        ok: true, suspended: true, suspendKind: "protecaoDivina",
+        deferredAction: shaped, defenderSeat: defSeat, askerSeat: seat,
+        committed: false,
+        state, events: [],
+      };
+    }
+    // Sem CANCELAR nem PROTEÇÃO na mão do defensor: aplica direto (o
+    // offline nem pergunta — _try_cancel_ultimate retorna false sem a carta).
+  }
+
+  // U-B07 / E-N1 Opção 1 (rodada 5): a PROTEÇÃO DIVINA das 7 fontes que
+  // reduzem Poder (BOLA/ASSASSINAR/TRANSFORMAR/INCENDIAR como habilidade;
+  // BOLA/EXPLOSÃO/TRANSFORMAR como talento) é perguntada DURANTE a
+  // animação — igual ao offline. O cliente novo marca a ação com
+  // `reactiveServerDriven: true` e NÃO pré-pergunta; a IA do servidor é
+  // sempre server-driven (opts.serverAi — C-A08). Sem a marca (cliente
+  // velho, que já perguntou), aplica direto. A suspensão é NÃO cometida:
+  // nada muda no estado até a resposta; o visual viaja com a suspensão
+  // (ack do ator + query do defensor, via suspendSpec) e a retomada NÃO o
+  // re-emite (o resume não tem envelope). opts.resume: nunca re-suspender.
+  // Ordem EXAUSTÃO → PROTEÇÃO preservada: o cliente pergunta a EXAUSTÃO
+  // antes de enviar (humano); a IA suspende a EXAUSTÃO primeiro em
+  // maybeSuspendAiAction e encadeia a PROTEÇÃO na resposta NÃO.
+  if ((shaped.type === "ABILITY_TARGET" || shaped.type === "TALENT_TARGET")
+      && (shaped.reactiveServerDriven === true || opts?.serverAi === true)
+      && !room.mpPendingReactive && !opts?.resume) {
+    const defSeat = 1 - seat;
+    const abilityKey = shaped.type === "ABILITY_TARGET"
+      ? (shaped.abilityKey || state.players?.[seat]?.field?.[shaped.fieldIdx]?.onEnter || "")
+      : "";
+    const talentEffect = shaped.type === "TALENT_TARGET"
+      ? (shaped.talentEffect || state.activeTalent?.card?.talentEffect || "")
+      : "";
+    const isProtecaoTarget =
+      (shaped.type === "ABILITY_TARGET" && ["bolaDeFogo", "assassinar", "transformarBichinho", "incendiar"].includes(abilityKey))
+      || (shaped.type === "TALENT_TARGET" && ["bolaDeFogoTalento", "explosao", "transformarBichinhoTalento"].includes(talentEffect));
+    if (isProtecaoTarget && DfRules?.canOfferReactiveProtection?.(state, defSeat, seat)?.ok) {
+      const presentationEnvelope = buildProtecaoVisualEnvelope(shaped, state, seat);
+      return {
+        ok: true, suspended: true, suspendKind: "protecaoDivina",
+        deferredAction: shaped, defenderSeat: defSeat, askerSeat: seat,
+        committed: false,
+        state, events: [],
+        presentationEnvelope: presentationEnvelope || undefined,
+        presentation: presentationEnvelope?.visuals,
+        suspendSpec: {
+          kind: "protecaoDivina",
+          deferredAction: shaped, defenderSeat: defSeat, askerSeat: seat,
+          presentationEnvelope: presentationEnvelope || undefined,
+        },
+      };
+    }
   }
 
   /** CLIENT_ONLY / estado idêntico = motor não aplicou — não promover. */
@@ -1032,9 +1261,15 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
     return { ok: false, error: "UNKNOWN_ACTION" };
   }
 
-  // SUMMON: resolve on-enter auto (tokens Wyvern/Cubo, rapidez…) no servidor.
+  // SUMMON/ULTIMATE: resolve on-enter auto (tokens Wyvern/Cubo, rapidez…)
+  // no servidor. ULTIMATE_* entra aqui por C-A04 (REUTILIZAÇÃO re-dispara
+  // a instantânea "auto" no mesmo ack; "target" fica pendente p/ o cliente).
+  // opts.noOnEnterAuto (C-A08 EXAUSTÃO): o campeão entra SEM a
+  // instantânea — SUMMON pelo applyAction puro.
   const applyFn = typeof DfEngine.applyActionWithOnEnter === "function"
-    && (shaped.type === "SUMMON" || shaped.type === "ON_ENTER_RESOLVE")
+    && (shaped.type === "ON_ENTER_RESOLVE"
+      || shaped.type === "ULTIMATE_PLAY" || shaped.type === "ULTIMATE_TARGET"
+      || (shaped.type === "SUMMON" && !opts?.noOnEnterAuto))
     ? DfEngine.applyActionWithOnEnter
     : DfEngine.applyAction;
   const applied = applyFn(DfEngine.cloneState(state), shaped, {
@@ -1046,20 +1281,10 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
 
   room.gameState = applied.state;
 
-  // Marca ultimate do caster como cancelada — ULTIMATE_PLAY seguinte é rejeitado.
-  if (shaped.type === "REACTIVE_CANCEL_ANSWER") {
-    const casterSeat = shaped.queryFrom ?? shaped.attOwner;
-    if (casterSeat != null && room.mpCancelPending) {
-      delete room.mpCancelPending[casterSeat | 0];
-    }
-    if (shaped.cancelled === true || shaped.use === true) {
-      if (casterSeat != null) {
-        if (!room.mpUltimateCancelled) room.mpUltimateCancelled = Object.create(null);
-        room.mpUltimateCancelled[casterSeat | 0] = Date.now();
-      }
-    }
-  }
   // Proteção Divina: alvo protegido contra próximo reducePower.
+  // (Fluxo antigo — cliente pergunta antes; mantido. D-3: o FIELD_COMMIT
+  // continua barrado; a suspensão mid-resolution (C-A07) não o substitui
+  // para BOLA/EXPLOSÃO/ASSASSINAR, que são redução única por resolução.)
   if (shaped.type === "REACTIVE_PROTECTION_ANSWER"
       && (shaped.protected === true || shaped.use === true)) {
     const targetP = shaped.defenderPlayerId ?? shaped.targetP;
@@ -1078,35 +1303,109 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null) {
       };
     }
   }
-  if (shaped.type === "ULTIMATE_PLAY" && room.mpUltimateCancelled?.[seat]) {
-    delete room.mpUltimateCancelled[seat];
+
+  // C-A07 (Lote F): o motor suspendeu reduções (RAIO/CHUVA via
+  // `applied.suspended`, VINGANÇA via `pendingReduction` nos eventos —
+  // ON_DESTROY_BURST, ou POISON_KILL/BURN_KILL dos ticks de manutenção).
+  // A fila é: reduções do resolver primeiro, depois os bursts na ordem
+  // dos eventos (VINGANÇA em cadeia vai para o fim da fila).
+  const motorReductions = Array.isArray(applied.suspended?.reductions)
+    ? applied.suspended.reductions.filter(Boolean) : [];
+  const burstReductions = [];
+  for (const e of (applied.events || [])) {
+    if (!e || typeof e !== "object") continue;
+    const pr = e.pendingReduction || e.burst?.pendingReduction;
+    // O asker do burst é o DONO do campeão destruído (ev.ownerIdx) —
+    // não o assento da ação. Sem isso, canOfferReactiveProtection vê
+    // defOwner === attOwner (SAME_PLAYER) e a PROTEÇÃO nunca é
+    // oferecida para VINGANÇA (t_902). Reduções do motor usam o
+    // askerSeat do pendente (o caster = assento da ação).
+    if (pr) burstReductions.push({ ...pr, askerSeat: e.ownerIdx ?? seat });
   }
-  if (shaped.type === "ULTIMATE_PLAY" && room.mpCancelPending?.[seat]) {
-    delete room.mpCancelPending[seat];
+
+  // C-A07 inline (Lote F, t_753/t_907): quando a fila tem SÓ bursts
+  // (VINGANÇA — sem finisher do motor) e NENHUM é perguntável (o
+  // defensor não tem PROTEÇÃO DIVINA na mão), não há pergunta a
+  // fazer — aplicar inline, sem suspensão e sem resume. Antes, o
+  // resume imediato difundia o estado sem a FURIOSA ANTES do ack do
+  // ataque, e o cliente apagava a vista do vingador antes do visual
+  // `vinganca` tocar — o marcador nunca aparecia (t_753/t_907).
+  // Reduções do motor (RAIO/CHUVA, com finisher) seguem sempre pela
+  // suspensão (comportamento anterior, sem mudança).
+  let curState = applied.state;
+  let extraEvents = [];
+  let remaining = null;
+  if (burstReductions.length && !motorReductions.length) {
+    const queue = [...burstReductions];
+    while (queue.length) {
+      const r = queue[0];
+      const offer = DfRules?.canOfferReactiveProtection?.(curState, r.targetP, r.askerSeat ?? seat);
+      if (offer?.ok) break; // perguntável -> suspende com o restante
+      const res = DfEffects?.applyPlannedReduction?.(curState, r, { skip: false });
+      if (!res?.ok) break; // não aplicou -> suspende (não perde a redução)
+      queue.shift();
+      curState = res.state;
+      extraEvents.push(...(res.events || []));
+      if (res.newPendingReduction) queue.push({ ...res.newPendingReduction, askerSeat: r.targetP });
+    }
+    if (queue.length) remaining = queue;
   }
+  // O estado intermediário JÁ foi cometido acima (room.gameState =
+  // applied.state); o inline muta o mesmo objeto, mas comete de novo
+  // explicitamente (se applyPlannedReduction um dia clonar, não some).
+  room.gameState = curState;
+  const allEvents = [...(applied.events || []), ...extraEvents];
 
   const entry = appendEventLogEntry(
     room.eventLog,
     room.actionSeq + 1,
     seat,
     shaped,
-    applied.events || [],
+    allEvents,
   );
 
-  const presentationEnvelope = buildPresentationEnvelope(applied.events || [], shaped, {
+  const presentationEnvelope = buildPresentationEnvelope(allEvents, shaped, {
     causeActionType: shaped.type,
     seed: ((room.actionSeq + 1) * 2654435761 + seat * 40503 + (room.deckSeed || 0)) >>> 0,
   });
   const presentation = presentationEnvelope?.visuals?.length
     ? presentationEnvelope.visuals
-    : (applied.events || [])
+    : allEvents
       .filter((e) => e && e.visual)
       .map((e) => ({ kind: e.visual, ...e }));
 
+  const allReductions = [...motorReductions, ...burstReductions];
+  if (remaining || motorReductions.length) {
+    // Suspensão: `remaining` (bursts restantes, sem finisher) ou a fila
+    // completa (motor presente — comportamento anterior, sem mudança).
+    // `remaining` nulo + só bursts = tudo aplicado inline -> NÃO suspende.
+    // O estado intermediário JÁ foi cometido acima (room.gameState); a
+    // orquestração (pergunta, timer, retomada) vive em index.mjs /
+    // df-reactive-suspend.mjs.
+    const specReductions = remaining || allReductions;
+    return {
+      ok: true, suspended: true, suspendKind: "reductions",
+      suspendSpec: {
+        kind: "reductions",
+        reductions: specReductions,
+        finish: applied.suspended?.finish || null,
+        askerSeat: seat,
+        deferredAction: null,
+        originAction: shaped,
+      },
+      committed: true,
+      state: curState,
+      events: allEvents,
+      logEntry: entry,
+      presentation: presentation?.length ? presentation : undefined,
+      presentationEnvelope: presentationEnvelope || undefined,
+    };
+  }
+
   return {
     ok: true,
-    state: applied.state,
-    events: applied.events || [],
+    state: curState,
+    events: allEvents,
     logEntry: entry,
     presentation: presentation?.length ? presentation : undefined,
     presentationEnvelope: presentationEnvelope || undefined,
@@ -1144,6 +1443,55 @@ export function buildReplayPayload(room) {
     deckSeed: room.deckSeed != null ? room.deckSeed : null,
     turnDeadline: room.turnDeadline || null,
     serverNow: Date.now(),
+    // (F7, t_1020) o rejoin precisa saber se o oponente segue sob a IA:
+    // o broadcast peer_ai_control foi perdido enquanto o cliente estava
+    // fora, e o cliente restaura o indicador a partir daqui.
+    aiControlled: Array.isArray(room.aiControlled) ? [...room.aiControlled] : [false, false],
     reconnected: true,
+  };
+}
+
+/**
+ * (§14.6) Payload final para o rejoin de uma sala encerrada: o replay
+ * normal devolve null quando a sala não está jogando, mas o jogador que
+ * volta depois do fim precisa do estado final — senão a batalha fica
+ * travada (o cliente não tem o que aplicar). Só o estado final, com a
+ * mão do oponente embaçada (espelho de roomPublicView — sem importar
+ * rooms.mjs aqui). Usado SÓ no `join_room`; o `get_replay` mantém
+ * NOT_PLAYING para salas encerradas.
+ */
+export function buildFinalReplayPayload(room, yourSeat = null) {
+  if (!room || room.status !== "ended") return null;
+  if (!room.gameState?.players?.length) return null;
+  let gameState = null;
+  try {
+    gameState = JSON.parse(JSON.stringify(room.gameState));
+    if (yourSeat === 0 || yourSeat === 1) {
+      for (let i = 0; i < (gameState.players || []).length; i++) {
+        if (i === yourSeat) continue;
+        const pl = gameState.players[i];
+        if (!pl?.hand) continue;
+        const n = pl.hand.length;
+        pl.hand = Array.from({ length: n }, () => ({ fog: true, category: "hidden" }));
+        if (Array.isArray(pl.deck)) {
+          pl.deckCount = pl.deck.length;
+          pl.deck = [];
+        }
+      }
+    }
+  } catch (e2) { /* keep raw */ }
+  return {
+    seq: room.actionSeq,
+    entries: [],
+    snapshot: null,
+    gameState,
+    heroIds: room.heroes || [null, null],
+    arenaScenarioId: room.arenaScenarioId || null,
+    deckSeed: room.deckSeed != null ? room.deckSeed : null,
+    turnDeadline: null,
+    serverNow: Date.now(),
+    aiControlled: [false, false],
+    reconnected: true,
+    final: true,
   };
 }

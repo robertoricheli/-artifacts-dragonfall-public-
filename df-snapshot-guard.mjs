@@ -18,7 +18,6 @@ const SNAPSHOT_MERGE_TYPES = new Set([
   "ABILITY_START",
   "MENU_CHOICE",
   "NECROMANCIA_PICK",
-  "UNFREEZE_CONFIRM",
 ]);
 
 export function isSnapshotMergeType(type) {
@@ -123,12 +122,6 @@ function validateActionSpecific(prev, next, seat, actionType, action) {
     if (disc && action?.cardName) {
       const has = disc.some((c) => c?.name === action.cardName);
       if (!has) return { ok: false, error: "NECRO_BAD_CARD" };
-    }
-  }
-
-  if (actionType === "UNFREEZE_CONFIRM") {
-    if (prev?.currentPlayer != null && prev.currentPlayer !== seat) {
-      return { ok: false, error: "UNFREEZE_NOT_YOUR_TURN" };
     }
   }
 

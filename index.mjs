@@ -55,7 +55,10 @@ import { initAuthStore, getAuthStoreMode } from "./df-auth.mjs";
 import { authPlayerFromToken, getPlayerById, startSessionPruneScheduler } from "./df-auth-store.mjs";
 import { initRankStore, recordRankedSeasonMatch, flushRankStore, rankStoreMode } from "./df-rank.mjs";
 import { recordMatchEnd } from "./df-match-history.mjs";
-import { applyAuthoritativeAction, seedRoomFromSnapshot, buildReplayPayload, getEngineBootStatus, projectStateForSeat } from "./df-authority.mjs";
+import { turnDeadlineFor } from "./df-turn-clock.mjs";
+import { applyAuthoritativeAction, seedRoomFromSnapshot, buildReplayPayload, buildFinalReplayPayload, getEngineBootStatus, projectStateForSeat, projectEventsForSeat, buildPresentationEnvelope } from "./df-authority.mjs";
+import { armApodrecidaTimer, clearApodrecidaTimer } from "./df-apodrecida-timer.mjs";
+import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
 import { attachPeerStateDiff } from "./df-state-diff.mjs";
 import { loadPersistedRooms, schedulePersistRooms, flushPersistRooms } from "./room-persist.mjs";
 import {
@@ -121,11 +124,19 @@ import {
   onHumanReconnectedClearAi,
   scheduleServerAi,
   clearAllAi,
+  continueAiAfterResume,
 } from "./df-server-ai.mjs";
 import {
   buildAiReactiveAnswer,
   consumeAiReactiveCard,
 } from "./df-server-ai-reactive.mjs";
+// Lote F — Bloco 2 (reações C-A05–C-A08): suspensão reativa. A autoridade
+// só decide suspender; este módulo orquestra (QUERY, timer 8 s, retomada).
+import {
+  openReactiveSuspension,
+  resolveReactiveSuspension,
+  expireReactiveSuspensionLocked,
+} from "./df-reactive-suspend.mjs";
 import {
   validateJoinRoom,
   validateSetHero,
@@ -276,8 +287,12 @@ app.get("/history/replay/:code", async (req, res) => {
       ranked: row.ranked,
       actionSeq: row.action_seq,
       gameVersion: row.game_version,
-      eventLog: row.event_log,
-      gameState: row.final_state,
+      // D3/C-B03: replay público, sem autenticação — esconder TODOS os
+      // DRAWs com carta (viewerSeat -1) e foguear as mãos do estado
+      // final (nenhum espectador definido). A revisão pós-partida com
+      // o log completo fica p/ decisão de projeto (Fase 9/10).
+      eventLog: projectEventsForSeat(row.event_log, -1),
+      gameState: projectStateForSeat(row.final_state, -1),
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message || "QUERY_FAILED" });
@@ -441,6 +456,8 @@ function maybeFinishMatch(room, state) {
   if (!room.matchHistoryRecorded) {
     room.matchHistoryRecorded = true;
     room.status = "ended";
+    // C-N10: partida encerrada — o timer da apodrecida não dispara mais.
+    clearApodrecidaTimer(room);
     void recordMatchEnd(room, state, GAME_VERSION);
     void deleteLiveRoom(room.code);
   }
@@ -571,11 +588,32 @@ function emitActionEnvelope(room, envelope) {
   for (let s = 0; s < 2; s++) {
     const sid = room.sockets[s];
     if (!sid) continue;
-    const peerEnv = envelope.authoritativeState
+    let peerEnv = envelope.authoritativeState
       ? attachPeerStateDiff(room, envelope, s, projectStateForSeat, recordStateDiff)
       : envelope;
+    // C-B03: DRAW do oponente não pode carregar a carta (fog). Cópia
+    // rasa: o envelope pode ser o mesmo objeto p/ os dois assentos.
+    if (peerEnv?.events) peerEnv = { ...peerEnv, events: projectEventsForSeat(peerEnv.events, s) };
     io.to(sid).emit("remote_action", peerEnv);
   }
+  // C-N10 (Opção A — timer por sala): toda publicação de estado pode ter
+  // posto uma apodrecida no campo — rearmar para o prazo mais próximo.
+  armApodrecidaTimer(room, apodrecidaTimerDeps());
+}
+
+/** Deps do timer da apodrecida (C-N10): injetadas aqui, fakes na sonda. */
+function apodrecidaTimerDeps() {
+  return {
+    getRoom,
+    withRoomLock,
+    emitEnvelope: emitActionEnvelope,
+    persist: async (r) => {
+      touchPersist(r);
+      await mirrorRoomNow(r);
+    },
+    expireApodrecidas: (state, now) => bootDragonfallEngine().DfRules.expireApodrecidas(state, now),
+    buildPresentationEnvelope: (events, action) => buildPresentationEnvelope(events, action),
+  };
 }
 
 /**
@@ -696,7 +734,8 @@ function buildAiReactiveVisual(action, payload, askerSeat) {
 
 function afterAuthoritativeAction(room, state) {
   broadcastRoomState(room);
-  resetTurnTimer(room);
+  // C-A19: NÃO renovar o relógio após ação (70 s fixos por turno, igual ao offline).
+  resetTurnTimerOnTurnChange(room);
   touchPersist(room);
   maybeFinishMatch(room, state);
   if (room.status === "playing" && state?.winner == null) {
@@ -710,22 +749,50 @@ function serverAiHooks(room) {
     emitEnvelope: emitActionEnvelope,
     onAfterAction: afterAuthoritativeAction,
     onAfterAiStep: (r, state) => {
+      // t_1010 (F7-06): a virada de turno pela IA tem de renovar o
+      // relógio — sem isto o próximo jogador herda o prazo velho e o
+      // turnTimer antigo pode encerrar o turno dele antes dos 70 s.
+      // Só age na virada (o guarda compara _clockTurnPlayer); no meio
+      // do turno da IA não renova nada (C-A19).
+      resetTurnTimerOnTurnChange(r);
       broadcastRoomState(r);
       touchPersist(r);
       maybeFinishMatch(r, state);
     },
     maybeFinish: (r, state) => maybeFinishMatch(r, state),
-    resetTurnTimer,
     persist: () => touchPersist(room),
     onAiTakeover: (_r, seat) => {
-      resetTurnTimer(room);
+      // C-A19: takeover NÃO é virada de turno — o relógio continua de onde estava.
       emitTurnDeadline(room);
       recordRankAbandon(room, seat);
     },
-    onExtendDeadline: () => {
-      resetTurnTimer(room);
-      emitTurnDeadline(room);
+  };
+}
+
+/**
+ * Lote F — Bloco 2 (reações C-A05–C-A08): hooks do módulo de suspensão
+ * reativa (df-reactive-suspend.mjs). A retomada difunde por aqui
+ * (emitEnvelope projetado p/ os dois assentos) e persiste como o game_action.
+ */
+function reactiveHooks(room) {
+  return {
+    emitEnvelope: (r, env) => emitActionEnvelope(r, env),
+    maybeFinish: (r, state) => maybeFinishMatch(r, state),
+    persist: async (r) => {
+      touchPersist(r);
+      await mirrorRoomNow(r);
     },
+    scheduleAi: (r) => scheduleServerAi(r, io, serverAiHooks(r)),
+    answerForAi: (r, query, askerSeat) => {
+      try {
+        return buildAiReactiveAnswer(r, query, askerSeat, { seatOffline: false });
+      } catch (e) {
+        console.warn("[reactive-suspend] answerForAi", e?.message || e);
+        return null;
+      }
+    },
+    onAiResume: (r, seat, result, spec) =>
+      continueAiAfterResume(r, io, serverAiHooks(r), seat, result, spec),
   };
 }
 
@@ -751,8 +818,9 @@ function onTurnTimerExpired(room) {
   if (room.status !== "playing") return;
   const cp = room.gameState?.currentPlayer;
   if ((cp === 0 || cp === 1) && room.aiControlled?.[cp]) {
-    resetTurnTimer(room);
-    scheduleServerAi(room, io, serverAiHooks(room));
+    // C-A19: expiração força o fim do turno como no offline (antes renovava o
+    // relógio e reagendava a IA, adiando o fim do turno indefinidamente).
+    forceServerEndTurn(room);
     return;
   }
   forceServerEndTurn(room);
@@ -792,6 +860,16 @@ function forceServerEndTurn(room) {
   void withRoomLock(room.code, async () => {
     const cp = room.gameState?.currentPlayer;
     if (cp == null || room.status !== "playing") return;
+    // Lote F — Bloco 2: pergunta reativa aberta expira como NÃO antes do
+    // fim forçado (o relógio de 70 s não para durante a pergunta — C-A19).
+    // Drena em loop limitado: a retomada pode encadear outra pergunta
+    // (C-A06/C-A07) — cada iteração resolve uma como NÃO.
+    for (let i = 0; i < 20 && room.mpPendingReactive; i++) {
+      await expireReactiveSuspensionLocked(room, io, reactiveHooks(room));
+    }
+    if (room.mpPendingReactive) {
+      console.warn("[forceEndTurn] pendente reativo sobreviveu ao dreno", room.code);
+    }
     const result = applyAuthoritativeAction(room, cp, { type: "END_TURN", playerId: cp });
     if (!result.ok) return;
     room.actionSeq += 1;
@@ -827,9 +905,23 @@ function resetTurnTimer(room) {
     room.turnDeadline = null;
     return;
   }
-  room.turnDeadline = Date.now() + TURN_TIMEOUT_MS;
+  // E-N4 (decisão dela 16/11): o deadline dá 70 s DEPOIS do banner
+  // (turn_number >= 3) — o jogador mantém 70 s úteis, igual ao offline.
+  // Nos turnos 1–2 não há banner e o prazo segue 70 s exatos.
+  room.turnDeadline = turnDeadlineFor(room.gameState?.turnNumber, Date.now(), TURN_TIMEOUT_MS);
+  room._clockTurnPlayer = room.gameState?.currentPlayer ?? null;
   emitTurnDeadline(room);
-  armTurnTimer(room, TURN_TIMEOUT_MS);
+  armTurnTimer(room, Math.max(0, room.turnDeadline - Date.now()));
+}
+
+// C-A19 (Lote F): o relógio é FIXO por turno (70 s, igual ao offline) — ações
+// NÃO renovam o prazo. Só a virada de turno redefine o deadline. Este helper é
+// o único caminho de reset fora da virada de turno (match start / forceServerEndTurn
+// / join / reconnect / revive já chamam resetTurnTimer direto porque o turno mudou).
+function resetTurnTimerOnTurnChange(room) {
+  if (room._clockTurnPlayer !== room.gameState?.currentPlayer) {
+    resetTurnTimer(room);
+  }
 }
 
 /** Pós-boot: salas restauradas vêm com turnTimer:null — reativa relógio + IA. */
@@ -954,7 +1046,10 @@ io.on("connection", (socket) => {
     socket.join(joined.room.code);
     touchLastSeen(joined.room, joined.seat);
     const view = roomPublicView(joined.room, joined.seat);
-    const replay = replayPayload(joined.room);
+    // (§14.6) sala encerrada: o replay normal é null — o jogador que
+    // volta depois do fim precisa do estado final no ack, senão a
+    // batalha fica travada sem o que aplicar.
+    const replay = replayPayload(joined.room) ?? buildFinalReplayPayload(joined.room, joined.seat);
     ack?.({
       ok: true,
       ...view,
@@ -1273,6 +1368,43 @@ io.on("connection", (socket) => {
           });
         }
 
+        // Lote F — Bloco 2 (C-A05/C-A06): Ultimate suspensa sem estado
+        // cometido — nada a difundir (o defensor só vê a QUERY); abrir a
+        // suspensão e responder o ack como suspenso. Sem authoritativeState
+        // no ack (nada mudou — evita clobber num reenvio idempotente).
+        if (result.suspended && !result.committed) {
+          const spec = result.suspendSpec || {
+            kind: result.suspendKind,
+            deferredAction: result.deferredAction,
+            defenderSeat: result.defenderSeat,
+            askerSeat: result.askerSeat,
+          };
+          const opened = await openReactiveSuspension(room, io, reactiveHooks(room), spec);
+          const ackSuspended = {
+            ok: true, suspended: true,
+            qid: opened.qid ?? room.mpPendingReactive?.qid ?? null,
+            expiresAt: room.mpPendingReactive?.expiresAt ?? null,
+            seq: room.actionSeq,
+            authoritativeState: null,
+            turnDeadline: room.turnDeadline || null,
+            // U-B07 / E-N1 Opção 1 (rodada 5): o visual viaja COM a
+            // suspensão — o ator vê a animação enquanto o defensor
+            // responde (o pendente guarda o envelope da query).
+            presentationEnvelope: result.presentationEnvelope
+              || room.mpPendingReactive?.presentationEnvelope || undefined,
+            presentation: result.presentation
+              || room.mpPendingReactive?.presentationEnvelope?.visuals || undefined,
+          };
+          if (clientActionId) {
+            room._ackedClientActions.set(`${seat}:${clientActionId}`, ackSuspended);
+            if (room._ackedClientActions.size > 200) {
+              const first = room._ackedClientActions.keys().next().value;
+              room._ackedClientActions.delete(first);
+            }
+          }
+          return ack?.(ackSuspended);
+        }
+
         room.actionSeq += 1;
         // Delta: peer recebe authoritativeState; snapshot do cliente só em anim/UI.
         // ATTACK_RESOLVE: nunca retransmitir snapshot pré-combate (clobber / revive).
@@ -1299,26 +1431,58 @@ io.on("connection", (socket) => {
         }
 
         // Relógio do turno: ambos os clientes sincronizam a partir do deadline.
-        resetTurnTimer(room);
+        // C-A19: 70 s FIXOS por turno (igual ao offline) — a ação só redefine o
+        // deadline se o turno virou (ex.: END_TURN); senão o prazo continua.
+        resetTurnTimerOnTurnChange(room);
         envelope.turnDeadline = room.turnDeadline || null;
 
         for (let s = 0; s < 2; s++) {
           const sid = room.sockets[s];
           if (!sid || sid === socket.id) continue;
-          const peerEnv = envelope.authoritativeState
+          let peerEnv = envelope.authoritativeState
             ? attachPeerStateDiff(room, envelope, s, projectStateForSeat, recordStateDiff)
             : envelope;
+          // C-B03: fog no DRAW do oponente (cópia rasa — envelope compartilhado).
+          if (peerEnv?.events) peerEnv = { ...peerEnv, events: projectEventsForSeat(peerEnv.events, s) };
           io.to(sid).emit("remote_action", peerEnv);
         }
 
+        // C-N10 (Opção A — timer por sala): a ação pode ter posto uma
+        // apodrecida no campo — rearmar para o prazo mais próximo.
+        armApodrecidaTimer(room, apodrecidaTimerDeps());
+
         // Pergunta reativa para assento sob IA: responder já, senão o atacante
         // fica preso no timeout de 10s (jogo "congelado" após escolher o alvo).
-        maybeAnswerReactiveForAi(room, action, seat);
+        // Suspenso (Lote F): a suspensão é dona da pergunta — não responder
+        // aqui (dobraria a resposta e consumiria a carta duas vezes).
+        if (!result.suspended) {
+          maybeAnswerReactiveForAi(room, action, seat);
+        }
 
         touchPersist(room);
         await mirrorRoomNow(room);
         maybeFinishMatch(room, result.state);
-        scheduleServerAi(room, io, serverAiHooks(room));
+        // Suspenso: o tick da IA só continua na retomada (onAiResume).
+        if (!result.suspended) {
+          scheduleServerAi(room, io, serverAiHooks(room));
+        }
+
+        // Lote F — Bloco 2 (reações): reduções cometidas (C-A07) abrem a
+        // suspensão DEPOIS de difundir o estado intermediário; a ANSWER
+        // casa com o pendente (por qid) e retoma a ação suspensa.
+        let resolvedSuspension = null;
+        if (result.suspended && result.committed) {
+          const spec = result.suspendSpec || {
+            kind: result.suspendKind,
+            deferredAction: result.deferredAction,
+            defenderSeat: result.defenderSeat,
+            askerSeat: result.askerSeat,
+          };
+          await openReactiveSuspension(room, io, reactiveHooks(room), spec);
+        } else if (action.type?.startsWith("REACTIVE_") && action.type?.endsWith("_ANSWER")
+            && room.mpPendingReactive) {
+          resolvedSuspension = await resolveReactiveSuspension(room, io, reactiveHooks(room), action);
+        }
 
         recordActionLatency(Date.now() - t0, {
           roomCode: room.code,
@@ -1329,10 +1493,13 @@ io.on("connection", (socket) => {
         });
 
         // (Fase 6 T1) fog: o ack leva o estado projetado por assento —
-        // a mão do adversário nunca viaja para o ator.
-        const ackStateRaw = (result.omitAuthoritativeState || (result.skip && result.uiOnly))
+        // a mão do adversário nunca viaja para o ator. Após uma retomada
+        // (Lote F), o estado é o ATUAL (room.gameState), não o da ANSWER.
+        const ackStateRaw = resolvedSuspension
           ? (room.gameState || null)
-          : (result.state || room.gameState || null);
+          : ((result.omitAuthoritativeState || (result.skip && result.uiOnly))
+            ? (room.gameState || null)
+            : (result.state || room.gameState || null));
         const ackPayload = {
           ok: true,
           seq: room.actionSeq,
@@ -1343,6 +1510,14 @@ io.on("connection", (socket) => {
           presentation: result.presentation || null,
           presentationEnvelope: result.presentationEnvelope || null,
           turnDeadline: room.turnDeadline || null,
+          // Lote F: uma suspensão encadeada ficou aberta (C-A06/C-A07).
+          ...(room.mpPendingReactive
+            ? {
+              suspended: true,
+              qid: room.mpPendingReactive.qid,
+              expiresAt: room.mpPendingReactive.expiresAt,
+            }
+            : {}),
         };
         if (clientActionId) {
           room._ackedClientActions.set(`${seat}:${clientActionId}`, ackPayload);
@@ -1448,13 +1623,15 @@ io.on("connection", (socket) => {
             for (let s = 0; s < 2; s++) {
               const sid = room.sockets[s];
               if (!sid || sid === socket.id) continue;
-              const peerEnv = attachPeerStateDiff(
+              let peerEnv = attachPeerStateDiff(
                 room,
                 envelope,
                 s,
                 projectStateForSeat,
                 recordStateDiff,
               );
+              // C-B03: fog no DRAW do oponente (cópia rasa — envelope compartilhado).
+              if (peerEnv?.events) peerEnv = { ...peerEnv, events: projectEventsForSeat(peerEnv.events, s) };
               io.to(sid).emit("remote_action", peerEnv);
             }
             await mirrorRoomNow(room);

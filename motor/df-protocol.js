@@ -24,8 +24,13 @@ export const ACTION_TYPES = Object.freeze({
     REACTIVE_COUNTER_QUERY: "REACTIVE_COUNTER_QUERY",
     REACTIVE_COUNTER_ANSWER: "REACTIVE_COUNTER_ANSWER",
     ON_ENTER_RESOLVE: "ON_ENTER_RESOLVE",
+    /** C-A09: o ritual foi cancelado por EXAUSTÃO ANTES do sacrifício — a
+     * carta fica na mão com BOLHAS por 2 rodadas (offline 1.51.48). */
+    RITUAL_EXHAUSTED: "RITUAL_EXHAUSTED",
     TALENT_START: "TALENT_START",
     TALENT_TARGET: "TALENT_TARGET",
+    /** Resolve um talento AUTO (sem alvo) — chama applyTalentAuto (P1). */
+    TALENT_AUTO: "TALENT_AUTO",
     /** Limpa activeTalent + move carta ao discard (pós-resolve MP). Sem reaplicar efeito. */
     TALENT_DISCARD: "TALENT_DISCARD",
     ABILITY_START: "ABILITY_START",
@@ -34,7 +39,6 @@ export const ACTION_TYPES = Object.freeze({
     ULTIMATE_TARGET: "ULTIMATE_TARGET",
     MENU_CHOICE: "MENU_CHOICE",
     NECROMANCIA_PICK: "NECROMANCIA_PICK",
-    UNFREEZE_CONFIRM: "UNFREEZE_CONFIRM",
     OPEN_DISCARD: "OPEN_DISCARD",
     SYNC_STATE: "SYNC_STATE",
     ULTIMATE_PLAY: "ULTIMATE_PLAY",
@@ -63,6 +67,7 @@ export const REQUIRES_NORMAL_PHASE = new Set([
     ACTION_TYPES.ATTACK_START,
     ACTION_TYPES.ATTACK_RESOLVE,
     ACTION_TYPES.TALENT_START,
+    ACTION_TYPES.TALENT_AUTO,
     ACTION_TYPES.ABILITY_START,
     ACTION_TYPES.ULTIMATE_START,
     ACTION_TYPES.DRAW_CARD,

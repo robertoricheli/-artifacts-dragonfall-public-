@@ -31,7 +31,6 @@ const PLAYER_KEYS = [
   "onEnterUsedThisTurn",
   "lastDestroyedSummon",
   "destroyedChampions",
-  "maldicaoForgetNext",
   "wallActive",
   "necromanciaPending",
 ];
@@ -164,7 +163,16 @@ export function attachPeerStateDiff(room, envelope, seat, projectFn, recordFn = 
   const useDiff = String(process.env.DF_STATE_DIFF || "1") !== "0";
   const actType = envelope?.action?.type;
   // SUMMON/END_TURN: full state — evita peer sem campo por patch dropado.
-  const forceFull = actType === "SUMMON" || actType === "END_TURN";
+  // Retomada reativa (broadcastResume): full state — o cliente aplica o
+  // estado cheio de forma síncrona (t_865: o patch caía na fila remota
+  // atrás da sequência de início de turno e o uso gasto não aparecia).
+  const forceFull =
+    actType === "SUMMON" ||
+    actType === "END_TURN" ||
+    envelope?.forceFullState === true;
+  const forceReason = envelope?.forceFullState === true
+    ? "force_resume"
+    : "force_" + String(actType || "action").toLowerCase();
 
   if (!room._peerProj) room._peerProj = [null, null];
   if (!room._peerProjSeq) room._peerProjSeq = [0, 0];
@@ -178,7 +186,7 @@ export function attachPeerStateDiff(room, envelope, seat, projectFn, recordFn = 
     if (typeof recordFn === "function") {
       recordFn({
         mode: "full",
-        reason: "force_" + String(actType || "action").toLowerCase(),
+        reason: forceReason,
         roomCode: room.code,
         seat,
         seq,
@@ -189,7 +197,7 @@ export function attachPeerStateDiff(room, envelope, seat, projectFn, recordFn = 
     out = {
       ...envelope,
       authoritativeState: projected,
-      stateDiff: { seq, full: true, reason: "force_" + String(actType || "action").toLowerCase() },
+      stateDiff: { seq, full: true, reason: forceReason },
     };
     room._peerProj[seat] = projected;
     room._peerProjSeq[seat] = seq;

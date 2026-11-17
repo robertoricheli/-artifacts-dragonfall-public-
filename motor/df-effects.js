@@ -78,6 +78,14 @@ function planOnEnter(state, casterIdx, fieldIdx) {
     const rules = R();
     const ctx = { ...(rules?.summonContextForPlayer(state, casterIdx) || {}), fieldIdx };
     const leg = canOnEnter(state, casterIdx, caster, ctx);
+    // t_941 (Lote F, C-B17): o invokeDragon com o campo cheio NÃO é
+    // "blocked" — o caso no applyOnEnter já trata o teto emitindo
+    // FIELD_FULL_DRAGON (espelho do offline: "Campo cheio: não há
+    // espaço para FILHOTE DE DRAGÃO"). Classificar como blocked fazia
+    // o loop de auto-resolução engolir o pending em silêncio e o
+    // evento nunca chegava a nenhum dos dois jogadores.
+    if (caster?.onEnter === "invokeDragon" && leg && !leg.ok && leg.code === "FIELD_FULL_DRAGON")
+        return { ok: true, mode: "visual_only", ability: "invokeDragon" };
     if (leg && !leg.ok)
         return { ok: false, code: leg.code, mode: "blocked" };
     const spec = getOnEnter(caster.onEnter);
@@ -124,6 +132,34 @@ function applyTalentDiscard(state, pIdx) {
     return resolveApi()?.applyTalentDiscard?.(state, pIdx)
         || { ok: false, state, events: [], error: "NO_TALENT_DISCARD_RESOLVE" };
 }
+// Lote F — Bloco 2 (C-A07/C-A08): split planejar/aplicar das reduções
+// (RAIO/CHUVA) e descarte de talento sem custo (CONTRAMÁGICA na IA).
+// Mesmo padrão dos wrappers acima: delegam ao DfEffectsResolve.
+function applyPlannedReduction(state, reduction, opts) {
+    return resolveApi()?.applyPlannedReduction?.(state, reduction, opts)
+        || { ok: false, state, events: [], error: "NO_PLANNED_REDUCTION_RESOLVE" };
+}
+function finishRaioDuplo(state, finish, applied) {
+    return resolveApi()?.finishRaioDuplo?.(state, finish, applied)
+        || { ok: false, state, events: [], error: "NO_RAIO_FINISH_RESOLVE" };
+}
+function finishChuvaDeCometas(state, finish, applied) {
+    return resolveApi()?.finishChuvaDeCometas?.(state, finish, applied)
+        || { ok: false, state, events: [], error: "NO_CHUVA_FINISH_RESOLVE" };
+}
+function discardTalentFromHand(state, pIdx, handIdx) {
+    return resolveApi()?.discardTalentFromHand?.(state, pIdx, handIdx)
+        || { ok: false, state, events: [], error: "NO_TALENT_DISCARD_HAND_RESOLVE" };
+}
+// Lote F — Proposta 05 (C-A14/C-M09): pré-cheque do RESSUSCITAR (P2 no
+// descarte) e restore do campeão original na Necromancia.
+// Mesmo padrão dos wrappers acima: delegam ao DfEffectsResolve.
+function hasRessuscitarTarget(state, pIdx) {
+    return resolveApi()?.hasRessuscitarTarget?.(state, pIdx) || false;
+}
+function restoreChampionFromDef(card) {
+    return resolveApi()?.restoreChampionFromDef?.(card) || null;
+}
 function bootstrapRegistry() {
     const rules = R();
     if (!rules)
@@ -133,13 +169,13 @@ function bootstrapRegistry() {
         registerOnEnter(key, { tags: ["enemy"], legal: defaultLegal });
     });
     [
-        "pesadelo", "roubar", "desacelerar", "maldicaoSeteMares", "trocaInjusta",
+        "pesadelo", "roubar", "desacelerar", "bolhas", "trocaInjusta",
         "fortalecer", "devorar", "bolaDeFogo", "assassinar", "necromancia",
         "imitar", "ursificacao", "transformarBichinho", "furia", "guardiao",
-        "fumacaToxica", "raioDuplo", "auraDeFogo", "auraAntiMagia",
+        "fumacaToxica", "raioDuplo", "auraAntiMagia",
         "defensor", "rajadaCongelante", "corromper",
         "mordidaVenenosa", "incendiar", "gritoDeGuerra",
-        "invokeDragon", "invokeCubicDragon", "rapidez",
+        "invokeDragon", "rapidez",
     ].forEach((key) => {
         if (!getOnEnter(key))
             registerOnEnter(key, { legal: defaultLegal });
@@ -186,5 +222,11 @@ const DfEffects = {
     applyTalentTarget,
     applyTalentAuto,
     applyTalentDiscard,
+    applyPlannedReduction,
+    finishRaioDuplo,
+    finishChuvaDeCometas,
+    discardTalentFromHand,
+    hasRessuscitarTarget,
+    restoreChampionFromDef,
 };
 export { DfEffects };

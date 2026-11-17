@@ -411,7 +411,17 @@ async function authRegister(req, body) {
   };
   ensureCollection(player);
   setPlayerPassword(player, password);
-  await insertPlayer(player);
+  try {
+    await insertPlayer(player);
+  } catch (err) {
+    // Corrida: outro registro com o mesmo e-mail passou no pré-check e
+    // inseriu primeiro — violação de unique (23505) vira 409 limpo, nunca
+    // derruba o processo (fix registro duplicado, 2026-11-16).
+    if (err && (err.code === "23505" || err.constraint === "df_players_email_key")) {
+      return { status: 409, data: { ok: false, error: "EMAIL_IN_USE" } };
+    }
+    throw err;
+  }
   const token = await createSession(id);
   const saved = await getPlayerById(id);
   recordActivity(id, "register");

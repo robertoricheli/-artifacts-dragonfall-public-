@@ -25,6 +25,23 @@ function cloneCard(c) {
   return JSON.parse(JSON.stringify(c));
 }
 
+function slugName(n) {
+  const s = String(n || "carta").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return s || "carta";
+}
+
+// uid estável por carta (Lote F, bug #2 — duplo descarte de talento):
+// o motor clona o estado por JSON a cada ação (cloneState, df-engine.js),
+// então a identidade de referência se perde; o dedupe do clearActive
+// (C-B16) só funciona com uid. Sem uid, o talento ia ao descarte 2×.
+// O uid NÃO vaza para o oponente: mão/deck adversários são fog
+// (projectStateForSeat). O deck é único por nome, então p+nome é único.
+function assignDeckUids(deck, p) {
+  for (const c of deck || []) {
+    if (c && !c.uid) c.uid = `u-p${p}-${slugName(c.name)}`;
+  }
+}
+
 function buildDecks(state, cardDefs, deckSeed, deckCardNames) {
   const playable = cardDefs.filter((c) => !c.hidden);
   const byName = new Map();
@@ -49,6 +66,7 @@ function buildDecks(state, cardDefs, deckSeed, deckCardNames) {
       if (deck.length >= 10) {
         state.players[p].deck = deck;
         state.players[p].discard = [];
+        assignDeckUids(state.players[p].deck, p);
         const seed = deckSeed != null ? (deckSeed + p * 9973) >>> 0 : null;
         if (seed != null) shuffleInPlace(state.players[p].deck, mulberry32(seed));
         else shuffleInPlace(state.players[p].deck, Math.random);
@@ -57,6 +75,7 @@ function buildDecks(state, cardDefs, deckSeed, deckCardNames) {
     }
     state.players[p].deck = uniqueByName.map(cloneCard);
     state.players[p].discard = [];
+    assignDeckUids(state.players[p].deck, p);
     const seed = deckSeed != null ? (deckSeed + p * 9973) >>> 0 : null;
     if (seed != null) shuffleInPlace(state.players[p].deck, mulberry32(seed));
     else shuffleInPlace(state.players[p].deck, Math.random);

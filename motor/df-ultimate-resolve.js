@@ -14,15 +14,17 @@ function data() {
     return D;
 }
 export function getMaxUltimateUses(heroId) {
+    // C-A21: Frosty (1.51.50), Bastion (1.51.53) e Hércules/Diablos (1.51.65)
+    // têm 4 usos no offline; a tabela do servidor estava desatualizada (3).
     const four = new Set([
         "vaughan", "linguarudo", "pirate", "euravia",
-        "thor",
+        "thor", "iceWitch", "ironGuard", "hercules", "diablos",
     ]);
     const three = new Set([
-        "iceWitch", "princesaSlime", "jekiro", "sangueDragao", "gancho",
+        "princesaSlime", "jekiro", "sangueDragao", "gancho",
         "paladino", "alquimista", "valmont", "tecnomago",
-        "quimera", "hercules", "sinistrela", "estrelar",
-        "ironGuard", "diablos", "tristana",
+        "quimera", "sinistrela", "estrelar",
+        "tristana",
     ]);
     if (four.has(heroId))
         return 4;
@@ -40,7 +42,8 @@ function heroDef(heroId) {
     return data().heroDefs.find((h) => h.id === heroId) || null;
 }
 function allyCanGainPower(c) {
-    return !!c;
+    // C-A20 (offline game_state.gd:1651,1655): APODRECIDA nunca ganha Poder.
+    return !!c && !c.podridao && c.name !== "APODRECIDA" && c.talentEffect !== "apodrecidaDescarte";
 }
 function isPower1Champ(c) {
     return !!c && (c.currentPower ?? c.power) === 1;
@@ -66,31 +69,35 @@ export function canReuseInstant(state, pid, fieldIdx) {
     const ctx = R.summonContextForPlayer?.(sim, pid) || {};
     return R.canOnEnterResolve ? !!R.canOnEnterResolve(sim, pid, sc, { ...ctx, fieldIdx }).ok : true;
 }
-function cannotReceiveInvestida(c) {
-    const R = rules();
-    const prisao = !!c?.prisaoPrismatica && !c?.silenced;
-    return c && (c.name === "BANJO" || (R.isPesadoDemais?.(c) ?? false) || prisao);
+// S2-M16 (MEMORY.md 1.51.47 item 6; offline game_state.gd:1401-1404): o próprio
+// campeão ENFEITIÇADO no campo adversário nunca é alvo de Ultimate (nem de
+// dano, nem de roubo, nem de troca, nem de área). O cliente já filtra na mira
+// (ultimate_targets); aqui o servidor rejeita/filtra de verdade.
+function isOwnCharmed(champ, pid) {
+    return !!champ?.charme && champ.charmeOriginalOwner === pid;
 }
 function championBanishable(c) {
-    const R = rules();
-    return (R.championPrintedPower?.(c) ?? (c.basePower ?? c.power)) <= 2;
+    // Offline (game_state.gd:1659, mira :2338): Poder ATUAL (com
+    // buffs/debuffs), não o impresso.
+    return (c?.currentPower ?? c?.power ?? 0) <= 2;
 }
 function newUid(prefix = "u") {
     return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 }
-function consumeBarrier(champ) {
-    if (!champ?.barrier)
-        return false;
-    champ.barrier = false;
-    champ.barrierTurns = 0;
-    return true;
-}
-function reducePower(champ, amount) {
+function reducePower(champ, amount, opts) {
     const R = rules();
     if (R.reduceChampionPower)
-        return R.reduceChampionPower(champ, amount);
+        return R.reduceChampionPower(champ, amount, opts);
+    if (!champ)
+        return { dissolvedWall: false, blockedByBarrier: false };
+    // C-A17 (fallback defensivo, sem o motor ligado): Barreira e apodrecida
+    // bloqueiam como no reduceChampionPower central (df-rules.js).
+    if (champ.podridao || champ.name === "APODRECIDA" || champ.talentEffect === "apodrecidaDescarte")
+        return { dissolvedWall: false, blockedByBarrier: false };
+    if (champ.barrier || champ.barrierPermanent || (champ.barrierTurns ?? 0) !== 0)
+        return { dissolvedWall: false, blockedByBarrier: true };
     champ.currentPower = Math.max(0, (champ.currentPower ?? 0) - amount);
-    return { dissolvedWall: false };
+    return { dissolvedWall: false, blockedByBarrier: false };
 }
 function inferConstantOnDestroy(champ) {
     if (!champ || champ.silenced)
@@ -135,7 +142,9 @@ function destroyChampion(state, ownerIdx, fieldIdx, killerIdx, opts = {}, events
     const noHonor = rules().hasNoHonor
         ? rules().hasNoHonor(target)
         : resolveOnDestroy(target) === "noHonor" && !target.silenced;
-    if (killerIdx != null && !opts.noVpOnKill && !noHonor) {
+    // Offline destroy_champion: PV só quando by_pi != owner_pi — a POÇÃO
+    // que destrói o próprio aliado e o COMETA nos próprios não dão PV.
+    if (killerIdx != null && killerIdx !== ownerIdx && !opts.noVpOnKill && !noHonor) {
         state.players[killerIdx].vp =
             (state.players[killerIdx].vp ?? 0) + 1;
         events.push({ type: "VP_GAIN", playerId: killerIdx, amount: 1, reason: opts.reason || "destroy" });
@@ -157,8 +166,10 @@ function destroyChampion(state, ownerIdx, fieldIdx, killerIdx, opts = {}, events
             const pick = enemies[Math.floor(rng() * enemies.length)];
             const victim = state.players[pick.p]?.field?.[pick.i];
             if (victim) {
-                reducePower(victim, 1);
-                if (victim.currentPower <= 0) {
+                // C-A02: a VINGANÇA reduz fora do turno do dono da vítima.
+                const vingBefore = victim.currentPower ?? 0;
+                reducePower(victim, 1, { ownerP: pick.p, currentP: state.currentPlayer, preserveWallBuff: state.currentPlayer === pick.p });
+                if (victim.currentPower <= 0 && vingBefore > 0) {
                     destroyChampion(state, pick.p, pick.i, null, { noVpOnKill: true }, events, rng);
                 }
             }
@@ -173,33 +184,13 @@ function destroyChampion(state, ownerIdx, fieldIdx, killerIdx, opts = {}, events
                 ben.currentPower = (ben.currentPower ?? 0) + 1;
         }
     }
-    if (target.fireAura && target.fireAuraTurns > 0 && !target.silenced) {
-        const enemies = [];
-        for (let p = 0; p < (state.playersCount ?? state.players.length); p++) {
-            if (p === ownerIdx)
-                continue;
-            (state.players[p]?.field || []).forEach((c, i) => {
-                if (c)
-                    enemies.push({ p, i });
-            });
-        }
-        if (enemies.length) {
-            const pick = enemies[Math.floor(rng() * enemies.length)];
-            const victim = state.players[pick.p]?.field?.[pick.i];
-            if (victim) {
-                reducePower(victim, 1);
-                if (victim.currentPower <= 0) {
-                    destroyChampion(state, pick.p, pick.i, null, { noVpOnKill: true, reason: "fireAura" }, events, rng);
-                }
-            }
-        }
-    }
     const burst = rules().applyOnDestroyBurst?.(state, ownerIdx, target, reason, rng);
     if (burst?.ability) {
         events.push({
             type: "ON_DESTROY_BURST",
             ownerIdx,
             source: target.name,
+            uid: target.uid,
             reason,
             ...burst,
         });
@@ -208,63 +199,65 @@ function destroyChampion(state, ownerIdx, fieldIdx, killerIdx, opts = {}, events
 }
 function pickTrickerySwapTarget(state, casterIdx, rng) {
     const pow2 = [];
-    const pow3plus = [];
-    const pow1 = [];
     for (let ep = 0; ep < (state.playersCount ?? state.players.length); ep++) {
         if (ep === casterIdx)
             continue;
         (state.players[ep]?.field || []).forEach((c, i) => {
-            const pw = c.currentPower;
-            if (pw === 2)
+            if (c.currentPower === 2)
                 pow2.push({ p: ep, i });
-            else if (pw >= 3)
-                pow3plus.push({ p: ep, i });
-            else if (pw === 1)
-                pow1.push({ p: ep, i });
         });
     }
-    const pool = pow2.length ? pow2 : (pow3plus.length ? pow3plus : pow1);
-    if (!pool.length)
+    if (!pow2.length)
         return null;
-    return pool[Math.floor(rng() * pool.length)];
+    return pow2[Math.floor(rng() * pow2.length)];
 }
 function performTrickerySwap(state, casterIdx, allyI, enemyP, enemyI) {
     const a = state.players[casterIdx]?.field?.[allyI];
     const e = state.players[enemyP]?.field?.[enemyI];
     if (!a || !e)
         return;
-    for (const ch of [a, e]) {
-        ch.freeAttack = false;
-        if (!ch.shieldedPermanent) {
-            ch.shielded = false;
-            ch.shieldedTurns = 0;
-        }
-        ch.guerraBuff = false;
-        ch.guerraBuffTurns = 0;
-    }
+    // Offline (_swap_champions, game_state.gd:4648-4673): os status
+    // viajam no dicionário — nada é limpo. Só cansa e troca o dono.
+    // (D2 verificado: TRICKERY_SWAP não emite ON_ENTER_PENDING, então
+    // nenhum on-enter re-dispara — sem flag troca_born necessária.)
+    a.tapped = true;
+    e.tapped = true;
+    a.owner = enemyP;
+    e.owner = casterIdx;
     const aSlot = a.slot;
     a.slot = e.slot;
     e.slot = aSlot;
     state.players[casterIdx].field[allyI] = e;
     state.players[enemyP].field[enemyI] = a;
 }
+// C5-02 (decisão dela, 2026-11-17 ~06:04): o Gancho puxa QUALQUER
+// campeão de Poder 1 ou 2, com qualquer habilidade/status, INCLUSIVE
+// com proteção temporária (PROTEÇÃO do Bastion, shieldedTurns > 0) ou
+// permanente (Defensor). Único critério: Poder 1 ou 2. SEM veto de
+// escudo — o veto antigo (`shielded && shieldedTurns > 0`) foi
+// removido. O sorteio é UNIFORME sobre o pool inteiro — sem
+// ponderação por Poder.
+function isHookEligible(c, casterIdx) {
+    if (!c || isOwnCharmed(c, casterIdx))
+        return false;
+    if (c.currentPower !== 1 && c.currentPower !== 2)
+        return false;
+    if (c.podridao || c.name === "APODRECIDA" || c.talentEffect === "apodrecidaDescarte")
+        return false;
+    return true;
+}
 function pickHookTarget(state, casterIdx, rng) {
-    const pow1 = [];
-    const pow2 = [];
+    const pool = [];
     for (let p = 0; p < (state.playersCount ?? state.players.length); p++) {
         if (p === casterIdx)
             continue;
         (state.players[p]?.field || []).forEach((c, i) => {
-            if (c.currentPower === 1)
-                pow1.push({ p, i });
-            else if (c.currentPower === 2)
-                pow2.push({ p, i });
+            if (isHookEligible(c, casterIdx))
+                pool.push({ p, i });
         });
     }
-    if (!pow1.length && !pow2.length)
+    if (!pool.length)
         return null;
-    const usePow1 = pow1.length > 0 && (pow2.length === 0 || rng() < 0.65);
-    const pool = usePow1 ? pow1 : pow2;
     return pool[Math.floor(rng() * pool.length)];
 }
 function pickPaladinoPower2Discard(state, pIdx, rng) {
@@ -287,7 +280,9 @@ function pickPaladinoPower2Discard(state, pIdx, rng) {
     });
     if (!pool.length)
         return null;
-    return pool[Math.floor(rng() * pool.length)];
+    // Offline (game_state.gd:1583): o ÚLTIMO P2 do descarte (o mais
+    // recentemente descartado), não um sorteio.
+    return pool[pool.length - 1];
 }
 function paladinoRevive(state, pIdx, pick, events) {
     const pl = state.players[pIdx];
@@ -297,9 +292,12 @@ function paladinoRevive(state, pIdx, pick, events) {
     const dIdx = pl.discard.indexOf(pick.ref);
     if (dIdx >= 0)
         pl.discard.splice(dIdx, 1);
-    const isConstant = pick.baseDef.abilityType === "constant" || !!pick.baseDef.constantEffect;
     // Zerar TODOS os status: flag residual (ex.: barrier) vinda do cardDef fazia a
     // Barreira fantasma absorver a Ultimate do Rei Bomba no campeão revivido.
+    // C-N5 (offline game_state.gd:1595-1599): o ANTI-MAGOS revivido volta
+    // COM a Barreira permanente da Aura Anti-Magia.
+    // C-N6 (offline _reset_champion): o revivido mantém o CRESCIMENTO da
+    // Força Infinita (a carta vai ao descarte com ult_growth=true).
     const revived = {
         ...pick.baseDef,
         uid: newUid(),
@@ -309,30 +307,46 @@ function paladinoRevive(state, pIdx, pick, events) {
         isToken: false,
         frozen: false, frozenTurns: 0, freeAttack: false,
         shielded: false, shieldedTurns: 0, shieldedPermanent: false,
-        barrier: false, barrierTurns: 0, barrierPermanent: false,
+        barrier: pick.baseDef.onEnter === "auraAntiMagia",
+        barrierTurns: 0,
+        barrierPermanent: pick.baseDef.onEnter === "auraAntiMagia",
         poisoned: false, poisonTurns: 0, poisonedByP: -1,
         burning: false, burningTurns: 0, burningByP: undefined,
-        fireAura: false, fireAuraTurns: 0,
         vulnerable: false, wallBuff: false,
-        guerraBuff: false, guerraBuffTurns: 0,
         fury: false, furyTurns: 0, furyStacks: 0, furyBonusActive: false,
-        pulled: false, pulledFromOwner: -1, pulledTurns: 0,
         tiroDuploUsedThisTurn: false,
-        silenced: !isConstant,
+        foreverGrowth: !!pick.ref?.foreverGrowth,
+        // Offline (_reset_champion, game_state.gd:5052): ressuscitar
+        // limpa TODOS os status, incluindo SILÊNCIO. A instantânea
+        // não re-dispara por ressuscitar_born (ver D1), não
+        // por silêncio — e o revivido volta elegível a REUTILIZAÇÃO.
+        // (D1 verificado: paladinoRevive emite SUMMON sem
+        // ON_ENTER_PENDING — nenhum on-enter re-dispara.)
+        silenced: false,
     };
     pl.field.push(revived);
+    // C-A02: o revivido é uma NOVA entrada — se for fonte de INSPIRAR,
+    // limpa o bloqueio dos vizinhos dele.
+    if (R.hasInspirar?.(revived)) R.clearInspirarBrokenForNeighbors?.(state, pIdx, pl.field.length - 1);
     events.push({ type: "SUMMON", playerId: pIdx, fieldIdx: pl.field.length - 1, card: revived, reason: "paladinoUlt" });
     return true;
 }
 function drawCardFree(state, pIdx, events) {
     const pl = state.players[pIdx];
     const R = rules();
-    if (pl.hand.length >= (R.LIMITS.MAX_HAND ?? 8))
-        return false;
     const deck = pl.deck;
+    // SEM-QUEIMA (2026-11-15 — REVOGA S2-B17): com a mão cheia o saque
+    // não acontece — a carta permanece no baralho e nenhum evento DRAW
+    // é emitido; a Ultimate continua gasta.
+    if (pl.hand.length >= (R.LIMITS.MAX_HAND ?? 8))
+        return true;
     const card = deck.pop();
     if (!card)
         return false;
+    // C-N9 (offline draw_cards, game_state.gd:728-738): TODO saque marca
+    // BOLHAS — inclusive o saque da CONJURAÇÃO.
+    if (pl.bolhasActive && card?.category === "champion")
+        card.bolhas = true;
     pl.hand.push(card);
     events.push({ type: "DRAW", playerId: pIdx, card, reason: "ultimate" });
     return true;
@@ -382,10 +396,8 @@ function scareReturn(state, pIdx, targetP, targetI, events) {
     champ.freeAttack = false;
     champ.shielded = false;
     champ.shieldedTurns = 0;
+    champ.shieldedPermanent = false;
     champ.silenced = false;
-    champ.pulled = false;
-    champ.pulledFromOwner = -1;
-    champ.pulledTurns = 0;
     champ.poisoned = false;
     champ.poisonTurns = 0;
     champ.poisonedByP = -1;
@@ -394,8 +406,6 @@ function scareReturn(state, pIdx, targetP, targetI, events) {
     champ.barrier = false;
     champ.barrierTurns = 0;
     champ.barrierPermanent = false;
-    champ.fireAura = false;
-    champ.fireAuraTurns = 0;
     champ.burning = false;
     champ.burningTurns = 0;
     champ.burningByP = undefined;
@@ -405,19 +415,34 @@ function scareReturn(state, pIdx, targetP, targetI, events) {
     champ.furyBonusActive = false;
     champ.wallBuff = false;
     champ.foreverGrowth = false;
-    champ.guerraBuff = false;
-    champ.guerraBuffTurns = 0;
+    // 5ª auditoria A5-03/A5-04/A5-05 (rodada 9): o reset da Ultimate
+    // esquecia estes campos que o talento AMEDRONTAR limpa
+    // (bounceChampionToHand, df-rules.js) — o re-invocado voltava com
+    // INSPIRAR fantasma (poder base−1 ou sem receber de novo),
+    // SOBREPUJAR ou a Proteção permanente do DEFENSOR. A `inspiracao`
+    // é recalculada pelo recalcInspirar ao entrar em campo.
+    champ.inspirarBuff = 0;
+    champ.inspiracao = false;
+    champ.inspirarBroken = false;
+    champ.tecnicasSobrepujar = false;
+    champ.tecnicasSobrepujarTurns = 0;
     champ.charme = false;
     champ.charmeTurns = 0;
     champ.charmeOriginalOwner = -1;
     champ.prisaoPrismatica = false;
     champ.desafianteAtivo = false;
     champ.onEnterConsumed = false;
-    // Manual §9: mão cheia (8) → a carta não volta e sai do jogo.
+    // Offline (_return_scare, game_state.gd:2933-2942): mão cheia (8)
+    // → a carta vai ao DESCARTE do dono (o log diz "exilado", mas o
+    // código descarta — de onde pode voltar via Necromancia/Retorno).
     const maxHand = rules().LIMITS?.MAX_HAND ?? 8;
     const exiled = (owner.hand.length ?? 0) >= maxHand;
-    if (!exiled)
+    if (!exiled) {
         owner.hand.push(champ);
+    } else {
+        owner.discard = owner.discard || [];
+        owner.discard.push(champ);
+    }
     events.push({
         type: "SCARE_RETURN", playerId: pIdx, targetP, targetI,
         card: champ.name, exiled,
@@ -458,20 +483,21 @@ export function validateUltimatePlay(state, action) {
                 return { ok: false, code: "BAD_TARGET" };
             if (!state.players[tp]?.field?.[ti])
                 return { ok: false, code: "INVALID_TARGET" };
-            if (ut === "targetEnemyFreeze" && state.players[tp].field[ti].frozen)
-                return { ok: false, code: "ALREADY_FROZEN" };
+            if (isOwnCharmed(state.players[tp].field[ti], pid))
+                return { ok: false, code: "OWN_CHARMED" };
             if (ut === "vampirism" && state.players[tp].field[ti].currentPower < 2)
                 return { ok: false, code: "INVALID_TARGET" };
             if (ut === "banish" && !championBanishable(state.players[tp].field[ti]))
                 return { ok: false, code: "INVALID_TARGET" };
-            if (ut === "poison" && state.players[tp].field[ti].poisoned)
-                return { ok: false, code: "ALREADY_POISONED" };
             if (ut === "scareReturn") {
                 const t = state.players[tp].field[ti];
                 if (t.currentPower > 2)
                     return { ok: false, code: "INVALID_TARGET" };
             }
-            if (ut === "vampirism" && !R.gatherAllyTargets(state, pid, -1, allyCanGainPower).length) {
+            // C-A20: o portão é "existe ALGUM aliado" (offline: mf não vazio);
+            // se o único aliado for APODRECIDA, o uso é permitido e só o +1
+            // fizzle (o apply já tolera allyI indefinido).
+            if (ut === "vampirism" && !R.gatherAllyTargets(state, pid, -1, (c) => !!c).length) {
                 return { ok: false, code: "NO_ALLY_ABSORBER" };
             }
             break;
@@ -482,6 +508,8 @@ export function validateUltimatePlay(state, action) {
                 return { ok: false, code: "BAD_TARGET" };
             if (!state.players[tp]?.field?.[ti])
                 return { ok: false, code: "INVALID_TARGET" };
+            if (isOwnCharmed(state.players[tp].field[ti], pid))
+                return { ok: false, code: "OWN_CHARMED" };
             break;
         case "targetAllyShield":
             if (!field.some((c) => isPower1Champ(c)))
@@ -504,9 +532,21 @@ export function validateUltimatePlay(state, action) {
                 return { ok: false, code: "BAD_TARGET" };
             if (!field[ti])
                 return { ok: false, code: "INVALID_TARGET" };
+            // Offline (game_state.gd:1450, :1470): apodrecida nunca é
+            // alvo válido de Ultimate de aliado. (A poção já passa
+            // por allyCanGainPower em :546; o FORTALECER não tinha
+            // checagem nenhuma. O predicado já exclui apodrecida
+            // desde C-A20 — aqui só a checagem explícita do alvo.)
+            if (ut === "targetAlly" && !allyCanGainPower(field[ti]))
+                return { ok: false, code: "INVALID_TARGET" };
             if (ut === "targetAllyFreeAttack") {
                 const t = field[ti];
-                if (cannotReceiveInvestida(t) || t.tapped || t.frozen)
+                // Offline (game_state.gd:1470, mira :2313): a mira só
+                // veta apodrecida e CANSADO (tapped, 1.51.47 item 4).
+                // URSO PESADO / Pesado Demais / Prisão NÃO são vetos aqui
+                // (C-M34); CONGELADO também não (S2-B18 — não
+                // reintroduzir).
+                if (t.podridao || t.name === "APODRECIDA" || t.talentEffect === "apodrecidaDescarte" || t.tapped)
                     return { ok: false, code: "INVALID_TARGET" };
             }
             if (ut === "potion" && !allyCanGainPower(field[ti]))
@@ -521,8 +561,9 @@ export function validateUltimatePlay(state, action) {
                 return { ok: false, code: "NO_SWAP_TARGET" };
             break;
         case "drawCard":
-            if (pl.hand.length >= (R.LIMITS.MAX_HAND ?? 8))
-                return { ok: false, code: "HAND_FULL" };
+            // SEM-QUEIMA (2026-11-15 — REVOGA S2-B17): sem portão de mão
+            // cheia — com a mão cheia o saque não acontece e a Ultimate
+            // continua gasta. O drawCardFree abaixo vira no-op.
             break;
         case "fireAndIce":
             if (!R.gatherEnemyTargets(state, pid, () => true).length)
@@ -533,7 +574,9 @@ export function validateUltimatePlay(state, action) {
                 return { ok: false, code: "FIELD_FULL" };
             break;
         case "hook":
-            if (!R.gatherEnemyTargets(state, pid, (c) => c.currentPower < 3).length) {
+            if (field.length >= (R.LIMITS?.MAX_FIELD ?? 6))
+                return { ok: false, code: "FIELD_FULL" };
+            if (!R.gatherEnemyTargets(state, pid, (c) => isHookEligible(c, pid)).length) {
                 return { ok: false, code: "NO_TARGETS" };
             }
             break;
@@ -543,29 +586,90 @@ export function validateUltimatePlay(state, action) {
             if (!pickPaladinoPower2Discard(state, pid, () => 0))
                 return { ok: false, code: "NO_DISCARD_TARGET" };
             break;
-        case "wallProtect":
-            if (!field.length)
-                return { ok: false, code: "NO_ALLIES" };
-            if (!field.some((c) => c && !c.wallBuff))
-                return { ok: false, code: "WALL_ALREADY" };
-            break;
         case "infinitePower":
-            if (!field.some((c) => allyCanGainPower(c) && !c.foreverGrowth))
-                return { ok: false, code: "NO_VALID_ALLY" };
-            break;
-        case "warOverpower":
+            // Offline (battle_screen.gd:11023-11025): só exige campo
+            // não vazio. Com todos já com CRESCIMENTO, o uso é
+            // consumido sem efeito (o apply não faz nada de novo).
             if (!field.length)
                 return { ok: false, code: "NO_ALLIES" };
+            break;
+        case "thunderDiscard":
+            // Offline (game_state.gd:1411-1414): sem cartas na mão do
+            // adversário a Ultimate não pode ser usada (uso preservado).
+            // Exige ao menos UM oponente com cartas (o apply descarta
+            // de cada oponente com mão não vazia).
+            if (!state.players.some((pl2, i) => i !== pid && (pl2.hand?.length ?? 0) > 0))
+                return { ok: false, code: "NO_HAND_CARDS" };
+            break;
+        case "cometStarfall":
+            // Offline (battle_screen.gd:11036-11040): sem campeões
+            // nos DOIS campos, a Ultimate não pode ser usada (uso
+            // preservado — mesma trava da TROVOADA, C-M31).
+            if (!state.players.some((pl2) => (pl2.field?.length ?? 0) > 0))
+                return { ok: false, code: "NO_TARGETS" };
             break;
         default:
             break;
     }
     return { ok: true, code: "OK" };
 }
-export function applyUltimatePlay(state, action, rng = Math.random) {
+/**
+ * C-A05 (Lote F): espelho de game_state.spend_ultimate_cancelled — gasta
+ * o uso SEM aplicar o efeito. Só chamado quando o defensor respondeu SIM
+ * à REACTIVE_CANCEL_QUERY (a Ultimate JÁ foi validada antes da suspensão;
+ * revalidar aqui é só guarda). Sem stats no servidor (D-1): o evento
+ * ULTIMATE_CANCELLED_SPENT é o registro.
+ */
+export function spendUltimateCancelled(state, action) {
     const check = validateUltimatePlay(state, action);
     if (!check.ok)
         return { ok: false, state, events: [], error: check.code };
+    const next = clone(state);
+    const pid = (action.playerId ?? state.currentPlayer);
+    const pl = next.players[pid];
+    pl.ultimateUses = (pl.ultimateUses ?? 0) + 1;
+    pl.usedUltimateThisTurn = true;
+    const events = [{
+            type: "ULTIMATE_CANCELLED_SPENT",
+            playerId: pid,
+            heroId: action.heroId || pl.heroId,
+            ultimateType: (heroDef(action.heroId || pl.heroId) || {}).ultimateType || null,
+        }];
+    return { ok: true, state: next, events };
+}
+
+export function applyUltimatePlay(state, action, rng = Math.random, opts = {}) {
+    const check = validateUltimatePlay(state, action);
+    if (!check.ok) {
+        // C-N4 (offline use_ultimate, game_state.gd:1416): o uso é gasto
+        // ANTES do match — com instantânea inválida (ex.: NECROMANCIA
+        // com descarte vazio) a REUTILIZAÇÃO resolve sem efeito e o uso
+        // é PERDIDO (o ramo offline só loga "descarte vazio"). As demais
+        // Ultimates preservam o uso quando a validação falha (TROVOADA /
+        // COMETA sem alvo, etc.) — só reuseInstant tem este caminho.
+        if (check.code === "INVALID_TARGET") {
+            const pid0 = (action.playerId ?? state.currentPlayer);
+            const hero0 = heroDef(action.heroId || state.players[pid0]?.heroId);
+            if (hero0?.ultimateType === "reuseInstant"
+                && action.targetP === pid0
+                && state.players[pid0]?.field?.[action.targetI]) {
+                const next = clone(state);
+                const pl = next.players[pid0];
+                pl.ultimateUses = (pl.ultimateUses ?? 0) + 1;
+                pl.usedUltimateThisTurn = true;
+                const c = next.players[pid0].field[action.targetI];
+                return { ok: true, state: next, events: [
+                    { type: "ULTIMATE_PLAY", playerId: pid0, ultimateType: "reuseInstant", heroId: action.heroId || pl.heroId },
+                    { type: "REUSE_INSTANT_FIZZLE", playerId: pid0, targetP: pid0, targetI: action.targetI,
+                        onEnter: c?.onEnter || null, card: c?.name || null, reason: "invalid_instant" },
+                ] };
+            }
+        }
+        return { ok: false, state, events: [], error: check.code };
+    }
+    // C-A06: skipPower = PROTEÇÃO DIVINA cancelou a redução (a Ultimate
+    // continua gasta — o gasto já aconteceu no início da função).
+    const skipPower = opts.skipPower === true || action.skipPower === true;
     const next = clone(state);
     const pid = (action.playerId ?? state.currentPlayer);
     const pl = next.players[pid];
@@ -582,17 +686,28 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
     switch (ut) {
         case "targetEnemy": {
             const t = next.players[tp].field[ti];
-            if (consumeBarrier(t))
-                break;
-            reducePower(t, 1);
-            if (t.currentPower <= 0)
+            const ultBefore = t.currentPower ?? 0;
+            // C-A06: com skipPower a redução nem é tentada (a Barreira não
+            // é tocada e o alvo não morre — a condição abaixo fica falsa).
+            // C-A17: sem skipPower, a Barreira bloqueia e PERMANECE (central).
+            if (!skipPower) {
+                const ultRes = reducePower(t, 1, { ownerP: tp, currentP: next.currentPlayer });
+                if (ultRes?.blockedByBarrier) {
+                    events.push({ type: "BARRIER_BLOCKED", targetP: tp, targetI: ti, source: "targetEnemy", visual: "barrier_block" });
+                    break;
+                }
+            }
+            if (t.currentPower <= 0 && ultBefore > 0)
                 destroyChampion(next, tp, ti, pid, { reason: "ultimate" }, events, rng);
             break;
         }
         case "targetEnemyFreeze": {
             const t = next.players[tp].field[ti];
             t.frozen = true;
-            t.frozenTurns = heroId === "iceWitch" ? 3 : 2;
+            // C-A18 (offline game_state.gd:1447): CONGELAR é sempre 3
+            // rodadas — só a Frosty/iceWitch usa targetEnemyFreeze.
+            const rounds = 3;
+            t.frozenTurns = Math.max(t.frozenTurns ?? 0, rounds);
             events.push({ type: "FREEZE", targetP: tp, targetI: ti, turns: t.frozenTurns });
             break;
         }
@@ -620,10 +735,11 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
         }
         case "incinerate": {
             const t = next.players[tp].field[ti];
-            if (t.barrier || t.barrierPermanent) {
-                events.push({ type: "INCINERATE", targetP: tp, targetI: ti, card: t.name, immune: true, applied: false });
-                break;
-            }
+            // C-A17: EM CHAMAS não é redução de Poder — a Barreira NÃO impede
+            // a aplicação (offline game_state.gd:1741-1742 aplica burn_turns=4
+            // sem checar Barreira; ela só bloqueia o -1 de cada tick, via
+            // reduceChampionPower central). A mira continua excluindo Barreira
+            // no cliente (online_actions.gd:641-645).
             t.burning = true;
             t.burningTurns = 4;
             t.burningByP = pid;
@@ -637,6 +753,13 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
             if (Array.isArray(used))
                 pl.onEnterUsedThisTurn = used.filter((k) => k !== c.onEnter);
             events.push({ type: "REUSE_INSTANT", targetP: pid, targetI: ti, onEnter: c.onEnter, card: c.name });
+            // C-A04 (offline ultReutilizar, 1.51.54 item 3): a instantânea
+            // re-dispara como se o aliado tivesse acabado de entrar — o
+            // mesmo ON_ENTER_PENDING da invocação. O motor auto-resolve
+            // "auto" no mesmo ack (df-authority usa applyActionWithOnEnter
+            // para ULTIMATE_*); "target"/"necromancia_pick" ficam
+            // pendentes para o cliente escolher, igual ao SUMMON.
+            events.push({ type: "ON_ENTER_PENDING", playerId: pid, fieldIdx: ti, onEnter: c.onEnter });
             break;
         }
         case "drawCard":
@@ -656,7 +779,7 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
                 if (ep === pid)
                     continue;
                 (next.players[ep]?.field || []).forEach((c, i) => {
-                    if (c)
+                    if (c && !isOwnCharmed(c, pid))
                         enemies.push({ p: ep, i, uid: String(c.uid) });
                 });
             }
@@ -673,8 +796,10 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
                 if (!a || a.uid !== f.uid)
                     continue;
                 a.frozen = true;
-                a.frozenTurns = 2;
-                events.push({ type: "FREEZE", targetP: f.p, targetI: f.i, turns: 2, source: "fireAndIce" });
+                // Offline (game_state.gd:1546): preserva o MAIOR
+                // congelamento — um congelado por 3 continua com 3.
+                a.frozenTurns = Math.max(a.frozenTurns ?? 0, 2);
+                events.push({ type: "FREEZE", targetP: f.p, targetI: f.i, turns: a.frozenTurns, source: "fireAndIce" });
             }
             for (const bSlot of burns) {
                 const arr = next.players[bSlot.p]?.field || [];
@@ -690,7 +815,10 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
                 const b = arr[bi];
                 if (!b)
                     continue;
-                if (consumeBarrier(b)) {
+                // C-A17: a Barreira bloqueia o -1 e PERMANECE (central).
+                const fogoBefore = b.currentPower ?? 0;
+                const fogoRes = reducePower(b, 1, { ownerP: bSlot.p, currentP: next.currentPlayer });
+                if (fogoRes?.blockedByBarrier) {
                     events.push({
                         type: "FIRE_AND_ICE_BURN",
                         targetP: bSlot.p,
@@ -701,8 +829,7 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
                     });
                     continue;
                 }
-                reducePower(b, 1);
-                const destroyed = (b.currentPower ?? 0) <= 0;
+                const destroyed = (b.currentPower ?? 0) <= 0 && fogoBefore > 0;
                 events.push({
                     type: "FIRE_AND_ICE_BURN",
                     targetP: bSlot.p,
@@ -720,20 +847,36 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
             summonDragonToken(next, pid, events);
             break;
         case "hook": {
-            const stolen = pickHookTarget(next, pid, rng);
+            // Respeita a mira: se tp/ti apontam um alvo elegível, ele
+            // vale (offline: o alvo rolado na tela é honrado); senão,
+            // sorteio uniforme sobre o pool elegível.
+            let stolen = null;
+            const aimed = (tp != null && ti != null) ? next.players[tp]?.field?.[ti] : null;
+            if (aimed && isHookEligible(aimed, pid) && tp !== pid)
+                stolen = { p: tp, i: ti };
+            else
+                stolen = pickHookTarget(next, pid, rng);
             if (!stolen)
                 break;
+            if (pl.field.length >= (R.LIMITS?.MAX_FIELD ?? 6))
+                break; // defesa em profundidade (a validação já trava)
             const srcField = next.players[stolen.p].field;
             const tgt = srcField[stolen.i];
             srcField.splice(stolen.i, 1);
-            tgt.pulled = false;
-            tgt.pulledFromOwner = -1;
-            tgt.pulledTurns = 0;
-            tgt.guerraBuff = false;
-            tgt.guerraBuffTurns = 0;
             tgt.tapped = true;
             pl.field.push(tgt);
             events.push({ type: "HOOK_STEAL", fromP: stolen.p, fromI: stolen.i, toP: pid });
+            // U-C04 (offline game_state.gd hook: champion_summoned sem
+            // ressuscitar_born): o campeão roubado entra como se fosse
+            // invocado — a instantânea re-dispara. Re-arme o consumo e
+            // emita o pending (o loop de applyActionWithOnEnter resolve
+            // auto no mesmo ack ou deixa pendente p/ o humano, como num
+            // SUMMON normal). O RETORNO não faz isto (ressuscitar_born
+            // bloqueia a entrada — intocado).
+            if (tgt.onEnter) {
+                tgt.onEnterConsumed = false;
+                events.push({ type: "ON_ENTER_PENDING", playerId: pid, fieldIdx: pl.field.indexOf(tgt), onEnter: tgt.onEnter });
+            }
             break;
         }
         case "resurrect": {
@@ -744,17 +887,19 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
         }
         case "potion": {
             const t = next.players[tp].field[ti];
-            const success = rng() < 0.6;
+            const success = rng() < 0.7;
             if (success) {
                 t.currentPower = (t.currentPower ?? 0) + 2;
                 events.push({ type: "POTION_SUCCESS", targetP: tp, targetI: ti });
             }
             else {
-                if (!consumeBarrier(t)) {
-                    reducePower(t, 1);
-                    if (t.currentPower <= 0)
-                        destroyChampion(next, tp, ti, pid, { reason: "potion" }, events, rng);
-                }
+                // C-A17: a Barreira bloqueia o -1 e PERMANECE (central).
+                const pocaoBefore = t.currentPower ?? 0;
+                const pocaoRes = reducePower(t, 1, { ownerP: tp, currentP: next.currentPlayer, preserveWallBuff: tp === pid });
+                if (pocaoRes?.blockedByBarrier)
+                    events.push({ type: "BARRIER_BLOCKED", targetP: tp, targetI: ti, source: "potion", visual: "barrier_block" });
+                else if (t.currentPower <= 0 && pocaoBefore > 0)
+                    destroyChampion(next, tp, ti, pid, { reason: "potion" }, events, rng);
                 events.push({ type: "POTION_FAIL", targetP: tp, targetI: ti });
             }
             break;
@@ -765,13 +910,24 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
             pl.field.forEach((c, i) => { if (allyCanGainPower(c))
                 allies.push(i); });
             const allyI = allies[Math.floor(rng() * allies.length)];
-            reducePower(enemy, 1);
-            const ally = pl.field[allyI];
-            if (ally)
-                ally.currentPower = (ally.currentPower ?? 0) + 1;
-            if (enemy.currentPower <= 0)
+            const vampBefore = enemy.currentPower ?? 0;
+            // C-A06: com skipPower, nem -1 no adversário nem +1 no aliado
+            // (offline game_state.gd:1638-1643, use_ultimate skip_power).
+            // C-A17: sem skipPower, o dreno é bloqueado pela Barreira
+            // central (o +1 ao aliado acontece mesmo assim — offline).
+            if (!skipPower) {
+                const vampRes = reducePower(enemy, 1, { ownerP: tp, currentP: next.currentPlayer });
+                // C-A20: o +1 ao aliado acontece MESMO com o dreno
+                // bloqueado pela Barreira (offline: só o dreno é bloqueado).
+                const ally = pl.field[allyI];
+                if (ally)
+                    ally.currentPower = (ally.currentPower ?? 0) + 1;
+                if (vampRes?.blockedByBarrier)
+                    events.push({ type: "BARRIER_BLOCKED", targetP: tp, targetI: ti, source: "vampirism", visual: "barrier_block" });
+            }
+            if (enemy.currentPower <= 0 && vampBefore > 0)
                 destroyChampion(next, tp, ti, pid, { reason: "vampirism" }, events, rng);
-            events.push({ type: "VAMPIRISM", targetP: tp, targetI: ti, allyI });
+            events.push({ type: "VAMPIRISM", targetP: tp, targetI: ti, allyI, powerCancelled: skipPower === true });
             break;
         }
         case "banish": {
@@ -793,20 +949,6 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
                 opp.discard.push(removed);
                 events.push({ type: "THUNDER_DISCARD", playerId: ep, card: removed.name });
             }
-            break;
-        }
-        case "wallProtect": {
-            pl.wallActive = pl.field.some((c) => c && c.wallBuff);
-            pl.wallCasterIdx = pid;
-            for (const c of pl.field) {
-                if (!c || c.wallBuff)
-                    continue;
-                c.wallBuff = true;
-                c.wallBuffApplied = false;
-                c.wallBuffReveal = false;
-                pl.wallActive = true;
-            }
-            events.push({ type: "WALL_PROTECT", playerId: pid });
             break;
         }
         case "poison": {
@@ -836,26 +978,23 @@ export function applyUltimatePlay(state, action, rng = Math.random) {
                     const c = fld[i];
                     if (!c)
                         continue;
-                    if (consumeBarrier(c))
+                    if (isOwnCharmed(c, pid))
                         continue;
                     normalizeChampPower(c);
-                    reducePower(c, 1);
-                    if (c.currentPower <= 0) {
+                    const cometaBefore = c.currentPower ?? 0;
+                    // C-A17: a Barreira bloqueia o -1 e PERMANECE (central).
+                    const cometaRes = reducePower(c, 1, { ownerP: ep, currentP: next.currentPlayer, preserveWallBuff: ep === pid });
+                    if (cometaRes?.blockedByBarrier) {
+                        events.push({ type: "BARRIER_BLOCKED", targetP: ep, targetI: i, source: "cometStarfall", visual: "barrier_block" });
+                        continue;
+                    }
+                    if (c.currentPower <= 0 && cometaBefore > 0) {
                         const killer = ep !== pid ? pid : null;
                         destroyChampion(next, ep, i, killer, { reason: "cometStarfall" }, events, rng);
                     }
                 }
             }
             events.push({ type: "COMET_STARFALL", playerId: pid });
-            break;
-        }
-        case "warOverpower": {
-            pl.field.forEach((c) => {
-                c.guerraBuff = true;
-                c.guerraBuffTurns = 1;
-            });
-            pl.guerraActive = true;
-            events.push({ type: "WAR_OVERPOWER", playerId: pid });
             break;
         }
         default:

@@ -16,7 +16,7 @@ export const STARTER_SHAPE = { champ1: 7, champ2: 7, talent: 5, reaction: 1 };
 /** Recompensas por partida (XP + Moedas). */
 export const MATCH_REWARDS = {
   ai: { win: { xp: 4, coins: 1 }, lose: { xp: 0, coins: 0 } },
-  pvp: { win: { xp: 6, coins: 1 }, lose: { xp: 1, coins: 0 } },
+  pvp: { win: { xp: 8, coins: 1 }, lose: { xp: 2, coins: 0 } },
 };
 
 export function rewardFor(matchType, outcome) {
