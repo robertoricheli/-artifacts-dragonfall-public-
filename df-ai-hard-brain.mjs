@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 // inicializado (df-match-init só põe `ultimateUses: 0`) — a IA só usava
 // 1 Ultimate por partida, enquanto o motor permite 3–4
 // (getMaxUltimateUses). Usar a mesma fonte do motor.
-import { getEffectiveMaxUltimateUses } from "../motor/df-ultimate-resolve.js";
+import { getEffectiveMaxUltimateUses } from "./motor/df-ultimate-resolve.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 

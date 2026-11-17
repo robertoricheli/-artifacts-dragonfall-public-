@@ -40,9 +40,9 @@
  *     TALENT_START → TALENT_TARGET); sem ele, a IA só reagenda o tick.
  */
 import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
-import { DfData } from "../motor/df-data.js";
-import { appendEventLogEntry } from "../motor/df-event-log.js";
-import { spendUltimateCancelled } from "../motor/df-ultimate-resolve.js";
+import { DfData } from "./motor/df-data.js";
+import { appendEventLogEntry } from "./motor/df-event-log.js";
+import { spendUltimateCancelled } from "./motor/df-ultimate-resolve.js";
 import { withRoomLock } from "./df-room-store.mjs";
 import { applyAuthoritativeAction, buildProtecaoVisualEnvelope } from "./df-authority.mjs";
 import { buildAiReactiveAnswer, consumeAiReactiveCard } from "./df-server-ai-reactive.mjs";
