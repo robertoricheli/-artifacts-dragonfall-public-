@@ -162,13 +162,18 @@ export function attachPeerStateDiff(room, envelope, seat, projectFn, recordFn = 
   const seq = envelope.seq | 0;
   const useDiff = String(process.env.DF_STATE_DIFF || "1") !== "0";
   const actType = envelope?.action?.type;
-  // SUMMON/END_TURN: full state — evita peer sem campo por patch dropado.
+  // SUMMON/END_TURN/TALENT_START/ABILITY_TARGET: full state — evita peer
+  // sem campo por patch dropado. TALENT_START/ABILITY_TARGET: o ramo de patch
+  // do cliente nunca faz staging do talento/habilidade remota (t_796/t_932:
+  // o pouso de talento e o VFX de SEPARAR não tocavam na tela do oponente).
   // Retomada reativa (broadcastResume): full state — o cliente aplica o
   // estado cheio de forma síncrona (t_865: o patch caía na fila remota
   // atrás da sequência de início de turno e o uso gasto não aparecia).
   const forceFull =
     actType === "SUMMON" ||
     actType === "END_TURN" ||
+    actType === "TALENT_START" ||
+    actType === "ABILITY_TARGET" ||
     envelope?.forceFullState === true;
   const forceReason = envelope?.forceFullState === true
     ? "force_resume"
