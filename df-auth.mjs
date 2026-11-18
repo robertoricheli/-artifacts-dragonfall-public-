@@ -161,8 +161,110 @@ const FORGOT_COOLDOWN_MS = 90_000;
 const forgotLastSent = new Map();
 /** Validade do link de recuperação de senha (1.51.68). */
 const RESET_TOKEN_TTL_MS = 60 * 60_000;
-/** Página pública de reset (Netlify serve o web_export junto ao jogo). */
-const RESET_PAGE_URL = "https://dragonfall.netlify.app/reset.html";
+/** Página pública de reset (1.51.71, item 14): servida pelo PRÓPRIO servidor
+ * Render — NUNCA pelo site do jogo. O link do e-mail de recuperação apontava
+ * para a página de reset no site, que não existe lá; o provedor do site
+ * interceptava e caía na página "Netlify SSO Redirect Page". */
+const RESET_PAGE_URL = "https://artifacts-dragonfall-public.onrender.com/reset";
+
+/**
+ * Página de reset servida pelo servidor (GET /reset?token=...).
+ * HTML + CSS + JS puros, sem nenhuma dependência externa (sem Netlify, sem
+ * Godot, sem CDN): abre em qualquer navegador e chama POST /auth/reset-password.
+ */
+const RESET_PAGE_HTML = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DRAGONFALL — Criar nova senha</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font-family: "Segoe UI", Arial, sans-serif; color: #f3edff;
+    background: radial-gradient(1200px 700px at 50% -10%, #5b3a8a 0%, #241640 55%, #120a24 100%); }
+  .card { width: min(92vw, 420px); background: rgba(20, 12, 40, .88); border: 1px solid #6b4fa8;
+    border-radius: 16px; padding: 28px 26px; box-shadow: 0 12px 40px rgba(0, 0, 0, .55); text-align: center; }
+  h1 { margin: 0 0 4px; font-size: 1.7rem; letter-spacing: .14em; color: #ffd977; }
+  p.sub { margin: 0 0 20px; color: #cfc2ee; font-size: .95rem; }
+  label { display: block; text-align: left; font-size: .85rem; color: #cfc2ee; margin: 12px 0 6px; }
+  input { width: 100%; padding: 12px 14px; font-size: 1rem; border-radius: 10px;
+    border: 1px solid #6b4fa8; background: #1d1236; color: #fff; outline: none; }
+  input:focus { border-color: #ffd977; }
+  button { width: 100%; margin-top: 20px; padding: 13px; font-size: 1rem; font-weight: 700;
+    letter-spacing: .06em; color: #241640; background: #ffd977; border: 0; border-radius: 10px; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: default; }
+  .msg { display: none; margin-top: 16px; padding: 12px; border-radius: 10px; font-size: .95rem; line-height: 1.45; }
+  .msg.err { display: block; background: #4a1620; border: 1px solid #a33; color: #ffd7d7; }
+  .msg.ok { display: block; background: #123d22; border: 1px solid #3a7; color: #d2ffe2; }
+  .hint { margin-top: 14px; font-size: .8rem; color: #9d8cc4; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>DRAGONFALL</h1>
+    <p class="sub">Criar nova senha</p>
+    <form id="f">
+      <label for="pw1">Nova senha</label>
+      <input id="pw1" type="password" autocomplete="new-password" minlength="6" required>
+      <label for="pw2">Confirmar nova senha</label>
+      <input id="pw2" type="password" autocomplete="new-password" minlength="6" required>
+      <button id="btn" type="submit">SALVAR NOVA SENHA</button>
+    </form>
+    <div id="msg" class="msg"></div>
+    <p class="hint">O link vale por 1 hora e só pode ser usado uma vez.</p>
+  </div>
+<script>
+(function () {
+  var params = new URLSearchParams(window.location.search);
+  var token = params.get("token") || "";
+  var msg = document.getElementById("msg");
+  var form = document.getElementById("f");
+  var btn = document.getElementById("btn");
+  function show(text, ok) {
+    msg.textContent = text;
+    msg.className = "msg " + (ok ? "ok" : "err");
+  }
+  if (!token) {
+    form.style.display = "none";
+    show("Link inválido ou expirado. Peça um novo link no jogo, em \u201cEsqueci a senha\u201d.", false);
+    return;
+  }
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var pw1 = document.getElementById("pw1").value;
+    var pw2 = document.getElementById("pw2").value;
+    if (pw1.length < 6) { show("A senha precisa de pelo menos 6 caracteres.", false); return; }
+    if (pw1 !== pw2) { show("As senhas não coincidem. Digite a mesma senha nos dois campos.", false); return; }
+    btn.disabled = true;
+    btn.textContent = "SALVANDO...";
+    fetch("/auth/reset-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: token, newPassword: pw1 })
+    }).then(function (r) { return r.json().then(function (d) { return { status: r.status, data: d }; }); })
+    .then(function (out) {
+      if (out.status === 200 && out.data && out.data.ok) {
+        form.style.display = "none";
+        show("Senha alterada! Volte ao jogo e entre com a nova senha.", true);
+        return;
+      }
+      var err = (out.data && out.data.error) || "";
+      if (err === "INVALID_TOKEN") show("Este link expirou ou já foi usado. Peça um novo link no jogo, em \u201cEsqueci a senha\u201d.", false);
+      else if (err === "PASSWORD_TOO_SHORT") show("A senha precisa de pelo menos 6 caracteres.", false);
+      else show("Não foi possível alterar a senha. Tente novamente.", false);
+      btn.disabled = false;
+      btn.textContent = "SALVAR NOVA SENHA";
+    }).catch(function () {
+      show("Não foi possível conectar ao servidor. Confira a internet e tente novamente.", false);
+      btn.disabled = false;
+      btn.textContent = "SALVAR NOVA SENHA";
+    });
+  });
+})();
+</script>
+</body>
+</html>`;
 const authIpLimit = createRateLimiter({ maxPerWindow: 20, windowMs: 60_000 });
 const authEmailLimit = createRateLimiter({ maxPerWindow: 8, windowMs: 60_000 });
 /** Rotas autenticadas (perfil / XP / troca de senha). */
@@ -694,7 +796,9 @@ async function authForgotPassword(req, body) {
     return { status: 503, data: { ok: false, error: code } };
   }
   forgotLastSent.set(email, Date.now());
-  console.log(`[auth] link de recuperação enviado por e-mail → ${email}`);
+  // Loga só a BASE do link (o token nunca vai para o log) — é a prova de
+  // que o e-mail aponta para o próprio servidor, não para o Netlify.
+  console.log(`[auth] link de recuperação enviado por e-mail → ${email} (base: ${RESET_PAGE_URL})`);
   return { status: 200, data: { ok: true, sent: true } };
 }
 
@@ -1459,6 +1563,13 @@ export function registerAuthRoutes(app) {
   app.post("/auth/forgot-password", async (req, res) => {
     const r = await authForgotPassword(req, req.body);
     res.status(r.status).json(r.data);
+  });
+
+  // Página pública de reset (1.51.71, item 14): servida pelo próprio
+  // servidor, sem Netlify. O token vem em ?token= e a página chama
+  // POST /auth/reset-password.
+  app.get("/reset", (_req, res) => {
+    res.status(200).type("html").send(RESET_PAGE_HTML);
   });
 
   app.post("/auth/reset-password", async (req, res) => {

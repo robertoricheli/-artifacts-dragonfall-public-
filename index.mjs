@@ -51,7 +51,7 @@ import {
   rankedStoreMode,
 } from "./df-ranked-store.mjs";
 import { initPostgres, isPostgresEnabled, getReplayByRoomCode, shutdownPostgres } from "./df-postgres.mjs";
-import { initAuthStore, getAuthStoreMode } from "./df-auth.mjs";
+import { initAuthStore, getAuthStoreMode, setSessionRevokedNotifier } from "./df-auth.mjs";
 import { authPlayerFromToken, getPlayerById, startSessionPruneScheduler } from "./df-auth-store.mjs";
 import { initRankStore, recordRankedSeasonMatch, flushRankStore, rankStoreMode } from "./df-rank.mjs";
 import { recordMatchEnd } from "./df-match-history.mjs";
@@ -313,6 +313,10 @@ const io = new Server(httpServer, {
 
 /** socket.id -> room code */
 const socketRoom = new Map();
+
+/** Login em 1 dispositivo só (1.51.70, item 7): socket.id -> playerId, para
+ *  avisar + derrubar os sockets antigos quando outro aparelho logar. */
+const socketPlayer = new Map();
 
 function leaveSocketRoom(socket, peerLeftExtra = null) {
   const code = socketRoom.get(socket.id);
@@ -989,6 +993,15 @@ io.on("connection", (socket) => {
     processRole: PROCESS_ROLE,
     shardId: getLocalShardId(),
     shardCount: getShardCount(),
+  });
+
+  socket.on("authenticate", async (payload, ack) => {
+    const tok = typeof payload?.token === "string" ? payload.token : null;
+    const account = tok ? await authPlayerFromToken(tok) : null;
+    if (!account) return ack?.({ ok: false, error: "UNAUTHORIZED" });
+    socketPlayer.set(socket.id, account.id);
+    socket.join(`player:${account.id}`);
+    ack?.({ ok: true, playerId: account.id });
   });
 
   socket.on("create_room", (_payload, ack) => {
@@ -1687,6 +1700,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
+    socketPlayer.delete(socket.id);
     removeFromQueue(socket.id);
     removeFromRankedQueue(socket.id);
     const code = socketRoom.get(socket.id);
@@ -1721,6 +1735,30 @@ io.on("connection", (socket) => {
     broadcastRoomState(room);
     touchPersist(room);
   });
+});
+
+/**
+ * Login em 1 dispositivo só (1.51.70, item 7): quando um aparelho loga numa
+ * conta, os sockets antigos da conta recebem `session_revoked` (o emit
+ * atravessa processos via Redis adapter) e são derrubados ~500 ms depois.
+ * A lista de alvos é fotografada NA HORA do aviso: um socket novo que
+ * autenticar dentro da janela de 500 ms NÃO é derrubado.
+ */
+setSessionRevokedNotifier((playerId, { deviceLabel } = {}) => {
+  io.to(`player:${playerId}`).emit("session_revoked", {
+    reason: "LOGGED_IN_ELSEWHERE",
+    deviceLabel: deviceLabel || null,
+  });
+  const targets = [...socketPlayer.entries()]
+    .filter(([, pid]) => pid === playerId)
+    .map(([sid]) => sid);
+  if (!targets.length) return;
+  setTimeout(() => {
+    for (const sid of targets) {
+      const s = io.sockets.sockets.get(sid);
+      if (s) s.disconnect(true);
+    }
+  }, 500);
 });
 
 let shuttingDown = false;
