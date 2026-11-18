@@ -3,7 +3,7 @@
  * Persistência via df-auth-store (Postgres quando DATABASE_URL; senão accounts.json).
  */
 import crypto from "crypto";
-import { sendPasswordResetEmail, sendPasswordChangedNoticeEmail } from "./df-auth-mail.mjs";
+import { sendPasswordResetLinkEmail, sendPasswordChangedNoticeEmail } from "./df-auth-mail.mjs";
 import {
   initAuthStore,
   getAuthStoreMode,
@@ -14,10 +14,14 @@ import {
   persistPlayer,
   createSessionRecord,
   deleteSessionRecord,
+  revokePlayerSessionsExcept,
+  sessionExists,
+  hashSessionToken,
+  createPasswordResetRecord,
+  consumePasswordResetRecord,
   authPlayerFromToken,
   getDisplayNameOwner,
   updateDisplayName,
-  prunePlayerSessions,
 } from "./df-auth-store.mjs";
 import { verifyGoogleIdToken } from "./df-auth-google.mjs";
 import { createRateLimiter } from "./rate-limit.mjs";
@@ -102,7 +106,8 @@ function unlockAllContext() {
 
 /**
  * Coleção por conta: toda conta (nova ou antiga) sem `ownedCards` recebe as 20 cartas
- * iniciais; baralhos antigos são substituídos pelo Baralho 1 com essas cartas.
+ * iniciais. Os baralhos SÓ são criados quando não existem (`customDecks == null`) —
+ * baralhos existentes nunca são sobrescritos (1.51.70, item 3).
  * Devolve true se o jogador foi alterado (precisa persistir).
  */
 function ensureCollection(player) {
@@ -110,7 +115,7 @@ function ensureCollection(player) {
   if (!Array.isArray(player.ownedCards) || !player.ownedCards.length) {
     const owned = rollStarter(getCardDefs());
     player.ownedCards = owned;
-    player.customDecks = starterDecks(owned);
+    if (player.customDecks == null) player.customDecks = starterDecks(owned);
     player.coins = Math.max(0, player.coins | 0);
     player.market = null;
     player.collectionEpoch = (player.collectionEpoch | 0) + 1;
@@ -152,9 +157,12 @@ async function withCollection(player) {
 }
 
 const SESSION_DAYS = 90;
-const MAX_SESSIONS_PER_PLAYER = 8;
 const FORGOT_COOLDOWN_MS = 90_000;
 const forgotLastSent = new Map();
+/** Validade do link de recuperação de senha (1.51.68). */
+const RESET_TOKEN_TTL_MS = 60 * 60_000;
+/** Página pública de reset (Netlify serve o web_export junto ao jogo). */
+const RESET_PAGE_URL = "https://dragonfall.netlify.app/reset.html";
 const authIpLimit = createRateLimiter({ maxPerWindow: 20, windowMs: 60_000 });
 const authEmailLimit = createRateLimiter({ maxPerWindow: 8, windowMs: 60_000 });
 /** Rotas autenticadas (perfil / XP / troca de senha). */
@@ -274,6 +282,9 @@ function playerPublic(p) {
     displayNameLocked: !!p.displayNameLocked,
     avatarHeroId: p.avatarHeroId || null,
     hubBackgroundId: p.hubBackgroundId || null,
+    avatarColor: p.avatarColor || null,
+    avatarFrame: p.avatarFrame || null,
+    battleBg: p.battleBg || null,
     language: LANGUAGE_IDS.has(p.language) ? p.language : null,
     customDecks: Array.isArray(p.customDecks) ? p.customDecks : null,
     profileRevision: Number(p.profileRevision ?? 0),
@@ -318,10 +329,56 @@ async function authFromHeader(req) {
   return authPlayerFromToken(tok);
 }
 
-async function createSession(playerId) {
-  await prunePlayerSessions(playerId, MAX_SESSIONS_PER_PLAYER - 1);
+/** Customização por conta (1.51.70): avatarColor, avatarFrame, battleBg.
+ *  Strings curtas (1–32 caracteres após trim). Valor inválido é IGNORADO
+ *  sem quebrar o PATCH inteiro (nunca 400 aqui); ausência não apaga o
+ *  valor já salvo. Devolve null quando não deve aplicar. */
+function normCustomField(v) {
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  if (!s || s.length > 32) return null;
+  return s;
+}
+
+/** Login em 1 dispositivo só (1.51.70, item 7). Identificação do aparelho
+ *  vinda do cliente; string ≤ 64 — qualquer outra coisa vira null. */
+function normDeviceField(v) {
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  if (!s) return null;
+  return s.slice(0, 64);
+}
+
+function deviceFromBody(body) {
+  return {
+    deviceId: normDeviceField(body?.deviceId),
+    deviceLabel: normDeviceField(body?.deviceLabel),
+  };
+}
+
+/** index.mjs registra aqui o aviso aos sockets antigos da conta. */
+let sessionRevokedNotifier = null;
+export function setSessionRevokedNotifier(fn) {
+  sessionRevokedNotifier = typeof fn === "function" ? fn : null;
+}
+
+/**
+ * Cria a sessão do login. PRIMEIRO revoga todas as outras sessões da conta
+ * (login em 1 dispositivo só) e SÓ DEPOIS cria a nova; o aparelho antigo é
+ * avisado pelo notifier. NÃO é usado por troca de senha, reset de senha ou
+ * /auth/logout — esses nunca deslogam outros aparelhos.
+ */
+async function createSession(playerId, device = {}) {
+  await revokePlayerSessionsExcept(playerId, null);
   const token = newToken();
-  await createSessionRecord(token, playerId, sessionExpiry());
+  await createSessionRecord(token, playerId, sessionExpiry(), device);
+  if (sessionRevokedNotifier) {
+    try {
+      sessionRevokedNotifier(playerId, { deviceLabel: device.deviceLabel || null });
+    } catch (e) {
+      console.warn("[auth] session_revoked notifier:", e?.message || e);
+    }
+  }
   return token;
 }
 
@@ -339,15 +396,6 @@ function allowAuthedAttempt(req) {
     return { status: 429, data: { ok: false, error: "RATE_LIMIT", retryAfterSec: 60 } };
   }
   return null;
-}
-
-/** Senha temporária aleatória (não reutiliza passwordEnc reversível). */
-function newTemporaryPassword() {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
-  const bytes = crypto.randomBytes(12);
-  let out = "";
-  for (let i = 0; i < bytes.length; i++) out += alphabet[bytes[i] % alphabet.length];
-  return out;
 }
 
 function clientIp(req) {
@@ -391,6 +439,9 @@ async function authRegister(req, body) {
     displayNameLocked: false,
     avatarHeroId: null,
     hubBackgroundId: null,
+    avatarColor: null,
+    avatarFrame: null,
+    battleBg: null,
     language: null,
     customDecks: null,
     xpTotal: 0,
@@ -422,7 +473,7 @@ async function authRegister(req, body) {
     }
     throw err;
   }
-  const token = await createSession(id);
+  const token = await createSession(id, deviceFromBody(body));
   const saved = await getPlayerById(id);
   recordActivity(id, "register");
   return { status: 200, data: { ok: true, token, player: playerPublic(saved) } };
@@ -442,7 +493,7 @@ async function authLogin(req, body) {
     player.passwordEnc = null;
     await persistPlayer(player).catch(() => {});
   }
-  const token = await createSession(player.id);
+  const token = await createSession(player.id, deviceFromBody(body));
   const fresh = await withCollection(await getPlayerById(player.id));
   recordActivity(player.id, "login");
   return { status: 200, data: { ok: true, token, player: playerPublic(fresh || player) } };
@@ -485,7 +536,7 @@ async function authGoogle(req, body) {
   // 1) Conta já vinculada a este Google → login.
   const bySub = await findPlayerByGoogleSub(claims.sub);
   if (bySub) {
-    const token = await createSession(bySub.id);
+    const token = await createSession(bySub.id, deviceFromBody(body));
     const fresh = await withCollection(await getPlayerById(bySub.id));
     recordActivity(bySub.id, "login");
     return { status: 200, data: { ok: true, token, player: playerPublic(fresh || bySub), created: false, linked: false } };
@@ -524,7 +575,7 @@ async function authGoogle(req, body) {
         throw e;
       }
     }
-    const token = await createSession(byEmail.id);
+    const token = await createSession(byEmail.id, deviceFromBody(body));
     const fresh = await withCollection(await getPlayerById(byEmail.id));
     recordActivity(byEmail.id, "login");
     return { status: 200, data: { ok: true, token, player: playerPublic(fresh || byEmail), created: false, linked: true } };
@@ -553,6 +604,9 @@ async function authGoogle(req, body) {
     displayNameLocked: false,
     avatarHeroId: null,
     hubBackgroundId: null,
+    avatarColor: null,
+    avatarFrame: null,
+    battleBg: null,
     language: null,
     customDecks: null,
     xpTotal: 0,
@@ -583,12 +637,22 @@ async function authGoogle(req, body) {
     }
     throw e;
   }
-  const token = await createSession(id);
+  const token = await createSession(id, deviceFromBody(body));
   const saved = await getPlayerById(id);
   recordActivity(id, "register");
   return { status: 200, data: { ok: true, token, player: playerPublic(saved), created: true, linked: false } };
 }
 
+/** Token cru de reset → SHA-256 para guardar / buscar (nunca persiste o token cru). */
+function hashResetToken(token) {
+  return crypto.createHash("sha256").update(String(token || "")).digest("hex");
+}
+
+/**
+ * Recuperação de senha por LINK (1.51.68): gera um token aleatório, guarda o
+ * hash com expiração de 1 h e uso único, e envia o link por e-mail. A senha
+ * atual NÃO é invalidada — continua valendo até o jogador criar a nova.
+ */
 async function authForgotPassword(req, body) {
   const limited = allowAuthAttempt(req, body?.email);
   if (limited) return limited;
@@ -608,10 +672,18 @@ async function authForgotPassword(req, body) {
       data: { ok: false, error: "FORGOT_COOLDOWN", retryAfterSec: waitSec },
     };
   }
-  const tempPassword = newTemporaryPassword();
-  // Envia e-mail ANTES de invalidar a senha — evita lockout se SMTP falhar.
+  // 32 bytes aleatórios, URL-safe (43 caracteres) — sem senha temporária.
+  const token = crypto.randomBytes(32).toString("base64url");
+  const expiresAt = Date.now() + RESET_TOKEN_TTL_MS;
   try {
-    await sendPasswordResetEmail(email, tempPassword, player.language || null);
+    await createPasswordResetRecord(player.id, hashResetToken(token), expiresAt);
+  } catch (e) {
+    console.error("[auth] forgot-password: RESET_STORE_FAILED —", e?.message || e);
+    return { status: 500, data: { ok: false, error: "SAVE_FAILED" } };
+  }
+  const resetLink = `${RESET_PAGE_URL}?token=${encodeURIComponent(token)}`;
+  try {
+    await sendPasswordResetLinkEmail(email, resetLink, player.language || null);
   } catch (e) {
     const code = String(e?.message || "").includes("MAIL_NOT_CONFIGURED")
       ? "MAIL_NOT_CONFIGURED"
@@ -621,15 +693,50 @@ async function authForgotPassword(req, body) {
     console.error("[auth] forgot-password:", e?.cause?.message || e?.message || e);
     return { status: 503, data: { ok: false, error: code } };
   }
-  setPlayerPassword(player, tempPassword);
-  const save = await persistPlayer(player);
-  if (!save.ok) {
-    console.error("[auth] forgot-password: e-mail enviado mas SAVE_FAILED —", save.error);
-    return { status: 500, data: { ok: false, error: save.error || "SAVE_FAILED" } };
-  }
   forgotLastSent.set(email, Date.now());
-  console.log(`[auth] senha temporária enviada por e-mail → ${email}`);
+  console.log(`[auth] link de recuperação enviado por e-mail → ${email}`);
   return { status: 200, data: { ok: true, sent: true } };
+}
+
+/**
+ * Redefine a senha a partir do link de recuperação (1.51.68).
+ * Corpo: {"token": "...", "newPassword": "..."}.
+ * Token válido só 1 vez e só dentro de 1 h; a senha atual é substituída
+ * somente aqui, depois do jogador clicar no link e criar a nova.
+ */
+async function authResetPassword(req, body) {
+  const limited = allowAuthAttempt(req, null);
+  if (limited) return limited;
+  const token = String(body?.token || "").trim();
+  const next = body?.newPassword;
+  if (!token || !next) {
+    return { status: 400, data: { ok: false, error: "MISSING_FIELDS" } };
+  }
+  if (!isValidPassword(next)) {
+    return { status: 400, data: { ok: false, error: "PASSWORD_TOO_SHORT" } };
+  }
+  let playerId = null;
+  try {
+    playerId = await consumePasswordResetRecord(hashResetToken(token));
+  } catch (e) {
+    console.error("[auth] reset-password: RESET_STORE_FAILED —", e?.message || e);
+    return { status: 500, data: { ok: false, error: "SAVE_FAILED" } };
+  }
+  if (!playerId) {
+    return { status: 400, data: { ok: false, error: "INVALID_TOKEN" } };
+  }
+  const player = await getPlayerById(playerId);
+  if (!player) {
+    return { status: 400, data: { ok: false, error: "INVALID_TOKEN" } };
+  }
+  setPlayerPassword(player, next);
+  const r = await persistPlayer(player);
+  if (!r.ok) {
+    console.error("[auth] reset-password: SAVE_FAILED —", r.error);
+    return { status: 500, data: { ok: false, error: r.error || "SAVE_FAILED" } };
+  }
+  console.log(`[auth] senha redefinida por link → ${player.email}`);
+  return { status: 200, data: { ok: true } };
 }
 
 async function authChangePassword(req, body) {
@@ -672,8 +779,17 @@ async function authChangePassword(req, body) {
 }
 
 async function authMe(req) {
+  const token = bearerToken(req);
   const authed = await authFromHeader(req);
-  if (!authed) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  if (!authed) {
+    // Login em 1 dispositivo só (1.51.70, item 7): há token mas a sessão
+    // não existe mais → outra aparelho logou na conta. Sessão expirada
+    // (linha ainda presente) continua 401 UNAUTHORIZED.
+    if (token && !(await sessionExists(hashSessionToken(token)))) {
+      return { status: 401, data: { ok: false, error: "SESSION_REVOKED" } };
+    }
+    return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  }
   const player = await withCollection(authed);
   recordActivitySync(player.id);
   touchRankDisplay(player.id, rankDisplayInfo(player));
@@ -685,6 +801,9 @@ function normalizeCustomDecks(raw, ownedCards) {
   if (!Array.isArray(raw) || raw.length !== 5) {
     return { ok: false, error: "BAD_DECKS" };
   }
+  // 1.51.70, item 3: carta fora da coleção NÃO é trocada por null em
+  // silêncio — o PATCH inteiro é recusado com 400 UNOWNED_CARD + a lista.
+  const unowned = [];
   const decks = raw.map((entry, i) => {
     let name = String(entry?.name || "").trim();
     if (!name) name = `Baralho ${i + 1}`;
@@ -696,11 +815,15 @@ function normalizeCustomDecks(raw, ownedCards) {
       if (c == null || c === "") cards.push(null);
       else {
         const nm = String(c).trim().slice(0, 80);
-        cards.push(owned && !owned.has(nm) ? null : nm);
+        if (owned && !owned.has(nm)) {
+          if (!unowned.includes(nm)) unowned.push(nm);
+          cards.push(nm);
+        } else cards.push(nm);
       }
     }
     return { name, cards };
   });
+  if (unowned.length) return { ok: false, error: "UNOWNED_CARD", unowned };
   return { ok: true, decks };
 }
 
@@ -735,6 +858,15 @@ async function authProfile(req, body) {
       return { status: 400, data: { ok: false, error: "BAD_HUB_BG" } };
     }
     player.hubBackgroundId = bid;
+  }
+
+  // Customização por conta (1.51.70): cor/moldura do avatar e fundo de
+  // batalha. Valores inválidos são ignorados (normCustomField → null).
+  for (const [bodyKey, playerKey] of [["avatarColor", "avatarColor"], ["avatarFrame", "avatarFrame"], ["battleBg", "battleBg"]]) {
+    if (body[bodyKey] != null) {
+      const v = normCustomField(body[bodyKey]);
+      if (v != null) player[playerKey] = v;
+    }
   }
 
   if (body.language != null) {
@@ -788,7 +920,10 @@ async function authProfile(req, body) {
   if (body.customDecks != null) {
     const norm = normalizeCustomDecks(body.customDecks, player.ownedCards);
     if (!norm.ok) {
-      return { status: 400, data: { ok: false, error: norm.error } };
+      return {
+        status: 400,
+        data: { ok: false, error: norm.error, ...(norm.unowned ? { unowned: norm.unowned } : {}) },
+      };
     }
     player.customDecks = norm.decks;
   }
@@ -932,6 +1067,14 @@ async function authProfileImport(req, body) {
     if (!HERO_IDS.has(hid)) return { status: 400, data: { ok: false, error: "BAD_AVATAR" } };
     avatarHeroId = hid;
   }
+  // Cosméticos (1.51.70): cor/moldura do avatar e fundo de batalha —
+  // mesma validação do PATCH (normCustomField): inválido ignorado,
+  // ausente/null não apaga o que já existe.
+  const customFields = {};
+  for (const key of ["avatarColor", "avatarFrame", "battleBg"]) {
+    const v = normCustomField(body?.[key]);
+    if (v != null) customFields[key] = v;
+  }
   // Coleção: união do starter com as cartas dos baralhos; heróis:
   // união com o avatar e os heróis da jornada resgatada.
   const ownedCards = new Set(Array.isArray(player.ownedCards) ? player.ownedCards.map(String) : []);
@@ -969,6 +1112,7 @@ async function authProfileImport(req, body) {
   player.ownedHeroes = [...ownedHeroes];
   if (decks) player.customDecks = decks;
   if (avatarHeroId) player.avatarHeroId = avatarHeroId;
+  for (const [key, v] of Object.entries(customFields)) player[key] = v;
   const r = await persistPlayer(player, { expectedRevision: Number(player.profileRevision ?? 0) });
   if (!r.ok) {
     if (r.error === "PROFILE_CONFLICT") return { status: 409, data: { ok: false, error: "PROFILE_CONFLICT", player: playerPublic(r.player) } };
@@ -1274,6 +1418,7 @@ export async function handleAuthHttp(req, res) {
   else if (req.method === "POST" && pathname === "/auth/login") result = await authLogin(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/google") result = await authGoogle(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/forgot-password") result = await authForgotPassword(fakeReq, body);
+  else if (req.method === "POST" && pathname === "/auth/reset-password") result = await authResetPassword(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/change-password") result = await authChangePassword(fakeReq, body);
   else if (req.method === "GET" && pathname === "/auth/me") result = await authMe(fakeReq);
   else if (req.method === "PATCH" && pathname === "/auth/profile") result = await authProfile(fakeReq, body);
@@ -1313,6 +1458,11 @@ export function registerAuthRoutes(app) {
 
   app.post("/auth/forgot-password", async (req, res) => {
     const r = await authForgotPassword(req, req.body);
+    res.status(r.status).json(r.data);
+  });
+
+  app.post("/auth/reset-password", async (req, res) => {
+    const r = await authResetPassword(req, req.body || {});
     res.status(r.status).json(r.data);
   });
 

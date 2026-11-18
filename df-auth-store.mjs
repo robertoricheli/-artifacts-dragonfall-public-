@@ -15,11 +15,16 @@ import {
   pgUpdatePlayer,
   pgCreateSession,
   pgDeleteSession,
+  pgRevokePlayerSessionsExcept,
+  pgSessionExists,
   pgAuthPlayerFromToken,
   pgGetDisplayNameOwner,
   pgSetDisplayName,
   pgPrunePlayerSessions,
   pgPruneSessions,
+  pgCreatePasswordReset,
+  pgConsumePasswordReset,
+  pgPrunePasswordResets,
 } from "./df-auth-pg.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -35,7 +40,7 @@ export function hashSessionToken(token) {
 }
 
 function defaultStore() {
-  return { players: {}, sessions: {}, displayNames: {} };
+  return { players: {}, sessions: {}, displayNames: {}, passwordResets: {} };
 }
 
 function loadJsonStore() {
@@ -47,6 +52,7 @@ function loadJsonStore() {
       players: data.players || {},
       sessions: data.sessions || {},
       displayNames: data.displayNames || {},
+      passwordResets: data.passwordResets || {},
     };
   } catch (e) {
     console.warn("[auth-store] load failed, reset:", e.message);
@@ -71,6 +77,38 @@ function pruneJsonSessions() {
   for (const [tok, sess] of Object.entries(store.sessions)) {
     if (!sess?.expiresAt || sess.expiresAt < now) delete store.sessions[tok];
   }
+}
+
+function pruneJsonPasswordResets() {
+  const now = Date.now();
+  for (const [hash, rec] of Object.entries(store.passwordResets || {})) {
+    if (!rec || rec.usedAt != null || (rec.expiresAt || 0) < now) delete store.passwordResets[hash];
+  }
+}
+
+/** Recuperação de senha por link (1.51.68): guarda o hash do token + expiração. */
+export async function createPasswordResetRecord(playerId, tokenHash, expiresAt) {
+  if (mode === "postgres") {
+    await pgCreatePasswordReset(playerId, tokenHash, expiresAt);
+    return;
+  }
+  pruneJsonPasswordResets();
+  store.passwordResets[tokenHash] = { playerId, expiresAt, usedAt: null };
+  saveJsonStore();
+}
+
+/**
+ * Consome o token de reset (uso único): devolve o player_id só se o token
+ * existir, não tiver expirado e nunca tiver sido usado; senão null.
+ */
+export async function consumePasswordResetRecord(tokenHash) {
+  const now = Date.now();
+  if (mode === "postgres") return pgConsumePasswordReset(tokenHash, now);
+  const rec = store.passwordResets[tokenHash];
+  if (!rec || rec.usedAt != null || (rec.expiresAt || 0) < now) return null;
+  rec.usedAt = now;
+  saveJsonStore();
+  return rec.playerId;
 }
 
 export async function initAuthStore() {
@@ -142,15 +180,46 @@ export async function persistPlayer(player, { expectedRevision } = {}) {
   return { ok: true, player: ensureJsonPlayerFields({ ...player }) };
 }
 
-export async function createSessionRecord(token, playerId, expiresAt) {
+export async function createSessionRecord(token, playerId, expiresAt, device = {}) {
   const tokenKey = hashSessionToken(token);
+  const deviceId = typeof device.deviceId === "string" ? device.deviceId : null;
+  const deviceLabel = typeof device.deviceLabel === "string" ? device.deviceLabel : null;
+  const createdAt = Number.isFinite(device.createdAt) ? device.createdAt : Date.now();
   if (mode === "postgres") {
-    await pgCreateSession(playerId, tokenKey, expiresAt);
+    await pgCreateSession(playerId, tokenKey, expiresAt, { deviceId, deviceLabel, createdAt });
     return;
   }
   pruneJsonSessions();
-  store.sessions[tokenKey] = { playerId, expiresAt };
+  store.sessions[tokenKey] = { playerId, expiresAt, deviceId, deviceLabel, createdAt };
   saveJsonStore();
+}
+
+/**
+ * Login em 1 dispositivo só (1.51.70, item 7): revoga todas as sessões da
+ * conta, exceto a do token informado (null = todas). Devolve quantas foram
+ * revogadas. NÃO é usado por troca de senha, reset de senha ou logout.
+ */
+export async function revokePlayerSessionsExcept(playerId, keepTokenHash = null) {
+  if (mode === "postgres") return pgRevokePlayerSessionsExcept(playerId, keepTokenHash);
+  pruneJsonSessions();
+  let revoked = 0;
+  for (const [tok, sess] of Object.entries(store.sessions)) {
+    if (sess?.playerId === playerId && tok !== keepTokenHash) {
+      delete store.sessions[tok];
+      revoked++;
+    }
+  }
+  if (revoked) saveJsonStore();
+  return revoked;
+}
+
+/** Existe sessão com este hash (mesmo expirada)? Usado pelo /auth/me para
+ *  distinguir sessão revogada (401 SESSION_REVOKED) de sessão expirada. */
+export async function sessionExists(tokenHash) {
+  if (!tokenHash) return false;
+  if (mode === "postgres") return pgSessionExists(tokenHash);
+  pruneJsonSessions();
+  return !!store.sessions[tokenHash];
 }
 
 export async function deleteSessionRecord(token) {
@@ -227,8 +296,12 @@ export function startSessionPruneScheduler(intervalMs = 15 * 60_000) {
       void pgPruneSessions().catch((e) => {
         console.warn("[auth-store] prune sessions:", e?.message || e);
       });
+      void pgPrunePasswordResets().catch((e) => {
+        console.warn("[auth-store] prune password resets:", e?.message || e);
+      });
     } else if (store) {
       pruneJsonSessions();
+      pruneJsonPasswordResets();
       try { saveJsonStore(); } catch (_) { /* */ }
     }
   };

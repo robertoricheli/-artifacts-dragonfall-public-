@@ -33,6 +33,11 @@ ALTER TABLE df_players ADD COLUMN IF NOT EXISTS language VARCHAR(8);
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS ach_stats JSONB;
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS ach_claimed JSONB;
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS ach_showcase JSONB;
+-- Customização por conta (1.51.70): cor/moldura do avatar e fundo de
+-- batalha. Contas antigas ficam NULL (ausente) até o primeiro PATCH.
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS avatar_color TEXT;
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS avatar_frame TEXT;
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS battle_bg TEXT;
 -- Migração 2026-11-12-01 (Fase 1 multiplayer — login com Google).
 -- Testada na cópia local do backup antes do deploy; reversível (ver
 -- migrations/2026-11-12-01-google-auth.sql). Contas existentes ficam
@@ -45,12 +50,30 @@ CREATE TABLE IF NOT EXISTS df_sessions (
   player_id UUID NOT NULL REFERENCES df_players(id) ON DELETE CASCADE,
   expires_at BIGINT NOT NULL
 );
+-- Login em 1 dispositivo só (1.51.70, item 7): identifica o aparelho dono
+-- da sessão para avisar o aparelho antigo quando outro logar na conta.
+-- ALTER ... IF NOT EXISTS = migração automática no boot, sem script manual.
+ALTER TABLE df_sessions ADD COLUMN IF NOT EXISTS device_id TEXT;
+ALTER TABLE df_sessions ADD COLUMN IF NOT EXISTS device_label TEXT;
+ALTER TABLE df_sessions ADD COLUMN IF NOT EXISTS created_at BIGINT;
 CREATE INDEX IF NOT EXISTS df_sessions_player ON df_sessions (player_id);
 CREATE INDEX IF NOT EXISTS df_sessions_expires ON df_sessions (expires_at);
 CREATE TABLE IF NOT EXISTS df_display_names (
   name_key VARCHAR(32) PRIMARY KEY,
   player_id UUID NOT NULL UNIQUE REFERENCES df_players(id) ON DELETE CASCADE
 );
+-- Recuperação de senha por link (1.51.68): token guardado como hash SHA-256,
+-- expiração em 1 h e uso único (used_at). A senha atual NÃO é invalidada ao
+-- pedir o reset — só muda quando o jogador cria a nova pelo link.
+CREATE TABLE IF NOT EXISTS df_password_resets (
+  token_hash TEXT PRIMARY KEY,
+  player_id UUID NOT NULL REFERENCES df_players(id) ON DELETE CASCADE,
+  expires_at BIGINT NOT NULL,
+  used_at BIGINT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS df_password_resets_player ON df_password_resets (player_id);
+CREATE INDEX IF NOT EXISTS df_password_resets_expires ON df_password_resets (expires_at);
 `;
 
 function rowToPlayer(row) {
@@ -81,6 +104,9 @@ function rowToPlayer(row) {
     achStats: row.ach_stats ?? null,
     achClaimed: row.ach_claimed ?? null,
     achShowcase: row.ach_showcase ?? null,
+    avatarColor: row.avatar_color ?? null,
+    avatarFrame: row.avatar_frame ?? null,
+    battleBg: row.battle_bg ?? null,
     profileRevision: Number(row.profile_revision ?? 0),
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
@@ -116,6 +142,9 @@ function playerToRow(p) {
     p.achStats != null ? JSON.stringify(p.achStats) : null,
     p.achClaimed != null ? JSON.stringify(p.achClaimed) : null,
     p.achShowcase != null ? JSON.stringify(p.achShowcase) : null,
+    p.avatarColor ?? null,
+    p.avatarFrame ?? null,
+    p.battleBg ?? null,
   ];
 }
 
@@ -160,8 +189,9 @@ export async function pgInsertPlayer(player) {
        google_sub, provider,
        avatar_hero_id, hub_background_id, custom_decks, xp_total, profile_revision, created_at,
        owned_cards, coins, market_state, collection_epoch, owned_heroes, journey_claimed,
-       redeemed_codes, dev_unlock_all, language, ach_stats, ach_claimed, ach_showcase)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15::timestamptz,$16::jsonb,$17,$18::jsonb,$19,$20::jsonb,$21::jsonb,$22::jsonb,$23,$24,$25::jsonb,$26::jsonb,$27::jsonb)`,
+       redeemed_codes, dev_unlock_all, language, ach_stats, ach_claimed, ach_showcase,
+       avatar_color, avatar_frame, battle_bg)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15::timestamptz,$16::jsonb,$17,$18::jsonb,$19,$20::jsonb,$21::jsonb,$22::jsonb,$23,$24,$25::jsonb,$26::jsonb,$27::jsonb,$28,$29,$30)`,
     vals,
   );
   return pgGetPlayerById(player.id);
@@ -198,6 +228,7 @@ export async function pgUpdatePlayer(player, { expectedRevision } = {}) {
         journey_claimed = $18::jsonb, redeemed_codes = $19::jsonb, dev_unlock_all = $20,
         language = $21, ach_stats = $22::jsonb, ach_claimed = $23::jsonb, ach_showcase = $24::jsonb,
         google_sub = $25, provider = $26,
+        avatar_color = $27, avatar_frame = $28, battle_bg = $29,
         updated_at = NOW()
        WHERE id = $1`,
       [
@@ -227,6 +258,9 @@ export async function pgUpdatePlayer(player, { expectedRevision } = {}) {
         player.achShowcase != null ? JSON.stringify(player.achShowcase) : null,
         player.googleSub ?? null,
         player.provider ?? "email",
+        player.avatarColor ?? null,
+        player.avatarFrame ?? null,
+        player.battleBg ?? null,
       ],
     );
     await client.query("COMMIT");
@@ -240,13 +274,44 @@ export async function pgUpdatePlayer(player, { expectedRevision } = {}) {
   }
 }
 
-export async function pgCreateSession(playerId, token, expiresAt) {
+export async function pgCreateSession(playerId, token, expiresAt, device = {}) {
   const pool = getPgPool();
   if (!pool) throw new Error("PG_UNAVAILABLE");
   await pool.query(
-    "INSERT INTO df_sessions (token, player_id, expires_at) VALUES ($1, $2, $3)",
-    [token, playerId, expiresAt],
+    "INSERT INTO df_sessions (token, player_id, expires_at, device_id, device_label, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+    [
+      token,
+      playerId,
+      expiresAt,
+      typeof device.deviceId === "string" ? device.deviceId : null,
+      typeof device.deviceLabel === "string" ? device.deviceLabel : null,
+      Number.isFinite(device.createdAt) ? device.createdAt : Date.now(),
+    ],
   );
+}
+
+/**
+ * Login em 1 dispositivo só (1.51.70, item 7): apaga TODAS as sessões da
+ * conta, exceto a do token informado (null = apaga todas). Devolve
+ * quantas sessões foram revogadas.
+ */
+export async function pgRevokePlayerSessionsExcept(playerId, keepTokenHash = null) {
+  const pool = getPgPool();
+  if (!pool || !playerId) return 0;
+  const res = await pool.query(
+    "DELETE FROM df_sessions WHERE player_id = $1 AND ($2::text IS NULL OR token <> $2)",
+    [playerId, keepTokenHash],
+  );
+  return res.rowCount | 0;
+}
+
+/** Existe alguma sessão com este hash (mesmo expirada)? Distingue sessão
+ *  revogada (linha apagada) de sessão expirada (linha presente) no /auth/me. */
+export async function pgSessionExists(tokenHash) {
+  const pool = getPgPool();
+  if (!pool || !tokenHash) return false;
+  const res = await pool.query("SELECT 1 FROM df_sessions WHERE token = $1 LIMIT 1", [tokenHash]);
+  return !!res.rows[0];
 }
 
 export async function pgDeleteSession(token) {
@@ -340,8 +405,43 @@ export async function pgPrunePlayerSessions(playerId, keep = 7) {
   );
 }
 
-/** Upsert player + optional display name (migration). */
-export async function pgUpsertPlayerFromJson(player, displayNameKey) {
+/** Recuperação de senha por link (1.51.68). Token cru nunca é persistido. */
+export async function pgCreatePasswordReset(playerId, tokenHash, expiresAt) {
+  const pool = getPgPool();
+  if (!pool) throw new Error("PG_UNAVAILABLE");
+  await pool.query(
+    "INSERT INTO df_password_resets (token_hash, player_id, expires_at) VALUES ($1, $2, $3)",
+    [tokenHash, playerId, expiresAt],
+  );
+}
+
+/**
+ * Consome o token de reset de forma atômica: só a primeira chamada com um
+ * token válido, não expirado e não usado devolve o player_id (uso único,
+ * sem condição de corrida entre duas requisições simultâneas).
+ */
+export async function pgConsumePasswordReset(tokenHash, now = Date.now()) {
+  const pool = getPgPool();
+  if (!pool) throw new Error("PG_UNAVAILABLE");
+  const res = await pool.query(
+    `UPDATE df_password_resets SET used_at = $2
+     WHERE token_hash = $1 AND used_at IS NULL AND expires_at >= $2
+     RETURNING player_id`,
+    [tokenHash, now],
+  );
+  return res.rows[0]?.player_id || null;
+}
+
+export async function pgPrunePasswordResets(now = Date.now()) {
+  const pool = getPgPool();
+  if (!pool) return;
+  await pool.query(
+    "DELETE FROM df_password_resets WHERE expires_at < $1 OR used_at IS NOT NULL",
+    [now],
+  );
+}
+
+/** Upsert player + optional display name (migration). */export async function pgUpsertPlayerFromJson(player, displayNameKey) {
   const pool = getPgPool();
   if (!pool) throw new Error("PG_UNAVAILABLE");
   const existing = await pgGetPlayerById(player.id);

@@ -78,7 +78,8 @@ export function isMailConfigured() {
 
 /**
  * Textos do e-mail por idioma da conta (`language` em df-auth). Conta sem idioma → en.
- * Novo idioma: copiar o bloco `en` com as mesmas chaves (+ MAIL_HTML_LANG). `{password}` = senha.
+ * Novo idioma: copiar o bloco `en` com as mesmas chaves (+ MAIL_HTML_LANG). `{password}` = senha
+ * (no kind `reset-link`, o parâmetro carrega o LINK de recuperação, não uma senha).
  */
 const MAIL_DEFAULT_LANG = "en";
 const MAIL_TEXT = {
@@ -86,6 +87,13 @@ const MAIL_TEXT = {
     subjectChanged: "Dragonfall — password changed in your profile",
     subjectSetupTest: "[TEST] Dragonfall — email setup",
     subjectReminder: "Dragonfall — temporary recovery password",
+    subjectResetLink: "Dragonfall — reset your password",
+    introResetLink: "You requested a password recovery on Dragonfall. Click the link below to create a new password.",
+    resetLinkLabel: "Create your new password here:",
+    nextResetLink: "The link expires in 1 hour. Your current password keeps working until you create a new one.",
+    htmlResetLinkLabel: "Click the link below to create your new password:",
+    htmlResetLinkButton: "Create a new password",
+    htmlNextResetLink: "The link expires in 1 hour. If you didn't request this, ignore this email.",
     introChangedNotice: "You changed your password in your Dragonfall profile. If this wasn't you, use Forgot password right away.",
     introChanged: "You changed your password in your Dragonfall profile. Here is the new password you chose:",
     introSetupTest: "This is a TEST email for SMTP setup. It is not a password recovery, and your game password has NOT changed.",
@@ -113,6 +121,13 @@ const MAIL_TEXT = {
     subjectChanged: "Dragonfall — senha alterada no perfil",
     subjectSetupTest: "[TESTE] Dragonfall — configuração de e-mail",
     subjectReminder: "Dragonfall — senha temporária de recuperação",
+    subjectResetLink: "Dragonfall — redefinir sua senha",
+    introResetLink: "Você pediu recuperação de senha no Dragonfall. Clique no link abaixo para criar uma senha nova.",
+    resetLinkLabel: "Crie sua senha nova aqui:",
+    nextResetLink: "O link expira em 1 hora. Sua senha atual continua valendo até você criar a nova.",
+    htmlResetLinkLabel: "Clique no link abaixo para criar uma senha nova:",
+    htmlResetLinkButton: "Criar senha nova",
+    htmlNextResetLink: "O link expira em 1 hora. Se você não pediu isso, ignore este e-mail.",
     introChangedNotice: "Você alterou sua senha no perfil do Dragonfall. Se não foi você, use Esqueci a senha imediatamente.",
     introChanged: "Você alterou sua senha no perfil do Dragonfall. Abaixo está a nova senha que você escolheu:",
     introSetupTest: "Este é um e-mail de TESTE de configuração SMTP. Não é recuperação de senha e sua senha do jogo NÃO mudou.",
@@ -140,6 +155,13 @@ const MAIL_TEXT = {
     subjectChanged: "Dragonfall — contraseña cambiada en tu perfil",
     subjectSetupTest: "[PRUEBA] Dragonfall — configuración de correo",
     subjectReminder: "Dragonfall — contraseña temporal de recuperación",
+    subjectResetLink: "Dragonfall — restablecer tu contraseña",
+    introResetLink: "Pediste recuperar tu contraseña en Dragonfall. Haz clic en el enlace de abajo para crear una contraseña nueva.",
+    resetLinkLabel: "Crea tu nueva contraseña aquí:",
+    nextResetLink: "El enlace caduca en 1 hora. Tu contraseña actual sigue funcionando hasta que crees una nueva.",
+    htmlResetLinkLabel: "Haz clic en el enlace de abajo para crear una contraseña nueva:",
+    htmlResetLinkButton: "Crear una contraseña nueva",
+    htmlNextResetLink: "El enlace caduca en 1 hora. Si no lo pediste tú, ignora este correo.",
     introChangedNotice: "Cambiaste tu contraseña en tu perfil de Dragonfall. Si no fuiste tú, usa Olvidé mi contraseña de inmediato.",
     introChanged: "Cambiaste tu contraseña en tu perfil de Dragonfall. Esta es la nueva contraseña que elegiste:",
     introSetupTest: "Este es un correo de PRUEBA de la configuración SMTP. No es una recuperación de contraseña y tu contraseña del juego NO cambió.",
@@ -167,6 +189,13 @@ const MAIL_TEXT = {
     subjectChanged: "Dragonfall — Passwort in deinem Profil geändert",
     subjectSetupTest: "[TEST] Dragonfall — E-Mail-Einrichtung",
     subjectReminder: "Dragonfall — temporäres Passwort zur Wiederherstellung",
+    subjectResetLink: "Dragonfall — Passwort zurücksetzen",
+    introResetLink: "Du hast bei Dragonfall eine Passwort-Wiederherstellung angefordert. Klicke auf den Link unten, um ein neues Passwort zu erstellen.",
+    resetLinkLabel: "Erstelle hier dein neues Passwort:",
+    nextResetLink: "Der Link läuft in 1 Stunde ab. Dein aktuelles Passwort funktioniert weiter, bis du ein neues erstellt hast.",
+    htmlResetLinkLabel: "Klicke auf den Link unten, um ein neues Passwort zu erstellen:",
+    htmlResetLinkButton: "Neues Passwort erstellen",
+    htmlNextResetLink: "Der Link läuft in 1 Stunde ab. Wenn du das nicht angefordert hast, ignoriere diese E-Mail.",
     introChangedNotice: "Du hast dein Passwort in deinem Dragonfall-Profil geändert. Wenn du das nicht warst, nutze sofort „Passwort vergessen“.",
     introChanged: "Du hast dein Passwort in deinem Dragonfall-Profil geändert. Hier ist das neue Passwort, das du gewählt hast:",
     introSetupTest: "Dies ist eine TEST-E-Mail für die SMTP-Einrichtung. Es ist keine Passwort-Wiederherstellung und dein Spielpasswort wurde NICHT geändert.",
@@ -194,6 +223,13 @@ const MAIL_TEXT = {
     subjectChanged: "Dragonfall — プロフィールのパスワードが変更されました",
     subjectSetupTest: "[テスト] Dragonfall — メール設定",
     subjectReminder: "Dragonfall — 復旧用の仮パスワード",
+    subjectResetLink: "Dragonfall — パスワードの再設定",
+    introResetLink: "Dragonfallでパスワードの復旧がリクエストされました。以下のリンクをクリックして、新しいパスワードを作成してください。",
+    resetLinkLabel: "新しいパスワードはこちらから作成してください：",
+    nextResetLink: "リンクの有効期限は1時間です。新しいパスワードを作成するまで、現在のパスワードは引き続き使えます。",
+    htmlResetLinkLabel: "以下のリンクをクリックして、新しいパスワードを作成してください：",
+    htmlResetLinkButton: "新しいパスワードを作成",
+    htmlNextResetLink: "リンクの有効期限は1時間です。お心当たりがない場合は、このメールを無視してください。",
     introChangedNotice: "Dragonfallのプロフィールでパスワードが変更されました。お心当たりがない場合は、すぐに「パスワードを忘れた」をご利用ください。",
     introChanged: "Dragonfallのプロフィールでパスワードが変更されました。新しく設定されたパスワードは次のとおりです。",
     introSetupTest: "これはSMTP設定のテストメールです。パスワードの復旧ではなく、ゲームのパスワードは変更されていません。",
@@ -221,6 +257,13 @@ const MAIL_TEXT = {
     subjectChanged: "Dragonfall — 你的个人资料中的密码已更改",
     subjectSetupTest: "[测试] Dragonfall — 邮件设置",
     subjectReminder: "Dragonfall — 用于找回的临时密码",
+    subjectResetLink: "Dragonfall — 重置你的密码",
+    introResetLink: "你在Dragonfall申请了找回密码。请点击下方链接创建新密码。",
+    resetLinkLabel: "请点击此处创建新密码：",
+    nextResetLink: "链接有效期为1小时。在你创建新密码之前，当前密码仍可继续使用。",
+    htmlResetLinkLabel: "请点击下方链接创建新密码：",
+    htmlResetLinkButton: "创建新密码",
+    htmlNextResetLink: "链接有效期为1小时。如果这不是你本人的请求，请忽略这封邮件。",
     introChangedNotice: "你在Dragonfall个人资料中更改了密码。如果不是你本人操作，请立即使用“忘记密码”。",
     introChanged: "你在Dragonfall个人资料中更改了密码。以下是你设置的新密码：",
     introSetupTest: "这是一封SMTP设置测试邮件。它不是密码找回邮件，你的游戏密码没有更改。",
@@ -271,14 +314,18 @@ export function buildMessage(password, kind = "reminder", language = null) {
     ? m.subjectChanged
     : kind === "setup-test"
       ? m.subjectSetupTest
-      : m.subjectReminder;
+      : kind === "reset-link"
+        ? m.subjectResetLink
+        : m.subjectReminder;
   const intro = kind === "changed-notice"
     ? m.introChangedNotice
     : kind === "changed"
     ? m.introChanged
     : kind === "setup-test"
       ? m.introSetupTest
-      : m.introReminder;
+      : kind === "reset-link"
+        ? m.introResetLink
+        : m.introReminder;
   const text = [
     m.greeting,
     "",
@@ -288,6 +335,8 @@ export function buildMessage(password, kind = "reminder", language = null) {
       ? m.setupTestWorking
       : kind === "changed-notice"
         ? m.noticeOldPassword
+      : kind === "reset-link"
+        ? `${m.resetLinkLabel}\n${password}`
       : withPassword(kind === "changed" ? m.passwordLineChanged : m.passwordLineReminder, password),
     "",
     kind === "setup-test"
@@ -296,7 +345,9 @@ export function buildMessage(password, kind = "reminder", language = null) {
         ? m.nextChangedNotice
       : kind === "changed"
         ? m.nextChanged
-        : m.nextReminder,
+        : kind === "reset-link"
+          ? m.nextResetLink
+          : m.nextReminder,
     "",
     m.footerText,
     "",
@@ -312,6 +363,11 @@ export function buildMessage(password, kind = "reminder", language = null) {
         ? m.htmlSetupTest
         : kind === "changed-notice"
           ? m.htmlChangedNotice
+        : kind === "reset-link"
+          ? `<p>${m.htmlResetLinkLabel}</p>
+      <p style="margin:16px 0"><a href="${password}" style="display:inline-block;background:#5a3a8a;color:#ffffff;text-decoration:none;font-weight:700;padding:12px 20px;border-radius:8px">${m.htmlResetLinkButton}</a></p>
+      <p style="word-break:break-all;font-size:0.88rem;color:#555">${password}</p>
+      <p>${m.htmlNextResetLink}</p>`
         : `<p>${kind === "changed" ? m.htmlPasswordLabelChanged : m.htmlPasswordLabelReminder}</p>
       <p style="font-size:1.35rem;font-weight:700;letter-spacing:0.05em;color:#5a3a8a;margin:16px 0">${password}</p>
       <p>${kind === "changed" ? m.htmlNextChanged : m.htmlNextReminder}</p>`}
@@ -398,6 +454,11 @@ export async function sendPasswordResetEmail(to, password, language = null) {
 /** E-mail de teste ao rodar CONFIGURAR-EMAIL.bat — NÃO é recuperação de senha. */
 export async function sendMailConfigTestEmail(to, language = null) {
   await deliverPasswordEmail(to, "", "setup-test", language);
+}
+
+/** E-mail com LINK de recuperação (1.51.68) — não envia senha temporária. */
+export async function sendPasswordResetLinkEmail(to, resetLink, language = null) {
+  await deliverPasswordEmail(to, resetLink, "reset-link", language);
 }
 
 export async function sendPasswordChangedEmail(to, password, language = null) {
