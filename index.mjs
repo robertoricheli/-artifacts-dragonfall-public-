@@ -23,15 +23,19 @@ import {
   seatForSocket,
   canHostStart,
   listRoomsCount,
+  listRoomsByStatus,
+  listPlayingRoomCodes,
   listActiveMatchCount,
   importPersistedRoom,
   listPlayingRooms,
   touchLastSeen,
+  pruneOldRooms,
 } from "./rooms.mjs";
 import {
   addToQueue,
   removeFromQueue,
   takePair,
+  requeueFront,
   isInQueue,
   queueSize,
 } from "./matchmaking.mjs";
@@ -43,7 +47,7 @@ import {
   isInRankedQueue,
   getMatchmakingMode,
 } from "./bullmq-matchmaking.mjs";
-import { rankedQueueSize } from "./matchmaking-ranked.mjs";
+import { rankedQueueSize, requeueRankedFront } from "./matchmaking-ranked.mjs";
 import {
   getMmr,
   getRankedProfile,
@@ -68,6 +72,8 @@ import {
   flushAllLiveRooms,
   loadLiveRoomsFromPg,
   deleteLiveRoom,
+  deleteStaleLiveRooms,
+  deleteOrphanLiveRooms,
 } from "./df-live-rooms.mjs";
 import {
   recordActionLatency,
@@ -137,6 +143,7 @@ import {
   openReactiveSuspension,
   resolveReactiveSuspension,
   expireReactiveSuspensionLocked,
+  reemitReactiveQuery,
 } from "./df-reactive-suspend.mjs";
 import {
   validateJoinRoom,
@@ -216,6 +223,7 @@ app.get("/health", (_req, res) => {
     motorError: motor.error || null,
     gameVersion: GAME_VERSION,
     rooms: listRoomsCount(),
+    roomsByStatus: listRoomsByStatus(),
     activeMatches: listActiveMatchCount(),
     queueCasual: queueSize(),
     queueRanked: rankedQueueSize(),
@@ -394,9 +402,32 @@ function startMatchForRoom(room, io) {
   return match;
 }
 
+/**
+ * Avisa o par de lotado uma vez só por entrada na fila (o timer ranked
+ * tenta a cada 500 ms — sem isto o cliente receberia `queue_busy` 2×/s
+ * enquanto o servidor estiver lotado).
+ */
+function notifyQueueBusyOnce(io, entry0, entry1, ranked) {
+  const busy = { ok: false, error: "SERVER_BUSY", inQueue: true, ...(ranked ? { ranked: true } : {}) };
+  for (const entry of [entry0, entry1]) {
+    if (!entry || entry._busyNotified) continue;
+    entry._busyNotified = true;
+    io.to(entry.socketId).emit("queue_busy", busy);
+  }
+}
+
 function pairRankedSockets(io, entry0, entry1) {
   const sid0 = entry0.socketId;
   const sid1 = entry1.socketId;
+  // Socket morto na fila não pode virar sala. Devolve o vivo à fila.
+  const s0alive = !!io.sockets.sockets.get(sid0);
+  const s1alive = !!io.sockets.sockets.get(sid1);
+  if (!s0alive || !s1alive) {
+    if (s0alive) requeueRankedFront([entry0]);
+    if (s1alive) requeueRankedFront([entry1]);
+    logMp("pair_ranked_dead_socket", { s0alive, s1alive });
+    return;
+  }
   // Gateway-only: não hospeda authority — redireciona ambos ao game shard.
   if (!isGameRole()) {
     const urls = getGameShardUrls();
@@ -411,18 +442,24 @@ function pairRankedSockets(io, entry0, entry1) {
     };
     if (!serverUrl) {
       logMp("pair_ranked_no_shard_url", {});
-      return;
+      requeueRankedFront([entry0, entry1]);
+      notifyQueueBusyOnce(io, entry0, entry1, true);
+      return false;
     }
     io.to(sid0).emit("shard_redirect", { ...payload, seatHint: 0 });
     io.to(sid1).emit("shard_redirect", { ...payload, seatHint: 1 });
-    return;
+    return true;
   }
   let room;
   try {
     room = createRoomOrThrow(createRoomOptsForLocalShard());
   } catch (e) {
+    // Servidor lotado: o par volta à fila e é avisado (o timer tenta de
+    // novo sozinho) — sem isto os dois sumiam da fila sem erro.
     logMp("pair_ranked_busy", { error: e?.message });
-    return;
+    requeueRankedFront([entry0, entry1]);
+    notifyQueueBusyOnce(io, entry0, entry1, true);
+    return false;
   }
   void rememberRoomShard(room.code);
   room.ranked = true;
@@ -465,6 +502,7 @@ function maybeFinishMatch(room, state) {
   if (!room.matchHistoryRecorded) {
     room.matchHistoryRecorded = true;
     room.status = "ended";
+    room.endedAt = Date.now();
     // C-N10: partida encerrada — o timer da apodrecida não dispara mais.
     clearApodrecidaTimer(room);
     void recordMatchEnd(room, state, GAME_VERSION);
@@ -521,6 +559,17 @@ function pairQueueSockets(io) {
     const [e0, e1] = pair;
     const sid0 = e0.socketId;
     const sid1 = e1.socketId;
+    // Socket morto na fila não pode virar sala (um lado morto + o outro
+    // preso no lobby). Devolve o vivo à frente da fila e tenta o próximo par.
+    const s0alive = !!io.sockets.sockets.get(sid0);
+    const s1alive = !!io.sockets.sockets.get(sid1);
+    if (!s0alive || !s1alive) {
+      if (s0alive) requeueFront([e0]);
+      if (s1alive) requeueFront([e1]);
+      logMp("pair_dead_socket", { s0alive, s1alive });
+      pair = takePair();
+      continue;
+    }
     if (!isGameRole()) {
       const urls = getGameShardUrls();
       const serverUrl = urls[0] || getGatewayUrl();
@@ -534,17 +583,28 @@ function pairQueueSockets(io) {
         };
         io.to(sid0).emit("shard_redirect", { ...payload, seatHint: 0 });
         io.to(sid1).emit("shard_redirect", { ...payload, seatHint: 1 });
+        pair = takePair();
+        continue;
       } else {
         logMp("pair_casual_no_shard_url", {});
+        requeueFront([e0, e1]);
+        const busy = { ok: false, error: "SERVER_BUSY", inQueue: true };
+        io.to(sid0).emit("queue_busy", busy);
+        io.to(sid1).emit("queue_busy", busy);
+        break;
       }
-      pair = takePair();
-      continue;
     }
     let room;
     try {
       room = createRoomOrThrow(createRoomOptsForLocalShard());
     } catch (e) {
+      // Servidor lotado: o par volta à fila e é avisado — sem isto os dois
+      // saíam da fila sem erro e ficavam em "PROCURANDO PARTIDA…" para sempre.
       logMp("pair_casual_busy", { error: e?.message });
+      requeueFront([e0, e1]);
+      const busy = { ok: false, error: "SERVER_BUSY", inQueue: true };
+      io.to(sid0).emit("queue_busy", busy);
+      io.to(sid1).emit("queue_busy", busy);
       break;
     }
     void rememberRoomShard(room.code);
@@ -937,16 +997,14 @@ function resetTurnTimerOnTurnChange(room) {
   }
 }
 
-/** Pós-boot: salas restauradas vêm com turnTimer:null — reativa relógio + IA. */
+/** Pós-boot: salas restauradas vêm com turnTimer:null — reativa relógio + IA.
+ * O deadline SALVO é preservado (rearmTurnTimerPreserveDeadline): dar 70 s
+ * novos no boot reiniciava o relógio de quem voltou (S76-T11). Se o prazo
+ * já passou, o fim forçado acontece uma vez só dentro do rearm. */
 function revivePlayingRoomTimers() {
   for (const room of listPlayingRooms()) {
     if (room.gameState?.winner != null) continue;
-    const expired = room.turnDeadline && room.turnDeadline <= Date.now();
-    if (expired) {
-      forceServerEndTurn(room);
-    } else {
-      resetTurnTimer(room);
-    }
+    rearmTurnTimerPreserveDeadline(room);
     scheduleServerAi(room, io, serverAiHooks(room));
   }
 }
@@ -1068,6 +1126,16 @@ io.on("connection", (socket) => {
     socket.join(joined.room.code);
     touchLastSeen(joined.room, joined.seat);
     const view = roomPublicView(joined.room, joined.seat);
+    // Limpar a IA ANTES de montar o replay: o ack carrega aiControlled e
+    // é dele que o cliente que volta restaura o indicador (F7, t_1020) —
+    // montado antes, o replay diria que a IA ainda está no assento.
+    // Em partida, retomar um assento é sempre volta de humano — mesmo sem
+    // token (ex.: jogo reaberto) — e a IA tem de sair do assento. O
+    // reconnected já vem true nesses casos, mas o guarda fica aqui também
+    // para nenhum caminho de entrada deixar a IA jogando no lugar dele.
+    if (joined.reconnected || joined.room.status === "playing") {
+      onHumanReconnectedClearAi(joined.room, joined.seat, io);
+    }
     // (§14.6) sala encerrada: o replay normal é null — o jogador que
     // volta depois do fim precisa do estado final no ack, senão a
     // batalha fica travada sem o que aplicar.
@@ -1083,9 +1151,10 @@ io.on("connection", (socket) => {
       shardId: shardIdForRoom(joined.room.code),
     });
     broadcastRoomState(joined.room);
-    if (joined.reconnected) {
-      onHumanReconnectedClearAi(joined.room, joined.seat, io);
-    }
+    // Pergunta reativa aberta para quem volta: reemite a QUERY (mesmo qid,
+    // mesmo prazo) — sem isto o box nunca reabre e a pergunta expira
+    // como NÃO sem o jogador saber.
+    reemitReactiveQuery(joined.room, io, joined.seat);
     if (joined.room.status === "playing") {
       if (joined.reconnected) {
         rearmTurnTimerPreserveDeadline(joined.room);
@@ -1846,7 +1915,7 @@ try {
 }
 
 await initRankedMatchmaking(async (entry0, entry1) => {
-  pairRankedSockets(io, entry0, entry1);
+  return pairRankedSockets(io, entry0, entry1);
 });
 
 // Warm motor + Redis adapter antes do listen.
@@ -1875,3 +1944,21 @@ httpServer.listen(PORT, () => {
     redisAdapter: isRedisAdapterAttached(),
   });
 });
+
+// Poda periódica de salas (T3): sem ela, sala encerrada só era podada num
+// create/join novo e ocupava vaga no limite de 40 até 2 h.
+setInterval(() => {
+  try {
+    const pruned = pruneOldRooms();
+    for (const p of pruned) {
+      // Apaga o espelho de toda sala podada (qualquer status — a linha
+      // pode existir como 'playing' órfã de uma corrida antiga).
+      void deleteLiveRoom(p.code);
+    }
+    void deleteStaleLiveRooms();
+    // Reconciliação: linha 'playing' sem sala viva na memória é órfã
+    // (podada por outro caminho, ex.: create/join). Só com 1 shard — com
+    // vários, cada processo só conhece as próprias salas.
+    if (getShardCount() <= 1) void deleteOrphanLiveRooms(listPlayingRoomCodes());
+  } catch (e) { /* nunca derrubar o servidor por causa da poda */ }
+}, 60_000).unref?.();

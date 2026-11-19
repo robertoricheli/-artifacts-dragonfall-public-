@@ -17,7 +17,11 @@ let bullQueue = null;
 async function tryPairLoop(onPair) {
   let pair = takeRankedPair();
   while (pair) {
-    await onPair(pair[0], pair[1]);
+    // onPair devolve false quando o par foi devolvido à fila por falta de
+    // sala — sem parar aqui o mesmo par seria retomado sem fim (laço
+    // infinito até estourar a memória).
+    const ok = await onPair(pair[0], pair[1]);
+    if (ok === false) break;
     pair = takeRankedPair();
   }
 }

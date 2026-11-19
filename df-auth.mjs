@@ -349,29 +349,30 @@ function xpRequiredForLevelUp(level) {
   return lv + 1;
 }
 
+/** XP por nível — igual ao cliente (Profile.XP_PER_LEVEL). */
+const XP_PER_LEVEL = 10;
+
+/**
+ * Curva de nível ÚNICA do servidor: 10 XP por nível, teto 62 — a mesma do
+ * cliente (Profile.level = 1 + xp/10, JOURNEY_MAX_LEVEL = 62) e da sala
+ * (rooms.mjs levelFromXp). Antes era triangular (10, 20, 30…), e o
+ * /auth/me devolvia nível 6 com 25 XP enquanto a sala mostrava 3 — e a
+ * Jornada liberava recompensa adiantada.
+ */
 function statsFromTotalXp(totalXp) {
-  let level = 1;
-  let remaining = Math.max(0, totalXp | 0);
-  while (true) {
-    const need = xpRequiredForLevelUp(level);
-    if (remaining < need) {
-      return {
-        level,
-        xpInLevel: remaining,
-        xpToNext: need,
-        totalXp: totalXp | 0,
-      };
-    }
-    remaining -= need;
-    level++;
-  }
+  const xp = Math.max(0, totalXp | 0);
+  const level = Math.min(JOURNEY_MAX_LEVEL, 1 + Math.floor(xp / XP_PER_LEVEL));
+  return {
+    level,
+    xpInLevel: xp - (level - 1) * XP_PER_LEVEL,
+    xpToNext: level >= JOURNEY_MAX_LEVEL ? 0 : XP_PER_LEVEL,
+    totalXp: xp,
+  };
 }
 
 /** XP total no início exato do nível `level`. */
 function totalXpForLevel(level) {
-  let total = 0;
-  for (let lv = 1; lv < (level | 0); lv++) total += xpRequiredForLevelUp(lv);
-  return total;
+  return Math.max(0, ((Math.min(level, JOURNEY_MAX_LEVEL) | 0) - 1)) * XP_PER_LEVEL;
 }
 
 function playerPublic(p) {
@@ -981,6 +982,26 @@ async function authProfile(req, body) {
     player.language = lang;
   }
 
+  /* Validações puras antes da reserva do nome (abaixo): um PATCH com
+   * baralho ou vitrine inválido era recusado DEPOIS de reservar o nome
+   * no banco — o nome ficava queimado para sempre, sem dono. */
+  if (body.customDecks != null) {
+    const norm = normalizeCustomDecks(body.customDecks, player.ownedCards);
+    if (!norm.ok) {
+      return {
+        status: 400,
+        data: { ok: false, error: norm.error, ...(norm.unowned ? { unowned: norm.unowned } : {}) },
+      };
+    }
+    player.customDecks = norm.decks;
+  }
+
+  if (body.achShowcase != null) {
+    const sc = validateShowcase(body.achShowcase, player.achClaimed);
+    if (!sc.ok) return { status: 400, data: { ok: false, error: sc.error } };
+    player.achShowcase = sc.showcase;
+  }
+
   if (body.displayName != null) {
     const name = String(body.displayName).trim();
     if (player.displayNameLocked) {
@@ -1019,23 +1040,6 @@ async function authProfile(req, body) {
     if (Number.isFinite(incoming)) {
       player.xpTotal = Math.max(player.xpTotal || 0, incoming);
     }
-  }
-
-  if (body.customDecks != null) {
-    const norm = normalizeCustomDecks(body.customDecks, player.ownedCards);
-    if (!norm.ok) {
-      return {
-        status: 400,
-        data: { ok: false, error: norm.error, ...(norm.unowned ? { unowned: norm.unowned } : {}) },
-      };
-    }
-    player.customDecks = norm.decks;
-  }
-
-  if (body.achShowcase != null) {
-    const sc = validateShowcase(body.achShowcase, player.achClaimed);
-    if (!sc.ok) return { status: 400, data: { ok: false, error: sc.error } };
-    player.achShowcase = sc.showcase;
   }
 
   const r = await persistPlayer(player, { expectedRevision: expectedRev ?? currentRev });

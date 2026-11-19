@@ -72,3 +72,18 @@ export function takeRankedPair() {
   }
   return null;
 }
+
+/**
+ * Devolve entradas à frente da fila ranked, na mesma ordem. Mesmo motivo
+ * que requeueFront() na fila casual: pareamento falho não pode perder
+ * os jogadores nem deixá-los sem resposta.
+ */
+export function requeueRankedFront(entries) {
+  const list = (Array.isArray(entries) ? entries : [entries]).filter(Boolean);
+  for (let i = list.length - 1; i >= 0; i--) {
+    const e = list[i];
+    removeFromRankedQueue(e.socketId);
+    queue.unshift(e);
+  }
+  queue.sort((a, b) => a.joinedAt - b.joinedAt);
+}

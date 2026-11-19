@@ -143,6 +143,37 @@ function emitQuery(room, io, pendente, query) {
   return true;
 }
 
+/**
+ * Reemite a pergunta reativa aberta para o assento que voltou (join_room).
+ * O replay não carrega o pendente e o cliente que volta nunca veria o
+ * box — sem isto, a pergunta expira como NÃO sem ele saber.
+ * NÃO rearma o timer: o prazo original (7 s + 1 s de graça) continua —
+ * cair e voltar não dá tempo extra. Devolve true se reemitiu.
+ */
+export function reemitReactiveQuery(room, io, seat) {
+  const pendente = room?.mpPendingReactive;
+  if (!pendente) return false;
+  if (pendente.defenderSeat !== seat) return false;
+  if (pendente.expiresAt != null && pendente.expiresAt <= Date.now()) return false;
+  if (room.aiControlled?.[seat]) return false; // a IA responde sozinha
+  let query = null;
+  if (pendente.kind === "reductions") {
+    const r = pendente.currentReduction || pendente.reductions?.[0];
+    if (!r) return false;
+    // Chuva: a pergunta nomeia o melhor alvo do lote (igual ao avanço).
+    const best = pendente.chuvaProtectAll ? bestChuvaProtectTarget(room, pendente) : null;
+    query = buildQuery({ ...pendente, kind: "reductions" }, pendente.qid, {
+      defenderIdx: best?.idx ?? currentReductionIdx(room, r),
+      defenderName: best?.name || r.targetName || "",
+      defenderUid: best?.uid || r.targetUid || "",
+    });
+  } else {
+    query = buildQueryForPendente(room, pendente);
+  }
+  if (!query) return false;
+  return emitQuery(room, io, pendente, query);
+}
+
 function buildQuery(pendente, qid, extra = {}) {
   // O asker é por redução (reductions): o burst carrega o dono do
   // campeão destruído; os demais kinds usam o asker do pendente.

@@ -6,6 +6,12 @@ import { ensureSeatTokens, seatTokenFor } from "./df-seat-token.mjs";
 import { scheduleRoomMirror, scheduleRoomMirrorDelete } from "./df-room-store.mjs";
 
 const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
+// Sala encerrada: só precisa ficar viva p/ o jogador que volta ver o fim
+// (replay final) — depois disso é vaga ocupada à toa no limite de 40.
+// Ajustável por ambiente (DF_ENDED_ROOM_TTL_MS), como DF_MAX_ROOMS.
+const ENDED_ROOM_TTL_MS = Number(process.env.DF_ENDED_ROOM_TTL_MS) || 10 * 60 * 1000;
+// Lobby sem ninguém conectado: ninguém vai voltar a ele.
+const EMPTY_LOBBY_TTL_MS = 10 * 60 * 1000;
 
 const rooms = new Map();
 
@@ -93,14 +99,32 @@ export function deleteRoom(code) {
   scheduleRoomMirrorDelete(code);
 }
 
+/**
+ * Remove salas vencidas. Devolve as removidas ({ code, status }) para o
+ * chamador limpar também os espelhos (Postgres/Redis). Antes só rodava
+ * em create/join e só com TTL de 2 h p/ tudo — salas encerradas ficavam
+ * ocupando vaga no limite de 40 até 2 h, e com 40/40 a busca travava
+ * sem erro visível.
+ */
 export function pruneOldRooms() {
   const now = Date.now();
+  const pruned = [];
   for (const [code, room] of rooms) {
-    if (now - room.createdAt > ROOM_TTL_MS) {
+    let expired = now - room.createdAt > ROOM_TTL_MS;
+    if (!expired && room.status === "ended") {
+      const endRef = room.endedAt || room.createdAt;
+      expired = now - endRef > ENDED_ROOM_TTL_MS;
+    }
+    if (!expired && room.status === "lobby" && !room.sockets[0] && !room.sockets[1]) {
+      expired = now - room.createdAt > EMPTY_LOBBY_TTL_MS;
+    }
+    if (expired) {
       rooms.delete(code);
       scheduleRoomMirrorDelete(code);
+      pruned.push({ code, status: room.status });
     }
   }
+  return pruned;
 }
 
 /** @returns {0|1|null} */
@@ -149,15 +173,36 @@ export function joinRoom(code, socketId, preferSeat = null, seatToken = null) {
     }
   }
 
+  // Token válido casa com o assento dele mesmo sem preferSeat (volta com
+  // o código guardado, sem dizer o assento) — ANTES do "primeiro vazio",
+  // senão quem volta ao assento 1 cai no 0 e a IA não sai do lugar certo.
+  if (seatToken) {
+    ensureSeatTokens(room);
+    const tokenSeat = room.seatTokens[0] === seatToken ? 0 : room.seatTokens[1] === seatToken ? 1 : null;
+    if (tokenSeat !== null) {
+      room.sockets[tokenSeat] = socketId;
+      touchLastSeen(room, tokenSeat);
+      return {
+        ok: true,
+        seat: tokenSeat,
+        room,
+        reconnected: true,
+        seatToken: seatTokenFor(room, tokenSeat),
+      };
+    }
+  }
+
   if (!room.sockets[0]) {
     room.sockets[0] = socketId;
     touchLastSeen(room, 0);
-    return { ok: true, seat: 0, room, seatToken: seatTokenFor(room, 0) };
+    // Em partida os dois assentos já têm dono — ocupar um assento vazio
+    // aqui é volta de humano, não entrada nova.
+    return { ok: true, seat: 0, room, reconnected: room.status === "playing", seatToken: seatTokenFor(room, 0) };
   }
   if (!room.sockets[1]) {
     room.sockets[1] = socketId;
     touchLastSeen(room, 1);
-    return { ok: true, seat: 1, room, seatToken: seatTokenFor(room, 1) };
+    return { ok: true, seat: 1, room, reconnected: room.status === "playing", seatToken: seatTokenFor(room, 1) };
   }
   return { ok: false, error: "ROOM_FULL" };
 }
@@ -285,6 +330,25 @@ export function listRoomsCount() {
   return rooms.size;
 }
 
+/** Códigos das salas em jogo (para reconciliar o espelho no Postgres). */
+export function listPlayingRoomCodes() {
+  const out = new Set();
+  for (const room of rooms.values()) {
+    if (room.status === "playing") out.add(room.code);
+  }
+  return out;
+}
+
+export function listRoomsByStatus() {
+  const out = { lobby: 0, playing: 0, ended: 0 };
+  for (const room of rooms.values()) {
+    if (room.status === "playing") out.playing += 1;
+    else if (room.status === "ended") out.ended += 1;
+    else out.lobby += 1;
+  }
+  return out;
+}
+
 export function listActiveMatchCount() {
   let n = 0;
   for (const room of rooms.values()) {
@@ -297,6 +361,20 @@ export function listActiveMatchCount() {
 export function importPersistedRoom(data) {
   if (!data?.code || rooms.has(data.code)) return null;
   if (rooms.size >= MAX_ROOMS) return null;
+  // Não ressuscitar sala velha demais (ex.: linha 'playing' de horas
+  // atrás que escapou do filtro de idade na leitura).
+  const ageRef = data.createdAt || Date.now();
+  if (Date.now() - ageRef > ROOM_TTL_MS) return null;
+  // Sala com vencedor já definido está encerrada, mesmo que o registro
+  // diga 'playing' (corrida da persistência antes do fim) — sem isto ela
+  // ressuscita e ocupa vaga até o TTL de 2 h.
+  if (data.gameState?.winner != null && data.status !== "ended") {
+    data = {
+      ...data,
+      status: "ended",
+      endedAt: data.updatedAt ? Date.parse(data.updatedAt) : Date.now(),
+    };
+  }
   const room = {
     code: data.code,
     createdAt: data.createdAt || Date.now(),

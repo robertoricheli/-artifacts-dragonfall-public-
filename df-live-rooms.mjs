@@ -69,7 +69,7 @@ function serializeRoom(room) {
 export function scheduleLiveRoomPersist(room) {
   if (!room?.code || room.status !== "playing") return;
   if (!isPostgresEnabled() || !schemaReady) return;
-  pending.set(room.code, serializeRoom(room));
+  pending.set(room.code, room);
   if (flushTimer) return;
   flushTimer = setTimeout(() => {
     flushTimer = null;
@@ -86,7 +86,10 @@ export async function flushLiveRoomPending() {
   if (!pool) return;
   const batch = [...pending.values()];
   pending.clear();
-  for (const row of batch) {
+  for (const room of batch) {
+    // A sala pode ter encerrado depois do agendamento — não ressuscitar.
+    if (!room?.code || room.status !== "playing") continue;
+    const row = serializeRoom(room);
     try {
       await pool.query(
         `INSERT INTO df_live_rooms (
@@ -153,7 +156,7 @@ export async function loadLiveRoomsFromPg() {
   if (!pool) return [];
   try {
     const res = await pool.query(
-      `SELECT * FROM df_live_rooms WHERE status = 'playing' ORDER BY updated_at DESC LIMIT 200`,
+      `SELECT * FROM df_live_rooms WHERE status = 'playing' AND updated_at > NOW() - INTERVAL '2 hours' ORDER BY updated_at DESC LIMIT 200`,
     );
     return (res.rows || []).map((r) => ({
       code: r.code,
@@ -178,10 +181,50 @@ export async function loadLiveRoomsFromPg() {
   }
 }
 
+/** Apaga linhas órfãs: encerradas (corrida agenda-antes-do-fim) e
+ *  'playing' sem atualização há mais de 2 h (servidor caiu e a linha
+ *  nunca mais seria restaurada). Só roda no intervalo de poda. */
+export async function deleteStaleLiveRooms() {
+  if (!isPostgresEnabled() || !schemaReady) return 0;
+  const pool = getPgPool();
+  if (!pool) return 0;
+  try {
+    const res = await pool.query(
+      `DELETE FROM df_live_rooms WHERE status <> 'playing' OR updated_at < NOW() - INTERVAL '2 hours'`,
+    );
+    return res.rowCount | 0;
+  } catch (e) {
+    logMp("live_room_stale_delete_err", { error: e?.message || String(e) });
+    return 0;
+  }
+}
+
+/** Apaga linhas 'playing' sem sala viva na memória (a memória é a
+ *  fonte — a linha é órfã de poda por outro caminho, de corrida antiga
+ *  ou de shutdown). Roda só no intervalo de poda, com 1 shard. */
+export async function deleteOrphanLiveRooms(liveCodes) {
+  if (!isPostgresEnabled() || !schemaReady) return 0;
+  const pool = getPgPool();
+  if (!pool) return 0;
+  try {
+    const codes = liveCodes ? [...liveCodes] : [];
+    const res = codes.length
+      ? await pool.query(
+          `DELETE FROM df_live_rooms WHERE status = 'playing' AND NOT (code = ANY($1))`,
+          [codes],
+        )
+      : await pool.query(`DELETE FROM df_live_rooms WHERE status = 'playing'`);
+    return res.rowCount | 0;
+  } catch (e) {
+    logMp("live_room_orphan_delete_err", { error: e?.message || String(e) });
+    return 0;
+  }
+}
+
 export async function flushAllLiveRooms(listPlayingRoomsFn) {
   if (typeof listPlayingRoomsFn === "function") {
     for (const room of listPlayingRoomsFn()) {
-      if (room?.status === "playing") pending.set(room.code, serializeRoom(room));
+      if (room?.status === "playing") pending.set(room.code, room);
     }
   }
   await flushLiveRoomPending();

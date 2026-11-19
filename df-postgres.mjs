@@ -39,18 +39,25 @@ export async function initPostgres() {
     pool = new pg.Pool({
       connectionString: url,
       ssl: process.env.PGSSL === "false" ? false : { rejectUnauthorized: false },
-      max: 4,
+      // Folga para logins/partidas em paralelo (era 4; o pool serializava
+      // tudo sob carga). Ajustável sem código: DF_PG_POOL_MAX.
+      max: Number(process.env.DF_PG_POOL_MAX || 8) || 8,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 15_000,
     });
     await pool.query(SCHEMA);
+    // O schema de analytics usa getPgPool(), que exige `enabled` — marcar
+    // aqui, com o pool criado e o schema base aplicado. Antes, `enabled`
+    // só virava true DEPOIS deste bloco e o initAnalyticsSchema()
+    // retornava false em silêncio no primeiro boot: o histórico de
+    // partidas nunca era gravado no Postgres (S76-T13).
+    enabled = true;
     try {
       const { initAnalyticsSchema } = await import("./df-analytics-pg.mjs");
       await initAnalyticsSchema();
     } catch (e) {
       console.warn("[postgres] analytics schema:", e?.message || e);
     }
-    enabled = true;
     console.log("[postgres] histórico/replays ativo");
     return { enabled: true };
   } catch (e) {

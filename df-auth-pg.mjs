@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS df_players (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS df_players_email ON df_players (email);
+-- A busca de login usa LOWER(email) (pgFindPlayerByEmail) — o índice em
+-- (email) não serve e o Postgres fazia Seq Scan. Índice funcional.
+CREATE INDEX IF NOT EXISTS df_players_email_lower ON df_players (LOWER(email));
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS owned_cards JSONB;
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS coins INT NOT NULL DEFAULT 0;
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS market_state JSONB;

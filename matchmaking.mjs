@@ -49,6 +49,21 @@ export function takePair() {
   return [a, b];
 }
 
+/**
+ * Devolve entradas à frente da fila, na mesma ordem (quem entrou primeiro
+ * continua primeiro). Usado quando o pareamento falhou (ex.: servidor
+ * lotado) — sem isto os dois jogadores saíam da fila sem aviso e ficavam
+ * presos em "PROCURANDO PARTIDA…".
+ */
+export function requeueFront(entries) {
+  const list = (Array.isArray(entries) ? entries : [entries]).filter(Boolean);
+  for (let i = list.length - 1; i >= 0; i--) {
+    const e = list[i];
+    removeFromQueue(e.socketId);
+    queue.unshift(e);
+  }
+}
+
 export function queueSize() {
   return queue.length;
 }
