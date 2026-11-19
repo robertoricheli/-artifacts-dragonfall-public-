@@ -196,6 +196,18 @@ export function leaveRoom(room, socketId) {
 }
 
 /**
+ * Nível do perfil — MESMA fórmula do cliente (Profile.level(),
+ * DRAGONFALL/scripts/profile.gd: XP_PER_LEVEL=10, JOURNEY_MAX_LEVEL=62):
+ * 1 + floor(xp/10), entre 1 e 62. NÃO usar statsFromTotalXp de
+ * df-auth.mjs aqui: aquela curva (custo level+1 por nível) é outra e
+ * divergiria do nível que o próprio jogador vê no perfil dele.
+ */
+export function levelFromXp(xp) {
+  const n = Math.floor((Number(xp) || 0) / 10);
+  return Math.min(62, Math.max(1, 1 + n));
+}
+
+/**
  * Vista pública. Em lobby não envia gameState (Fase 2 — payload leve).
  * Em playing, includeGameState=false para broadcasts de lobby-like.
  * Fog-of-war: mãos adversárias projetadas por seat.
@@ -230,6 +242,11 @@ export function roomPublicView(room, yourSeat = null, opts = {}) {
         connected: !!room.sockets[0],
         heroId: room.heroes[0],
         displayName: (room.playerNames || [null, null])[0] || null,
+        // (1.51.75) avatar e nível do perfil, para a tela de Partida
+        // Encontrada — preenchidos no pareamento; sem eles, null/0 e
+        // o cliente usa o retrato do herói / esconde o nível.
+        avatarHeroId: (room.playerAvatars || [null, null])[0] || null,
+        level: (room.playerLevels || [0, 0])[0] || 0,
         ready: room.ready[0],
         isYou: yourSeat === 0,
       },
@@ -238,6 +255,8 @@ export function roomPublicView(room, yourSeat = null, opts = {}) {
         connected: !!room.sockets[1],
         heroId: room.heroes[1],
         displayName: (room.playerNames || [null, null])[1] || null,
+        avatarHeroId: (room.playerAvatars || [null, null])[1] || null,
+        level: (room.playerLevels || [0, 0])[1] || 0,
         ready: room.ready[1],
         isYou: yourSeat === 1,
       },

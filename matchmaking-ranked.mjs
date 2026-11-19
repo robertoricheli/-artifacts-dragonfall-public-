@@ -3,7 +3,7 @@
  */
 import { getMmr } from "./df-ranked-store.mjs";
 
-/** @type {{ socketId: string, playerId: string, mmr: number, joinedAt: number }[]} */
+/** @type {{ socketId: string, playerId: string, mmr: number, joinedAt: number, avatarHeroId: string | null, level: number }[]} */
 const queue = [];
 
 export function removeFromRankedQueue(socketId) {
@@ -11,7 +11,7 @@ export function removeFromRankedQueue(socketId) {
   if (i >= 0) queue.splice(i, 1);
 }
 
-export function addToRankedQueue(socketId, playerId) {
+export function addToRankedQueue(socketId, playerId, profile = null) {
   removeFromRankedQueue(socketId);
   let max = 24;
   try {
@@ -22,7 +22,15 @@ export function addToRankedQueue(socketId, playerId) {
     return { ok: false, error: "SERVER_BUSY", mmr: getMmr(playerId), position: queue.length };
   }
   const mmr = getMmr(playerId);
-  queue.push({ socketId, playerId: String(playerId), mmr, joinedAt: Date.now() });
+  // (1.51.75) avatar e nível do perfil, capturados no join_ranked_queue.
+  queue.push({
+    socketId,
+    playerId: String(playerId),
+    mmr,
+    joinedAt: Date.now(),
+    avatarHeroId: profile?.avatarHeroId || null,
+    level: profile?.level || 0,
+  });
   queue.sort((a, b) => a.joinedAt - b.joinedAt);
   return { ok: true, mmr, position: queue.length };
 }

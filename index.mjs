@@ -19,6 +19,7 @@ import {
   leaveRoom,
   disconnectSocket,
   roomPublicView,
+  levelFromXp,
   seatForSocket,
   canHostStart,
   listRoomsCount,
@@ -426,6 +427,10 @@ function pairRankedSockets(io, entry0, entry1) {
   void rememberRoomShard(room.code);
   room.ranked = true;
   room.rankedPlayerIds = [entry0.playerId, entry1.playerId];
+  // (1.51.75) avatar e nível de cada jogador, para a tela de Partida
+  // Encontrada — capturados na fila; o roomPublicView os emite.
+  room.playerAvatars = [entry0.avatarHeroId || null, entry1.avatarHeroId || null];
+  room.playerLevels = [entry0.level || 0, entry1.level || 0];
   room.winPoints = 15;
   room.sockets[0] = sid0;
   room.sockets[1] = sid1;
@@ -549,6 +554,10 @@ function pairQueueSockets(io) {
     // Nome do jogador na sala (Fase 5, decisão 4): vem da fila; sem
     // token o nome fica null e o cliente mostra só o herói.
     room.playerNames = [e0.displayName || null, e1.displayName || null];
+    // (1.51.75) avatar e nível de cada jogador, para a tela de Partida
+    // Encontrada — capturados na fila; o roomPublicView os emite.
+    room.playerAvatars = [e0.avatarHeroId || null, e1.avatarHeroId || null];
+    room.playerLevels = [e0.level || 0, e1.level || 0];
     ensureSeatTokens(room);
     socketRoom.set(sid0, room.code);
     socketRoom.set(sid1, room.code);
@@ -1209,11 +1218,20 @@ io.on("connection", (socket) => {
     leaveSocketRoom(socket);
     let playerId = schema.playerId || null;
     let verified = false;
+    // (1.51.75) avatar e nível do perfil, para a tela de Partida Encontrada.
+    let rankedProfile = null;
     const tok = payload?.token || payload?.authToken;
     if (tok) {
       try {
         const account = await authPlayerFromToken(String(tok));
-        if (account?.id) { playerId = account.id; verified = true; }
+        if (account?.id) {
+          playerId = account.id;
+          verified = true;
+          rankedProfile = {
+            avatarHeroId: account.avatarHeroId || null,
+            level: levelFromXp(account.xpTotal || 0),
+          };
+        }
       } catch (e) { /* keep schema playerId */ }
     }
     // Id de conta sem sessão válida não conta como aquela conta (Rank da temporada é só de contas logadas).
@@ -1223,7 +1241,7 @@ io.on("connection", (socket) => {
       } catch (e) { /* */ }
     }
     if (!playerId) playerId = `anon-${socket.id.slice(0, 12)}`;
-    const info = addToRankedQueue(socket.id, playerId);
+    const info = addToRankedQueue(socket.id, playerId, rankedProfile);
     if (info?.ok === false) {
       ack?.({ ok: false, error: info.error || "SERVER_BUSY" });
       return;
@@ -1268,14 +1286,22 @@ io.on("connection", (socket) => {
     // Nome na fila (Fase 5): token opcional; sem token ou inválido,
     // entra anônimo (displayName null) como o cliente antigo.
     let displayName = null;
+    // (1.51.75) avatar e nível do perfil, para a tela de Partida Encontrada.
+    let queueProfile = null;
     const tok = payload?.token || payload?.authToken;
     if (tok) {
       try {
         const account = await authPlayerFromToken(String(tok));
         if (account?.displayName) displayName = account.displayName;
+        if (account) {
+          queueProfile = {
+            avatarHeroId: account.avatarHeroId || null,
+            level: levelFromXp(account.xpTotal || 0),
+          };
+        }
       } catch (e) { /* anônimo */ }
     }
-    const queued = addToQueue(socket.id, displayName);
+    const queued = addToQueue(socket.id, displayName, queueProfile);
     if (queued?.ok === false) {
       ack?.({ ok: false, error: queued.error || "SERVER_BUSY" });
       return;

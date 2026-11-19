@@ -3,7 +3,7 @@
  */
 import { MAX_QUEUE } from "./df-mp-limits.mjs";
 
-/** @type {{ socketId: string, joinedAt: number, displayName: string | null }[]} */
+/** @type {{ socketId: string, joinedAt: number, displayName: string | null, avatarHeroId: string | null, level: number }[]} */
 const queue = [];
 
 export function removeFromQueue(socketId) {
@@ -14,12 +14,20 @@ export function removeFromQueue(socketId) {
 /**
  * @returns {{ ok: true, size: number } | { ok: false, error: string, size: number }}
  */
-export function addToQueue(socketId, displayName = null) {
+export function addToQueue(socketId, displayName = null, profile = null) {
   removeFromQueue(socketId);
   if (queue.length >= MAX_QUEUE) {
     return { ok: false, error: "SERVER_BUSY", size: queue.length };
   }
-  queue.push({ socketId, joinedAt: Date.now(), displayName: displayName || null });
+  // (1.51.75) avatar e nível do perfil, capturados no join_queue —
+  // o pareamento os copia para a sala e o roomPublicView os emite.
+  queue.push({
+    socketId,
+    joinedAt: Date.now(),
+    displayName: displayName || null,
+    avatarHeroId: profile?.avatarHeroId || null,
+    level: profile?.level || 0,
+  });
   return { ok: true, size: queue.length };
 }
 
