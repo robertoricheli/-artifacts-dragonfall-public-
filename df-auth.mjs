@@ -544,7 +544,7 @@ async function authRegister(req, body) {
     avatarHeroId: null,
     hubBackgroundId: null,
     avatarColor: null,
-    avatarFrame: "2", // (1.51.82) base p/ todos: MOLDURA AVATAR 2.
+    avatarFrame: "2", // (1.51.85) padrao p/ conta nova: MOLDURA AVATAR 2.
     battleBg: null,
     language: null,
     customDecks: null,
@@ -709,7 +709,7 @@ async function authGoogle(req, body) {
     avatarHeroId: null,
     hubBackgroundId: null,
     avatarColor: null,
-    avatarFrame: "2", // (1.51.82) base p/ todos: MOLDURA AVATAR 2.
+    avatarFrame: "2", // (1.51.85) padrao p/ conta nova: MOLDURA AVATAR 2.
     battleBg: null,
     language: null,
     customDecks: null,
@@ -970,8 +970,8 @@ async function authProfile(req, body) {
   // batalha. Valores inválidos são ignorados (normCustomField → null).
   for (const [bodyKey, playerKey] of [["avatarColor", "avatarColor"], ["avatarFrame", "avatarFrame"], ["battleBg", "battleBg"]]) {
     if (body[bodyKey] != null) {
-      // (1.51.82) moldura 2 p/ todos: o cliente 1.51.82 envia o indice 0
-      // p/ a moldura 2; 0/1/3/ausente/invalido -> "2". Aceita n. ou string.
+      // (1.51.85) molduras 1/2/3 voltaram: 1/2/3 passam, 0/ausente/
+      // invalido -> "2". Aceita n. ou string.
       if (playerKey === "avatarFrame") {
         player[playerKey] = normalizeAvatarFrame(body[bodyKey]);
         continue;
@@ -1188,7 +1188,7 @@ async function authProfileImport(req, body) {
   const customFields = {};
   for (const key of ["avatarColor", "avatarFrame", "battleBg"]) {
     if (body?.[key] == null) continue;
-    // (1.51.82) moldura 2 p/ todos (ver PATCH acima).
+    // (1.51.85) molduras 1/2/3 voltaram (ver PATCH acima).
     if (key === "avatarFrame") {
       customFields[key] = normalizeAvatarFrame(body[key]);
       continue;

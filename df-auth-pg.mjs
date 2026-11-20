@@ -40,10 +40,9 @@ ALTER TABLE df_players ADD COLUMN IF NOT EXISTS ach_showcase JSONB;
 -- batalha. Contas antigas ficam NULL (ausente) até o primeiro PATCH.
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS avatar_color TEXT;
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS avatar_frame TEXT;
--- Molduras (1.51.82): TODOS com a MOLDURA AVATAR 2 como base. As antigas
--- 1 e 3 nao existem mais; o cliente 1.51.82 envia o indice 0 p/ a 2.
--- Migra o que ja esta guardado (0/1/3/ausente/invalido -> '2') no boot.
-UPDATE df_players SET avatar_frame = '2' WHERE avatar_frame IS DISTINCT FROM '2';
+-- Molduras (1.51.85): as 3 molduras (1, 2, 3) voltaram — a 1.51.82 forcava
+-- todo mundo p/ '2' no boot (UPDATE removido aqui). O que ja esta guardado
+-- fica como esta; so o legado 0 vira '2' na leitura (normalizeAvatarFrame).
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS battle_bg TEXT;
 -- Migração 2026-11-12-01 (Fase 1 multiplayer — login com Google).
 -- Testada na cópia local do backup antes do deploy; reversível (ver
@@ -83,19 +82,18 @@ CREATE INDEX IF NOT EXISTS df_password_resets_player ON df_password_resets (play
 CREATE INDEX IF NOT EXISTS df_password_resets_expires ON df_password_resets (expires_at);
 `;
 
-// Moldura do avatar (1.51.82): TODOS com a MOLDURA AVATAR 2 como base.
-// O cliente 1.51.82 envia o indice 0 p/ a moldura 2 (a lista dele tem
-// 1 item); 1 e 3 eram as molduras removidas. 0/1/3/ausente/invalido -> "2".
-// O servidor NUNCA envia "0": um cliente 1.51.81 que o recebesse
-// mostraria o Padrao azul em vez da 2.
+// Moldura do avatar (1.51.85): as 3 molduras (1, 2, 3) voltaram — a
+// decisao da 1.51.82 (forcar tudo p/ "2") foi revogada. Aceita "1"/"2"/"3"
+// (e os numeros 1/2/3). Legado 0/"0" (cliente antigo) vira "2".
+// Ausente/invalido/vazio -> "2" (padrao). O servidor NUNCA envia "0".
 const AVATAR_FRAME_DEFAULT = "2";
-// Indices antigos -> moldura atual (quando vierem molduras novas, e aqui).
-const AVATAR_FRAME_LEGACY = { 0: "2", 1: "2", 2: "2", 3: "2" };
+const AVATAR_FRAME_VALID = new Set(["1", "2", "3"]);
 export function normalizeAvatarFrame(value) {
   if (value == null) return AVATAR_FRAME_DEFAULT;
   const key = String(value).trim();
   if (key === "") return AVATAR_FRAME_DEFAULT;
-  return AVATAR_FRAME_LEGACY[key] ?? AVATAR_FRAME_DEFAULT;
+  if (AVATAR_FRAME_VALID.has(key)) return key;
+  return AVATAR_FRAME_DEFAULT;
 }
 
 function rowToPlayer(row) {
