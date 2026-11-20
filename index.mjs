@@ -58,6 +58,7 @@ import {
 import { initPostgres, isPostgresEnabled, getReplayByRoomCode, shutdownPostgres } from "./df-postgres.mjs";
 import { initAuthStore, getAuthStoreMode, setSessionRevokedNotifier } from "./df-auth.mjs";
 import { authPlayerFromToken, getPlayerById, startSessionPruneScheduler } from "./df-auth-store.mjs";
+import { normalizeAvatarFrame } from "./df-auth-pg.mjs";
 import { initRankStore, recordRankedSeasonMatch, flushRankStore, rankStoreMode } from "./df-rank.mjs";
 import { recordMatchEnd } from "./df-match-history.mjs";
 import { turnDeadlineFor } from "./df-turn-clock.mjs";
@@ -517,6 +518,8 @@ function pairRankedSockets(io, entry0, entry1) {
   // Encontrada — capturados na fila; o roomPublicView os emite.
   room.playerAvatars = [entry0.avatarHeroId || null, entry1.avatarHeroId || null];
   room.playerLevels = [entry0.level || 0, entry1.level || 0];
+  // (1.51.80) moldura do avatar, mesmo caminho.
+  room.playerFrames = [normalizeAvatarFrame(entry0.avatarFrame), normalizeAvatarFrame(entry1.avatarFrame)];
   room.winPoints = 15;
   room.sockets[0] = sid0;
   room.sockets[1] = sid1;
@@ -667,6 +670,8 @@ function pairQueueSockets(io) {
     // Encontrada — capturados na fila; o roomPublicView os emite.
     room.playerAvatars = [e0.avatarHeroId || null, e1.avatarHeroId || null];
     room.playerLevels = [e0.level || 0, e1.level || 0];
+    // (1.51.80) moldura do avatar, mesmo caminho.
+    room.playerFrames = [normalizeAvatarFrame(e0.avatarFrame), normalizeAvatarFrame(e1.avatarFrame)];
     ensureSeatTokens(room);
     socketRoom.set(sid0, room.code);
     socketRoom.set(sid1, room.code);
@@ -1348,6 +1353,7 @@ io.on("connection", (socket) => {
           rankedProfile = {
             avatarHeroId: account.avatarHeroId || null,
             level: levelFromXp(account.xpTotal || 0),
+            avatarFrame: normalizeAvatarFrame(account.avatarFrame),
           };
         }
       } catch (e) { /* keep schema playerId */ }
@@ -1415,6 +1421,7 @@ io.on("connection", (socket) => {
           queueProfile = {
             avatarHeroId: account.avatarHeroId || null,
             level: levelFromXp(account.xpTotal || 0),
+            avatarFrame: normalizeAvatarFrame(account.avatarFrame),
           };
         }
       } catch (e) { /* anônimo */ }

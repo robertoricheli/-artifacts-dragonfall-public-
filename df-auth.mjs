@@ -23,6 +23,7 @@ import {
   getDisplayNameOwner,
   updateDisplayName,
 } from "./df-auth-store.mjs";
+import { normalizeAvatarFrame } from "./df-auth-pg.mjs";
 import { verifyGoogleIdToken } from "./df-auth-google.mjs";
 import { createRateLimiter } from "./rate-limit.mjs";
 import {
@@ -386,7 +387,7 @@ function playerPublic(p) {
     avatarHeroId: p.avatarHeroId || null,
     hubBackgroundId: p.hubBackgroundId || null,
     avatarColor: p.avatarColor || null,
-    avatarFrame: p.avatarFrame || null,
+    avatarFrame: normalizeAvatarFrame(p.avatarFrame),
     battleBg: p.battleBg || null,
     language: LANGUAGE_IDS.has(p.language) ? p.language : null,
     customDecks: Array.isArray(p.customDecks) ? p.customDecks : null,
@@ -543,7 +544,7 @@ async function authRegister(req, body) {
     avatarHeroId: null,
     hubBackgroundId: null,
     avatarColor: null,
-    avatarFrame: null,
+    avatarFrame: "2", // (1.51.82) base p/ todos: MOLDURA AVATAR 2.
     battleBg: null,
     language: null,
     customDecks: null,
@@ -708,7 +709,7 @@ async function authGoogle(req, body) {
     avatarHeroId: null,
     hubBackgroundId: null,
     avatarColor: null,
-    avatarFrame: null,
+    avatarFrame: "2", // (1.51.82) base p/ todos: MOLDURA AVATAR 2.
     battleBg: null,
     language: null,
     customDecks: null,
@@ -969,6 +970,12 @@ async function authProfile(req, body) {
   // batalha. Valores inválidos são ignorados (normCustomField → null).
   for (const [bodyKey, playerKey] of [["avatarColor", "avatarColor"], ["avatarFrame", "avatarFrame"], ["battleBg", "battleBg"]]) {
     if (body[bodyKey] != null) {
+      // (1.51.82) moldura 2 p/ todos: o cliente 1.51.82 envia o indice 0
+      // p/ a moldura 2; 0/1/3/ausente/invalido -> "2". Aceita n. ou string.
+      if (playerKey === "avatarFrame") {
+        player[playerKey] = normalizeAvatarFrame(body[bodyKey]);
+        continue;
+      }
       const v = normCustomField(body[bodyKey]);
       if (v != null) player[playerKey] = v;
     }
@@ -1180,6 +1187,12 @@ async function authProfileImport(req, body) {
   // ausente/null não apaga o que já existe.
   const customFields = {};
   for (const key of ["avatarColor", "avatarFrame", "battleBg"]) {
+    if (body?.[key] == null) continue;
+    // (1.51.82) moldura 2 p/ todos (ver PATCH acima).
+    if (key === "avatarFrame") {
+      customFields[key] = normalizeAvatarFrame(body[key]);
+      continue;
+    }
     const v = normCustomField(body?.[key]);
     if (v != null) customFields[key] = v;
   }

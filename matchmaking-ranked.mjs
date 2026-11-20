@@ -2,8 +2,9 @@
  * Fila ranked 1v1 — pareamento por MMR (janela expande com espera).
  */
 import { getMmr } from "./df-ranked-store.mjs";
+import { normalizeAvatarFrame } from "./df-auth-pg.mjs";
 
-/** @type {{ socketId: string, playerId: string, mmr: number, joinedAt: number, avatarHeroId: string | null, level: number }[]} */
+/** @type {{ socketId: string, playerId: string, mmr: number, joinedAt: number, avatarHeroId: string | null, level: number, avatarFrame: string | null }[]} */
 const queue = [];
 
 export function removeFromRankedQueue(socketId) {
@@ -30,6 +31,8 @@ export function addToRankedQueue(socketId, playerId, profile = null) {
     joinedAt: Date.now(),
     avatarHeroId: profile?.avatarHeroId || null,
     level: profile?.level || 0,
+    // (1.51.80) moldura do avatar: mesmo caminho, para a Partida Encontrada.
+    avatarFrame: normalizeAvatarFrame(profile?.avatarFrame),
   });
   queue.sort((a, b) => a.joinedAt - b.joinedAt);
   return { ok: true, mmr, position: queue.length };

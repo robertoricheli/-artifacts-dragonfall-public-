@@ -4,6 +4,7 @@
 import { MAX_ROOMS } from "./df-mp-limits.mjs";
 import { ensureSeatTokens, seatTokenFor } from "./df-seat-token.mjs";
 import { scheduleRoomMirror, scheduleRoomMirrorDelete } from "./df-room-store.mjs";
+import { normalizeAvatarFrame } from "./df-auth-pg.mjs";
 
 const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
 // Sala encerrada: só precisa ficar viva p/ o jogador que volta ver o fim
@@ -292,6 +293,9 @@ export function roomPublicView(room, yourSeat = null, opts = {}) {
         // o cliente usa o retrato do herói / esconde o nível.
         avatarHeroId: (room.playerAvatars || [null, null])[0] || null,
         level: (room.playerLevels || [0, 0])[0] || 0,
+        // (1.51.80) moldura do avatar, mesmo caminho (room.playerFrames).
+        // (1.51.82) moldura 2 p/ todos; sem ela, "2" (nunca null nem "0").
+        avatarFrame: normalizeAvatarFrame((room.playerFrames || [null, null])[0]),
         ready: room.ready[0],
         isYou: yourSeat === 0,
       },
@@ -302,6 +306,7 @@ export function roomPublicView(room, yourSeat = null, opts = {}) {
         displayName: (room.playerNames || [null, null])[1] || null,
         avatarHeroId: (room.playerAvatars || [null, null])[1] || null,
         level: (room.playerLevels || [0, 0])[1] || 0,
+        avatarFrame: normalizeAvatarFrame((room.playerFrames || [null, null])[1]),
         ready: room.ready[1],
         isYou: yourSeat === 1,
       },

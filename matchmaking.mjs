@@ -2,8 +2,9 @@
  * Fila 1v1 — pareia dois jogadores em uma sala nova.
  */
 import { MAX_QUEUE } from "./df-mp-limits.mjs";
+import { normalizeAvatarFrame } from "./df-auth-pg.mjs";
 
-/** @type {{ socketId: string, joinedAt: number, displayName: string | null, avatarHeroId: string | null, level: number }[]} */
+/** @type {{ socketId: string, joinedAt: number, displayName: string | null, avatarHeroId: string | null, level: number, avatarFrame: string | null }[]} */
 const queue = [];
 
 export function removeFromQueue(socketId) {
@@ -27,6 +28,8 @@ export function addToQueue(socketId, displayName = null, profile = null) {
     displayName: displayName || null,
     avatarHeroId: profile?.avatarHeroId || null,
     level: profile?.level || 0,
+    // (1.51.80) moldura do avatar: mesmo caminho, para a Partida Encontrada.
+    avatarFrame: normalizeAvatarFrame(profile?.avatarFrame),
   });
   return { ok: true, size: queue.length };
 }
