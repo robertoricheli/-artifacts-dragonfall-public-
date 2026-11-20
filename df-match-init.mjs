@@ -134,16 +134,17 @@ export function createInitialMatchState(opts) {
     }
   }
 
-  // Saque livre do 1º turno do jogador que começa (manual: 4 → 5).
-  // runTurnMaintenance NÃO compra carta — draw explícito aqui.
+  // (1.51.78 ponto 2) O saque livre do 1º turno NÃO acontece aqui:
+  // os dois jogadores saem do match_start com 4 cartas (igual ao
+  // offline, que dá 4 e só saca a 5ª depois). A 5ª carta de quem começa
+  // é sacada por startMatchForRoom (index.mjs), 4,5 s após o match_start
+  // — 3 s de contagem da "Partida Encontrada" + 1,5 s após a batalha
+  // abrir — via envelope DRAW_CARD (o cliente já o aplica).
+  // A manutenção de início de turno continua (status/PV/refresh do
+  // campo vazio); só o saque explícito saiu daqui.
   const { DfRules } = bootDragonfallEngine();
   if (DfRules?.runTurnMaintenance) {
     DfRules.runTurnMaintenance(state, firstPlayer);
-  }
-  const opener = state.players[firstPlayer];
-  if (opener?.deck?.length && (opener.hand?.length || 0) < 8) {
-    const drawn = opener.deck.pop();
-    if (drawn) opener.hand.push(cloneCard(drawn));
   }
 
   return state;

@@ -399,7 +399,56 @@ function startMatchForRoom(room, io) {
   broadcastRoomState(room);
   resetTurnTimer(room);
   touchPersist(room);
+  // (1.51.78 ponto 2) Saque livre do 1º turno de quem começa: 4,5 s
+  // após o match_start (3 s de contagem + 1,5 s após a batalha abrir).
+  // Sem isto quem começa nasceria com 5 cartas na mão. O timer só
+  // dispara se a partida ainda estiver no 1º turno sem vencedor; se a
+  // sala acabou antes, não faz nada. O envelope vai aos DOIS assentos
+  // (emitActionEnvelope projeta a mão do adversário por assento).
+  scheduleOpeningFreeDraw(room, io, firstPlayer);
   return match;
+}
+
+// (1.51.78 ponto 2) Saca a 5ª carta de quem começa, 4,5 s após o
+// match_start, e difunde como DRAW_CARD com o estado autoritativo.
+function scheduleOpeningFreeDraw(room, io, firstPlayer) {
+  setTimeout(() => {
+    void (async () => {
+      try {
+        await withRoomLock(room.code, async () => {
+          const live = getRoom(room.code);
+          if (!live || live.status !== "playing") return;
+          const gs = live.gameState;
+          if (!gs || gs.winner != null) return;
+          if (gs.turnNumber !== 1 || gs.currentPlayer !== firstPlayer) return;
+          const opener = gs.players?.[firstPlayer];
+          if (!opener?.deck?.length) return;
+          if ((opener.hand?.length || 0) >= 8) return; // SEM-QUEIMA: mão cheia não saca.
+          const drawn = opener.deck.pop();
+          if (!drawn) return;
+          opener.hand.push(JSON.parse(JSON.stringify(drawn)));
+          live.actionSeq = (live.actionSeq || 0) + 1;
+          live.lastSnapshot = { state: gs, full: true };
+          emitActionEnvelope(live, {
+            seq: live.actionSeq,
+            fromSeat: firstPlayer,
+            action: { type: "DRAW_CARD", playerId: firstPlayer },
+            snapshot: null,
+            authoritativeState: gs,
+            events: [{ type: "DRAW", playerId: firstPlayer }],
+            logEntry: null,
+            delegated: false,
+            skip: false,
+            forfeit: false,
+            presentation: null,
+            presentationEnvelope: null,
+            turnDeadline: live.turnDeadline || null,
+          });
+          touchPersist(live);
+        });
+      } catch (e) { /* o saque não pode derrubar a partida */ }
+    })();
+  }, 4500);
 }
 
 /**
