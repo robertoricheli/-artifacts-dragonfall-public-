@@ -18,6 +18,7 @@ import {
   joinRoom,
   leaveRoom,
   disconnectSocket,
+  deleteRoom,
   roomPublicView,
   levelFromXp,
   seatForSocket,
@@ -58,7 +59,6 @@ import {
 import { initPostgres, isPostgresEnabled, getReplayByRoomCode, shutdownPostgres } from "./df-postgres.mjs";
 import { initAuthStore, getAuthStoreMode, setSessionRevokedNotifier } from "./df-auth.mjs";
 import { authPlayerFromToken, getPlayerById, startSessionPruneScheduler } from "./df-auth-store.mjs";
-import { normalizeAvatarFrame } from "./df-auth-pg.mjs";
 import { initRankStore, recordRankedSeasonMatch, flushRankStore, rankStoreMode } from "./df-rank.mjs";
 import { recordMatchEnd } from "./df-match-history.mjs";
 import { turnDeadlineFor } from "./df-turn-clock.mjs";
@@ -88,6 +88,10 @@ import {
   startSelfKeepAlive,
 } from "./df-mp-metrics.mjs";
 import { allowSync, MAX_ROOMS, MAX_QUEUE } from "./df-mp-limits.mjs";
+import {
+  recordPairExclusion,
+  exclusionKeyForPlayer,
+} from "./df-pair-exclusion.mjs";
 import { ensureSeatTokens, seatTokenFor } from "./df-seat-token.mjs";
 import {
   redisConfigured,
@@ -328,6 +332,127 @@ const socketRoom = new Map();
  *  avisar + derrubar os sockets antigos quando outro aparelho logar. */
 const socketPlayer = new Map();
 
+/**
+ * Aceite da partida (1.51.86) — Tela de Encontro de Partidas.
+ * code -> { accepted: [bool, bool], playerKeys: [chave0, chave1],
+ *           socketKeys: [sid0, sid1], acceptTimer, startTimer }.
+ * O estado vive FORA da sala (nunca vai p/ o espelho Postgres/Redis, que
+ * não serializa timers) e morre junto com ela na dissolução.
+ * Tempos do protocolo: 30 s p/ aceitar, 5 s de contagem p/ iniciar.
+ */
+const matchAcceptState = new Map();
+const ACCEPT_TIMEOUT_MS = 30000;
+const START_COUNTDOWN_MS = 5000;
+
+function clearAcceptState(code) {
+  const st = matchAcceptState.get(code);
+  if (!st) return;
+  if (st.acceptTimer) clearTimeout(st.acceptTimer);
+  if (st.startTimer) clearTimeout(st.startTimer);
+  matchAcceptState.delete(code);
+}
+
+/**
+ * Arma o aceite de uma sala recém-pareada (casual ou ranked): 30 s a
+ * partir do match_found. Sem os dois aceites, dissolve como tempo esgotado.
+ */
+function armMatchAccept(room, key0, key1) {
+  clearAcceptState(room.code);
+  const st = {
+    accepted: [false, false],
+    // Chave do par p/ a exclusão: conta (quando houver) E socket — o
+    // cliente volta à busca com o mesmo token, mas mesmo sem ele (ou
+    // com outro socket) a exclusão tem de valer p/ os dois aparelhos.
+    playerKeys: [key0, key1],
+    socketKeys: [room.sockets[0], room.sockets[1]],
+    acceptTimer: null,
+    startTimer: null,
+  };
+  matchAcceptState.set(room.code, st);
+  st.acceptTimer = setTimeout(() => {
+    const live = getRoom(room.code);
+    if (!live || live.status !== "lobby") {
+      clearAcceptState(room.code);
+      return;
+    }
+    const cur = matchAcceptState.get(room.code);
+    if (!cur || (cur.accepted[0] && cur.accepted[1])) return;
+    dissolveLobbyRoom(live, "timeout", null);
+  }, ACCEPT_TIMEOUT_MS);
+  st.acceptTimer.unref?.();
+}
+
+/**
+ * Os dois aceitaram E os dois heróis estão confirmados: avisa a contagem
+ * de 5 s e depois roda o startMatch existente. Também é chamado pelo
+ * set_hero — o aceite pode chegar antes dos heróis.
+ */
+function maybeBeginStarting(room) {
+  const st = matchAcceptState.get(room.code);
+  if (!st || room.status !== "lobby" || st.startTimer) return;
+  if (!st.accepted[0] || !st.accepted[1]) return;
+  if (!room.heroes[0] || !room.heroes[1]) return;
+  if (!room.sockets[0] || !room.sockets[1]) return;
+  if (st.acceptTimer) {
+    clearTimeout(st.acceptTimer);
+    st.acceptTimer = null;
+  }
+  emitRoom(room, "match_starting", { countdown: 5 });
+  st.startTimer = setTimeout(() => {
+    const live = getRoom(room.code);
+    if (!live || live.status !== "lobby") {
+      clearAcceptState(room.code);
+      return;
+    }
+    const match = startMatchForRoom(live, io);
+    clearAcceptState(room.code);
+    if (!match) {
+      // Herói ou socket sumiu durante a contagem: dissolve como tempo.
+      dissolveLobbyRoom(live, "timeout", null);
+    }
+  }, START_COUNTDOWN_MS);
+  st.startTimer.unref?.();
+}
+
+/**
+ * Dissolve a sala de lobby POR COMPLETO (1.51.86): registra a exclusão
+ * do par por 30 s, avisa quem ficou com match_declined, cancela os
+ * timers, tira os dois do socketRoom, tira os sockets da sala e apaga
+ * a sala do store (+ espelho). Sem isto o join_queue seguinte devolveria
+ * a sala velha. Só p/ salas de pareamento (com estado de aceite).
+ */
+function dissolveLobbyRoom(room, reason, bySeat) {
+  const st = matchAcceptState.get(room.code);
+  if (st?.playerKeys?.[0] && st?.playerKeys?.[1]) {
+    recordPairExclusion(st.playerKeys[0], st.playerKeys[1]);
+  }
+  // Mesmo par, chave por socket: cobre o re-join sem token (mesma
+  // conexão) — a exclusão vale p/ o par de aparelhos, não só p/ a conta.
+  if (st?.socketKeys?.[0] && st?.socketKeys?.[1]) {
+    recordPairExclusion(`s:${st.socketKeys[0]}`, `s:${st.socketKeys[1]}`);
+  }
+  clearAcceptState(room.code);
+  const payload = { bySeat: bySeat ?? null, reason };
+  if (reason === "timeout") {
+    // Tempo esgotado: os dois ainda estão conectados, avisa os dois.
+    emitRoom(room, "match_declined", payload);
+  } else if (bySeat === 0 || bySeat === 1) {
+    // Recusa/desconexão: só quem ficou precisa saber (quem recusou já
+    // recebeu o ack; quem desconectou não está mais aqui).
+    const peerSid = room.sockets[bySeat === 0 ? 1 : 0];
+    if (peerSid) io.to(peerSid).emit("match_declined", payload);
+  }
+  for (const sid of room.sockets) {
+    if (!sid) continue;
+    socketRoom.delete(sid);
+    const s = io.sockets.sockets.get(sid);
+    try { s?.leave(room.code); } catch (e) { /* */ }
+  }
+  deleteRoom(room.code);
+  void deleteLiveRoom(room.code);
+  logMp("lobby_dissolved", { code: room.code, reason, bySeat: bySeat ?? null });
+}
+
 function leaveSocketRoom(socket, peerLeftExtra = null) {
   const code = socketRoom.get(socket.id);
   const room = getRoom(code);
@@ -516,10 +641,10 @@ function pairRankedSockets(io, entry0, entry1) {
   room.rankedPlayerIds = [entry0.playerId, entry1.playerId];
   // (1.51.75) avatar e nível de cada jogador, para a tela de Partida
   // Encontrada — capturados na fila; o roomPublicView os emite.
+  // (1.51.80) moldura do avatar, mesmo caminho.
   room.playerAvatars = [entry0.avatarHeroId || null, entry1.avatarHeroId || null];
   room.playerLevels = [entry0.level || 0, entry1.level || 0];
-  // (1.51.80) moldura do avatar, mesmo caminho.
-  room.playerFrames = [normalizeAvatarFrame(entry0.avatarFrame), normalizeAvatarFrame(entry1.avatarFrame)];
+  room.playerFrames = [entry0.avatarFrame || null, entry1.avatarFrame || null];
   room.winPoints = 15;
   room.sockets[0] = sid0;
   room.sockets[1] = sid1;
@@ -530,6 +655,12 @@ function pairRankedSockets(io, entry0, entry1) {
   const s1 = io.sockets.sockets.get(sid1);
   s0?.join(room.code);
   s1?.join(room.code);
+  // (1.51.86) aceite: 30 s a partir do ranked_match_found.
+  armMatchAccept(
+    room,
+    exclusionKeyForPlayer(entry0.playerId, sid0),
+    exclusionKeyForPlayer(entry1.playerId, sid1),
+  );
   io.to(sid0).emit("ranked_match_found", {
     ...roomPublicView(room, 0),
     seat: 0,
@@ -668,10 +799,10 @@ function pairQueueSockets(io) {
     room.playerNames = [e0.displayName || null, e1.displayName || null];
     // (1.51.75) avatar e nível de cada jogador, para a tela de Partida
     // Encontrada — capturados na fila; o roomPublicView os emite.
+    // (1.51.80) moldura do avatar, mesmo caminho.
     room.playerAvatars = [e0.avatarHeroId || null, e1.avatarHeroId || null];
     room.playerLevels = [e0.level || 0, e1.level || 0];
-    // (1.51.80) moldura do avatar, mesmo caminho.
-    room.playerFrames = [normalizeAvatarFrame(e0.avatarFrame), normalizeAvatarFrame(e1.avatarFrame)];
+    room.playerFrames = [e0.avatarFrame || null, e1.avatarFrame || null];
     ensureSeatTokens(room);
     socketRoom.set(sid0, room.code);
     socketRoom.set(sid1, room.code);
@@ -679,6 +810,12 @@ function pairQueueSockets(io) {
     const s1 = io.sockets.sockets.get(sid1);
     s0?.join(room.code);
     s1?.join(room.code);
+    // (1.51.86) aceite: 30 s a partir do match_found.
+    armMatchAccept(
+      room,
+      exclusionKeyForPlayer(e0.playerId, sid0),
+      exclusionKeyForPlayer(e1.playerId, sid1),
+    );
     io.to(sid0).emit("match_found", {
       ...roomPublicView(room, 0),
       seat: 0,
@@ -1280,9 +1417,47 @@ io.on("connection", (socket) => {
     }
     broadcastRoomState(room);
     if (room.heroes[0] && room.heroes[1]) {
-      startMatchForRoom(room, io);
+      // (1.51.86) o início agora exige os dois aceites: quando os heróis
+      // estão confirmados, só falta o aceite — a contagem de 5 s só
+      // começa quando os dois assentos aceitarem (maybeBeginStarting).
+      // Sala sem estado de aceite (create_room legado, sem pareamento)
+      // mantém o comportamento de hoje: inicia na hora.
+      if (matchAcceptState.has(room.code)) maybeBeginStarting(room);
+      else startMatchForRoom(room, io);
     }
     ack?.({ ok: true });
+  });
+
+  // (1.51.86) Aceite da partida — só em lobby de pareamento.
+  socket.on("accept_match", (_payload, ack) => {
+    const room = getRoom(socketRoom.get(socket.id));
+    if (!room) return ack?.({ ok: false, error: "NOT_IN_ROOM" });
+    const seat = seatForSocket(room, socket.id);
+    if (seat === null) return ack?.({ ok: false, error: "NO_SEAT" });
+    if (room.status !== "lobby") return ack?.({ ok: false, error: "NOT_LOBBY" });
+    const st = matchAcceptState.get(room.code);
+    if (!st) return ack?.({ ok: false, error: "NOT_IN_MATCH" });
+    if (st.startTimer) return ack?.({ ok: true, alreadyStarting: true });
+    st.accepted[seat] = true;
+    const peer = seat === 0 ? 1 : 0;
+    if (room.sockets[peer]) {
+      io.to(room.sockets[peer]).emit("opponent_accepted", { seat });
+    }
+    maybeBeginStarting(room);
+    ack?.({ ok: true });
+  });
+
+  // (1.51.86) Recusa da partida — só em lobby de pareamento. Dissolve a
+  // sala por completo e exclui o par por 30 s (o outro volta à busca).
+  socket.on("decline_match", (_payload, ack) => {
+    const room = getRoom(socketRoom.get(socket.id));
+    if (!room) return ack?.({ ok: false, error: "NOT_IN_ROOM" });
+    const seat = seatForSocket(room, socket.id);
+    if (seat === null) return ack?.({ ok: false, error: "NO_SEAT" });
+    if (room.status !== "lobby") return ack?.({ ok: false, error: "NOT_LOBBY" });
+    if (!matchAcceptState.has(room.code)) return ack?.({ ok: false, error: "NOT_IN_MATCH" });
+    ack?.({ ok: true });
+    dissolveLobbyRoom(room, "decline", seat);
   });
 
   socket.on("set_win_points", (payload, ack) => {
@@ -1353,7 +1528,7 @@ io.on("connection", (socket) => {
           rankedProfile = {
             avatarHeroId: account.avatarHeroId || null,
             level: levelFromXp(account.xpTotal || 0),
-            avatarFrame: normalizeAvatarFrame(account.avatarFrame),
+            avatarFrame: account.avatarFrame || null,
           };
         }
       } catch (e) { /* keep schema playerId */ }
@@ -1412,21 +1587,24 @@ io.on("connection", (socket) => {
     let displayName = null;
     // (1.51.75) avatar e nível do perfil, para a tela de Partida Encontrada.
     let queueProfile = null;
+    // (1.51.86) playerId da conta: chave da exclusão pós-recusa.
+    let queuePlayerId = null;
     const tok = payload?.token || payload?.authToken;
     if (tok) {
       try {
         const account = await authPlayerFromToken(String(tok));
         if (account?.displayName) displayName = account.displayName;
         if (account) {
+          queuePlayerId = account.id || null;
           queueProfile = {
             avatarHeroId: account.avatarHeroId || null,
             level: levelFromXp(account.xpTotal || 0),
-            avatarFrame: normalizeAvatarFrame(account.avatarFrame),
+            avatarFrame: account.avatarFrame || null,
           };
         }
       } catch (e) { /* anônimo */ }
     }
-    const queued = addToQueue(socket.id, displayName, queueProfile);
+    const queued = addToQueue(socket.id, displayName, queueProfile, queuePlayerId);
     if (queued?.ok === false) {
       ack?.({ ok: false, error: queued.error || "SERVER_BUSY" });
       return;
@@ -1857,6 +2035,22 @@ io.on("connection", (socket) => {
     const code = socketRoom.get(socket.id);
     const room = getRoom(code);
     if (!room) return;
+    // (1.51.86) queda durante o aceite = recusa: dissolve a sala de
+    // lobby por completo (exclusão do par por 30 s) e avisa o outro
+    // assento com match_declined {reason:"disconnect"}. Em partida o
+    // comportamento de hoje não muda (IA assume, volta por rejoin).
+    if (room.status === "lobby" && matchAcceptState.has(room.code)) {
+      const seat = seatForSocket(room, socket.id);
+      socketRoom.delete(socket.id);
+      recordDisconnect({
+        roomCode: room.code,
+        seat: seat ?? null,
+        playing: false,
+      });
+      if (seat !== null) dissolveLobbyRoom(room, "disconnect", seat);
+      else clearAcceptState(room.code);
+      return;
+    }
     const info = disconnectSocket(room, socket.id);
     socketRoom.delete(socket.id);
     recordDisconnect({
@@ -2007,6 +2201,8 @@ setInterval(() => {
   try {
     const pruned = pruneOldRooms();
     for (const p of pruned) {
+      // (1.51.86) sala podada não pode deixar timer de aceite órfão.
+      clearAcceptState(p.code);
       // Apaga o espelho de toda sala podada (qualquer status — a linha
       // pode existir como 'playing' órfã de uma corrida antiga).
       void deleteLiveRoom(p.code);
@@ -2018,3 +2214,14 @@ setInterval(() => {
     if (getShardCount() <= 1) void deleteOrphanLiveRooms(listPlayingRoomCodes());
   } catch (e) { /* nunca derrubar o servidor por causa da poda */ }
 }, 60_000).unref?.();
+
+// (1.51.86) Varredura da fila casual (1 s): sem ela, um par cuja
+// exclusão de 30 s expirou ficaria esperando para sempre — o pareamento
+// casual só acontecia no join_queue. Com <2 na fila o takePair volta
+// na hora; com o par excluído, volta null e tenta de novo no próximo
+// segundo, até a exclusão expirar e o par formar.
+setInterval(() => {
+  try {
+    pairQueueSockets(io);
+  } catch (e) { /* nunca derrubar o servidor por causa da varredura */ }
+}, 1000).unref?.();

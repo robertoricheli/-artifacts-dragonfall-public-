@@ -2,7 +2,7 @@
  * Fila ranked 1v1 — pareamento por MMR (janela expande com espera).
  */
 import { getMmr } from "./df-ranked-store.mjs";
-import { normalizeAvatarFrame } from "./df-auth-pg.mjs";
+import { isPairExcluded, exclusionKeyForPlayer } from "./df-pair-exclusion.mjs";
 
 /** @type {{ socketId: string, playerId: string, mmr: number, joinedAt: number, avatarHeroId: string | null, level: number, avatarFrame: string | null }[]} */
 const queue = [];
@@ -24,6 +24,7 @@ export function addToRankedQueue(socketId, playerId, profile = null) {
   }
   const mmr = getMmr(playerId);
   // (1.51.75) avatar e nível do perfil, capturados no join_ranked_queue.
+  // (1.51.80) moldura do avatar: mesmo caminho, para a Partida Encontrada.
   queue.push({
     socketId,
     playerId: String(playerId),
@@ -31,8 +32,7 @@ export function addToRankedQueue(socketId, playerId, profile = null) {
     joinedAt: Date.now(),
     avatarHeroId: profile?.avatarHeroId || null,
     level: profile?.level || 0,
-    // (1.51.80) moldura do avatar: mesmo caminho, para a Partida Encontrada.
-    avatarFrame: normalizeAvatarFrame(profile?.avatarFrame),
+    avatarFrame: profile?.avatarFrame || null,
   });
   queue.sort((a, b) => a.joinedAt - b.joinedAt);
   return { ok: true, mmr, position: queue.length };
@@ -61,6 +61,16 @@ export function takeRankedPair() {
     for (let j = i + 1; j < queue.length; j++) {
       const b = queue[j];
       if (Math.abs(a.mmr - b.mmr) <= window) {
+        // (1.51.86) par excluído pós-recusa: pula e tenta o próximo.
+        // A chave é a formatada (u:<conta> / s:<socket>), igual ao
+        // registro em dissolveLobbyRoom — o playerId cru nunca bateria
+        // com ela (correção 2026-11-21, t_1127).
+        if (
+          isPairExcluded(
+            exclusionKeyForPlayer(a.playerId, a.socketId),
+            exclusionKeyForPlayer(b.playerId, b.socketId),
+          )
+        ) continue;
         queue.splice(j, 1);
         queue.splice(i, 1);
         return [a, b];
@@ -69,6 +79,14 @@ export function takeRankedPair() {
   }
   // Fallback: pareia os dois mais antigos após 60s de espera
   if (now - queue[0].joinedAt >= 60000 && queue.length >= 2) {
+    // (1.51.86) nem o fallback fura a exclusão de 30 s (mesma chave
+    // formatada da busca por MMR acima).
+    if (
+      isPairExcluded(
+        exclusionKeyForPlayer(queue[0].playerId, queue[0].socketId),
+        exclusionKeyForPlayer(queue[1].playerId, queue[1].socketId),
+      )
+    ) return null;
     const a = queue.shift();
     const b = queue.shift();
     return [a, b];
