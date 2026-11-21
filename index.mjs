@@ -92,6 +92,14 @@ import {
   recordPairExclusion,
   exclusionKeyForPlayer,
 } from "./df-pair-exclusion.mjs";
+import {
+  recordOnlineBan,
+  onlineBanRemainingSeconds,
+  onlineBanUntil,
+  onlineBanKeyForPlayer,
+  ONLINE_BAN_FOUND_SECONDS,
+  ONLINE_BAN_STARTING_SECONDS,
+} from "./df-online-ban.mjs";
 import { ensureSeatTokens, seatTokenFor } from "./df-seat-token.mjs";
 import {
   redisConfigured,
@@ -1460,6 +1468,28 @@ io.on("connection", (socket) => {
     dissolveLobbyRoom(room, "decline", seat);
   });
 
+  // (1.51.88 item 8) Fechar a tela de encontro em PARTIDA ENCONTRADA
+  // (30 s) ou PARTIDA INICIANDO (60 s): registra a pausa na conta de
+  // quem fechou e dissolve a sala como uma recusa — o adversário
+  // recebe o mesmo match_declined de sempre e volta a procurar. A
+  // pausa vale mesmo relogando (a chave é a conta); sem conta, a
+  // conexão. O botão RECUSAR não passa por aqui e não tem pausa.
+  socket.on("leave_encontro", (payload, ack) => {
+    const room = getRoom(socketRoom.get(socket.id));
+    if (!room) return ack?.({ ok: false, error: "NOT_IN_ROOM" });
+    const seat = seatForSocket(room, socket.id);
+    if (seat === null) return ack?.({ ok: false, error: "NO_SEAT" });
+    if (room.status !== "lobby") return ack?.({ ok: false, error: "NOT_LOBBY" });
+    const st = matchAcceptState.get(room.code);
+    if (!st) return ack?.({ ok: false, error: "NOT_IN_MATCH" });
+    const phase = payload?.phase === "starting" ? "starting" : "found";
+    const seconds = phase === "starting" ? ONLINE_BAN_STARTING_SECONDS : ONLINE_BAN_FOUND_SECONDS;
+    const key = st.playerKeys?.[seat] || onlineBanKeyForPlayer(null, socket.id);
+    const bannedUntil = recordOnlineBan(key, seconds);
+    ack?.({ ok: true, banSeconds: seconds, bannedUntil });
+    dissolveLobbyRoom(room, "decline", seat);
+  });
+
   socket.on("set_win_points", (payload, ack) => {
     const schema = validateSetWinPoints(payload);
     if (!schema.ok) return ack?.({ ok: false, error: schema.error });
@@ -1540,6 +1570,17 @@ io.on("connection", (socket) => {
       } catch (e) { /* */ }
     }
     if (!playerId) playerId = `anon-${socket.id.slice(0, 12)}`;
+    // (1.51.88 item 8) pausa do online: fechar a tela de encontro em
+    // PARTIDA ENCONTRADA (30 s) ou INICIANDO (60 s) deixa a conta sem
+    // entrar na fila até o prazo passar. Depois da checagem de sala
+    // (quem já tem sala volta para ela) e com a conta resolvida (a
+    // mesma chave do leave_encontro). Vale relogando.
+    const rankedBanKey = onlineBanKeyForPlayer(playerId, socket.id);
+    const rankedBanLeft = onlineBanRemainingSeconds(rankedBanKey);
+    if (rankedBanLeft > 0) {
+      ack?.({ ok: false, error: "ONLINE_BAN", remainingSeconds: rankedBanLeft, bannedUntil: onlineBanUntil(rankedBanKey) });
+      return;
+    }
     const info = addToRankedQueue(socket.id, playerId, rankedProfile);
     if (info?.ok === false) {
       ack?.({ ok: false, error: info.error || "SERVER_BUSY" });
@@ -1603,6 +1644,17 @@ io.on("connection", (socket) => {
           };
         }
       } catch (e) { /* anônimo */ }
+    }
+    // (1.51.88 item 8) pausa do online: fechar a tela de encontro em
+    // PARTIDA ENCONTRADA (30 s) ou INICIANDO (60 s) deixa a conta sem
+    // entrar na fila até o prazo passar. Depois da checagem de sala
+    // (quem já tem sala volta para ela) e com a conta resolvida (a
+    // mesma chave do leave_encontro). Vale relogando.
+    const banKey = onlineBanKeyForPlayer(queuePlayerId, socket.id);
+    const banLeft = onlineBanRemainingSeconds(banKey);
+    if (banLeft > 0) {
+      ack?.({ ok: false, error: "ONLINE_BAN", remainingSeconds: banLeft, bannedUntil: onlineBanUntil(banKey) });
+      return;
     }
     const queued = addToQueue(socket.id, displayName, queueProfile, queuePlayerId);
     if (queued?.ok === false) {
