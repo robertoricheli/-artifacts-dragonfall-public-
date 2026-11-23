@@ -1762,9 +1762,17 @@ io.on("connection", (socket) => {
           : (action.clientActionId != null ? String(action.clientActionId) : null);
         if (clientActionId) {
           if (!room._ackedClientActions) room._ackedClientActions = new Map();
-          const prevAck = room._ackedClientActions.get(`${seat}:${clientActionId}`);
-          if (prevAck) {
-            return ack?.(prevAck);
+          const prev = room._ackedClientActions.get(`${seat}:${clientActionId}`);
+          // (1.51.96 item 6) o clientActionId do cliente recomeça do
+          // zero a cada reabertura do jogo ("a-<assento>-<seq>"): uma
+          // ação NOVA com o mesmo id de uma ação ANTIGA recebia o ack
+          // guardado sem ser aplicada — o jogador que voltava não
+          // conseguia agir (o END_TURN voltava ok=true com o estado
+          // antigo). O replay só vale para o reenvio DA MESMA ação
+          // (após ACK_TIMEOUT); ação diferente com o mesmo id é
+          // processada normalmente e substitui o registro.
+          if (prev && prev.actionJson === JSON.stringify(action)) {
+            return ack?.(prev.ack);
           }
         }
 
@@ -1819,7 +1827,7 @@ io.on("connection", (socket) => {
               || room.mpPendingReactive?.presentationEnvelope?.visuals || undefined,
           };
           if (clientActionId) {
-            room._ackedClientActions.set(`${seat}:${clientActionId}`, ackSuspended);
+            room._ackedClientActions.set(`${seat}:${clientActionId}`, { ack: ackSuspended, actionJson: JSON.stringify(action) });
             if (room._ackedClientActions.size > 200) {
               const first = room._ackedClientActions.keys().next().value;
               room._ackedClientActions.delete(first);
@@ -1943,7 +1951,7 @@ io.on("connection", (socket) => {
             : {}),
         };
         if (clientActionId) {
-          room._ackedClientActions.set(`${seat}:${clientActionId}`, ackPayload);
+          room._ackedClientActions.set(`${seat}:${clientActionId}`, { ack: ackPayload, actionJson: JSON.stringify(action) });
           // Limite simples — evita crescimento infinito.
           if (room._ackedClientActions.size > 200) {
             const first = room._ackedClientActions.keys().next().value;
