@@ -235,13 +235,15 @@ function canSameTurnAttackAfterSummon(state, seat, card, actionsAfter) {
   return hasLegalAttackTarget(state, seat, stub);
 }
 
-/** Premissas 1/15: aliado com Técnicas/Grito deve poder atacar no mesmo turno. */
+/** Premissas 1/15: aliado com Técnicas/Grito deve poder atacar no mesmo turno.
+ *  (1.51.96 item 13a) SILENCIADO não recebe Sobrepujar (Técnicas) nem
+ *  Fúria (Grito) — não conta como atacante do follow-up. */
 function canAllyFollowUpAttackAfterGrant(state, seat, actionsAfter, grant) {
   if ((actionsAfter ?? 0) < 1 || enemyFieldCount(state, seat) <= 0) return false;
   const field = state.players[seat]?.field || [];
   if (!field.length) return false;
   for (const c of field) {
-    if (!c || c.tapped || c.frozen) continue;
+    if (!c || c.tapped || c.frozen || c.silenced) continue;
     const stub = {
       ...c,
       tapped: false,
@@ -252,6 +254,158 @@ function canAllyFollowUpAttackAfterGrant(state, seat, actionsAfter, grant) {
     if (hasLegalAttackTarget(state, seat, stub)) return true;
   }
   return false;
+}
+
+/** (1.51.96 item 8) espelho de _hook_ready (ai_brain.gd): o Gancho está
+ *  pronto para usar neste turno? (herói Gancho, Ultimate disponível e
+ *  espaço no próprio campo). */
+function hookReady(state, seat) {
+  const pl = state.players[seat];
+  if (!pl) return false;
+  const ultType = pl.heroDef?.ultimateType || pl.ultimateType;
+  if (ultType !== "hook") return false;
+  const maxUlt = getEffectiveMaxUltimateUses(pl, pl.heroDef?.id || pl.heroId);
+  if ((pl.ultimateUses ?? 0) >= maxUlt || pl.usedUltimateThisTurn) return false;
+  return (pl.field || []).length < MAX_FIELD;
+}
+
+/** (1.51.96 item 11) espelho de _can_attack_after_grito (ai_brain.gd):
+ *  depois de pagar o custo, algum aliado com a Fúria (+1 de Poder) pode
+ *  atacar E destruir um adversário. A carta invocada NÃO conta (não
+ *  recebe a própria Fúria); SILENCIADO não recebe Fúria (item 13a) e a
+ *  APODRECIDA nunca ganha Poder — nenhum dos dois conta. */
+function canAttackAfterGrito(state, seat, cost) {
+  const pl = state.players[seat];
+  if (!pl) return false;
+  const foes = foesExcludingCharmed(state, seat);
+  if (!foes.length) return false;
+  const statused = state.aiStatusedUids || new Set();
+  for (const a of (pl.field || [])) {
+    if (!a || a.silenced || a.podridao || a.name === "APODRECIDA") continue;
+    if (a.tapped || a.frozen || a.charme) continue;
+    const pa = (a.currentPower ?? a.power ?? 0) + 1;
+    for (const { c: f } of foes) {
+      if (!f || f.shielded || f.charme) continue;
+      if (isResistenteServer(f) && (a.freeAttack || hasInvestida(a)
+        || a.prisaoPrismatica || a.urso_pesado || a.name === "URSO PESADO")) continue;
+      if ((pl.actions ?? 0) - (cost || 0) < attackActionCost(a, f)) continue;
+      const stub = { ...a, currentPower: pa };
+      const { killD } = combatOutcomeOverpower(stub, f);
+      if (!killD) continue;
+      if (statused.has(f.uid)) continue;
+      return true;
+    }
+  }
+  return false;
+}
+
+/** (1.51.96 item 11) espelho de _grito_worth_it (ai_brain.gd): o Grito
+ *  vale com um ataque que aproveite a Fúria — e também sem adversários
+ *  em campo, quando o +1 de Poder ainda vale como defesa. */
+function gritoWorthIt(state, seat, cost) {
+  if (!foesExcludingCharmed(state, seat).length) {
+    return (state.players[seat]?.field || []).some((a) => a && !a.silenced
+      && !(a.podridao || a.name === "APODRECIDA"));
+  }
+  return canAttackAfterGrito(state, seat, cost);
+}
+
+/** (1.51.96 itens 12 e 14) espelho de _free_attack_kill_possible
+ *  (ai_brain.gd): o aliado mais forte que pode receber o ataque livre
+ *  da Tina DESTRÓI um adversário com ele. NUNCA num P1, nunca num
+ *  SILENCIADO (item 13a), nunca cansado ou apodrecida; a Investida não
+ *  ataca Resistente. Devolve { attIdx } ou null. */
+function freeAttackKillPossible(state, seat) {
+  const pl = state.players[seat];
+  if (!pl) return null;
+  if (!foesExcludingCharmed(state, seat).length) return null;
+  const statused = state.aiStatusedUids || new Set();
+  const valid = [];
+  (pl.field || []).forEach((a, i) => {
+    if (!a || a.tapped || a.podridao || a.name === "APODRECIDA" || a.silenced) return;
+    if ((a.currentPower ?? a.power ?? 0) < 2) return;
+    if (hasInvestida(a)) return;
+    valid.push({ a, i });
+  });
+  if (!valid.length) return null;
+  valid.sort((x, y) => ((y.a.currentPower ?? y.a.power ?? 0) - (x.a.currentPower ?? x.a.power ?? 0)));
+  const att = valid[0].a;
+  if (att.frozen || att.charme) return null;
+  for (const { c: f } of foesExcludingCharmed(state, seat)) {
+    if (!f || f.shielded || f.charme) continue;
+    if (isResistenteServer(f)) continue;
+    const { killD } = combatOutcomeOverpower(att, f);
+    if (!killD) continue;
+    if (statused.has(f.uid)) continue;
+    return { attIdx: valid[0].i };
+  }
+  return null;
+}
+
+/** (1.51.96 item 14) espelho de _investida_talento_worth_it (ai_brain.gd):
+ *  o talento INVESTIDA é PERMANENTE — sem adversários, vale com qualquer
+ *  aliado livre P2+; com adversários, só quando o ataque livre DESTRÓI
+ *  alguém. A Ultimate da Tina continua com o portão estrito
+ *  (freeAttackKillPossible): o ataque livre dela é só deste turno. */
+function investidaTalentWorthIt(state, seat) {
+  const pl = state.players[seat];
+  if (!pl) return false;
+  const hasAlly = (pl.field || []).some((a) => a && !a.tapped
+    && !(a.podridao || a.name === "APODRECIDA") && !a.silenced
+    && (a.currentPower ?? a.power ?? 0) >= 2 && !hasInvestida(a));
+  if (!hasAlly) return false;
+  if (!foesExcludingCharmed(state, seat).length) return true;
+  return freeAttackKillPossible(state, seat) != null;
+}
+
+/** (1.51.96 item 10) espelho de _decisive_attack (ai_brain.gd): o melhor
+ *  ABATE LIMPO disponível agora, promovido antes de invocar SÓ quando
+ *  vira o jogo ou pontua bastante — IA ATRÁS (mitigação), abate de 2+ PV,
+ *  ou invocar agora gastaria a ação do abate (custo da invocação em
+ *  `summonCost` + custo do ataque > ações). A pontuação é IDÊNTICA à do
+ *  scoreAttackAction para abates limpos. Devolve ATTACK_RESOLVE ou null. */
+export function pickDecisiveAttack(state, seat, summonCost = 0) {
+  const pl = state.players[seat];
+  if (!pl) return null;
+  const statused = state.aiStatusedUids || new Set();
+  let best = null;
+  let bestScore = 0;
+  let bestVp = 0;
+  let bestCost = 0;
+  for (let ai = 0; ai < (pl.field || []).length; ai++) {
+    const att = pl.field[ai];
+    if (!att || att.charme) continue;
+    for (let ep = 0; ep < (state.playersCount || 2); ep++) {
+      if (ep === seat) continue;
+      for (let di = 0; di < (state.players[ep]?.field || []).length; di++) {
+        const def = state.players[ep].field[di];
+        if (!def || def.shielded) continue;
+        if (def.charme && def.charmeOriginalOwner === seat) continue;
+        if (!shouldAttack(att, def)) continue;
+        const { killD, killA, ap, dp } = combatOutcomeOverpower(att, def);
+        if (!killD || killA) continue;
+        if (statused.has(def.uid)) continue;
+        const vpGain = noVpOnDestroy(def) ? 0
+          : ((att.constantEffect === "recompensaDupla" && !att.silenced) ? 2 : 1);
+        const cost = attackActionCost(att, def);
+        let score = 100 + vpGain * 10 + dp * 2;
+        if (ap === 1) score += 15;
+        if (dp === 1 && killD) score += 15;
+        score -= cost * 3;
+        if (score > bestScore) {
+          bestScore = score;
+          bestVp = vpGain;
+          bestCost = cost;
+          best = { type: "ATTACK_RESOLVE", playerId: seat, attackerIdx: ai, defenderPlayerId: ep, defenderIdx: di };
+        }
+      }
+    }
+  }
+  if (!best || bestVp <= 0) return null;
+  if (aiMode(state, seat) === "mitigacao") return best;
+  if (bestVp >= 2) return best;
+  if ((summonCost || 0) + bestCost > (pl.actions ?? 0)) return best;
+  return null;
 }
 
 /** Hard-block único das 15 premissas (paridade vs-IA). */
@@ -266,10 +420,12 @@ export function summonPremiseBlocked(state, seat, card, actionsAfter) {
     if (fc <= 0 || enemyFc <= 0 || aa < 1) return true;
     if (!canAllyFollowUpAttackAfterGrant(state, seat, aa, "tecnicas")) return true;
   }
-  // D-N06 (offline _oe_usable("gritoDeGuerra"), ai_brain.gd:381-382): o
-  // GRITO só exige aliados — o gate de follow-up era do TÉCNICAS, não
-  // do GRITO (o comentário antigo afirmava o contrário e estava errado;
-  // _can_attack_after_tecnicas só vale para TÉCNICAS, ai_brain.gd:243-267).
+  // (1.51.96 item 11) o GRITO agora tem portão próprio no offline
+  // (_grito_worth_it, ai_brain.gd): só vale se algum aliado com a
+  // Fúria puder atacar E destruir um adversário depois de pagar o
+  // custo — ou, sem adversários, se há aliado para guardar o +1 de
+  // Poder como defesa. O portão vive em onEnterUsable/scoreSummonCard
+  // (gritoWorthIt); aqui fica só o "sem aliados, sem Grito" da premissa.
   if (oe === "gritoDeGuerra") {
     if (fc <= 0) return true;
   }
@@ -334,14 +490,21 @@ function onEnterUsable(state, seat, oe, actionsAfter = 0) {
     // F7-11 D4: o nativo Sem Honra É alvo válido de CORROMPER — o offline
     // só exclui quem já tem o flag `corrupted` (ai_brain.gd: _best_talent
     // e _oe_usable "corromper"); o onDestroy nativo não exclui.
-    case "corromper": return (pl?.field || []).some((c) => c && !(c.corruptedNoHonor || c.corrupted));
+    // (1.51.96 item 13a) e nunca num SILENCIADO.
+    case "corromper": return (pl?.field || []).some((c) => c && !(c.corruptedNoHonor || c.corrupted) && !c.silenced);
     case "roubar":
     case "bolhas": return enemyHasHand(state, seat);
     case "pesadelo": return true;
     case "enfraquecer": return (state.players[humanSeat(state, seat)]?.vp ?? 0) > 0;
     case "podridao": return (state.players[humanSeat(state, seat)]?.deck?.length || 0) > 0;
     case "gritoDeGuerra":
-    case "guardiao": return fc > 0;
+      // (1.51.96 item 11) o Grito só vale com um ataque que aproveite
+      // a Fúria (ou, sem adversários, com aliado para guardar o +1).
+      return gritoWorthIt(state, seat, (pl?.actions ?? 0) - (actionsAfter ?? 0));
+    case "guardiao":
+      // (1.51.96 item 13a) o Guardião protege OS OUTROS aliados — sem
+      // um aliado NÃO silenciado, não faz nada.
+      return (pl?.field || []).some((c) => c && !c.silenced);
     case "charme": return enemyFc > 0;
     case "trocaInjusta": return hasFoePower(state, seat, 2);
     case "tecnicasDeCombate": return canAllyFollowUpAttackAfterGrant(state, seat, actionsAfter, "tecnicas");
@@ -545,6 +708,11 @@ export function scoreSummonCard(state, seat, card, handIdx, opts = {}) {
   if (oe === "mordidaVenenosa") {
     // D-N09: só P1 em campo = pular de vez (nem como último recurso).
     if (onlyP1Targets(state, seat, "mordidaVenenosa")) return -9999;
+    // (1.51.96 item 8) a MORDIDA também não envenena o que o Gancho
+    // roubaria: com o Gancho pronto e sem alvo P3+ limpo, envenenar
+    // um P1/P2 é estragar o roubo — a carta é pulada de vez.
+    if (hookReady(state, seat) && !foesExcludingCharmed(state, seat).some((t) =>
+      (t.c.currentPower ?? t.c.power ?? 0) >= 3 && !t.c.poisoned)) return -9999;
     score += hasUnpoisonedFoe(state, seat) ? 8 : -6;
   }
   if (oe === "rajadaCongelante") {
@@ -569,7 +737,13 @@ export function scoreSummonCard(state, seat, card, handIdx, opts = {}) {
     const hs = humanSeat(state, seat);
     score += ((state.players[hs]?.deck?.length ?? 0) > 0) ? 5 : -6;
   }
-  if (oe === "trocaInjusta") score += hasFoePower(state, seat, 2) ? 6 : -4;
+  // (1.51.96 item 7) CAVALEIRA BRINQUEDO: a Troca Injusta só vale com
+  // um campeão adversário de Poder 2 exato — sem ele, a carta é pulada
+  // de vez (nem como último recurso, item 9).
+  if (oe === "trocaInjusta") {
+    if (!hasFoePower(state, seat, 2)) return -9999;
+    score += 6;
+  }
   if (oe === "pesadelo") score += 5;
   if (oe === "roubar") score += enemyHasHand(state, seat) ? 5 : -6;
   if (oe === "bolhas") score += enemyHasHand(state, seat) ? 5 : -6;
@@ -585,7 +759,14 @@ export function scoreSummonCard(state, seat, card, handIdx, opts = {}) {
   }
   if (oe === "guardiao" && fc > 0) score += 4;
   if (oe === "furia") score += 4;
-  if (oe === "gritoDeGuerra") score += fc > 0 ? 4 : -6;
+  // (1.51.96 item 11) o GRITO só vale quando alguém com a Fúria puder
+  // atacar e destruir um adversário depois de pagar o custo (ou, sem
+  // adversários, com aliado para guardar o +1) — sem isso, a carta é
+  // pulada de vez (nem como último recurso, item 9).
+  if (oe === "gritoDeGuerra") {
+    if (!gritoWorthIt(state, seat, cost)) return -9999;
+    score += 4;
+  }
   if (oe === "tecnicasDeCombate") score += canAllyFollowUpAttackAfterGrant(state, seat, actionsAfter, "tecnicas") ? 10 : -6;
   if (oe === "defensor") score += 4;
   // U-D05 (rodada 3, offline _oe_usable("imitar") + _imitar_would_replay_marked):
@@ -844,15 +1025,18 @@ function scoreTalentStart(state, seat, action) {
     return (fc > 0 && fc < MAX_FIELD && hasP2) ? 34 : -9999;
   }
   if (te === "investidaTalento") {
-    const ok = (pl.field || []).some((c) => c && !c.tapped
-      && (c.currentPower ?? c.power ?? 0) !== 1 && !hasInvestida(c));
-    return ok ? 8 : -9999;
+    // (1.51.96 item 14) o talento INVESTIDA é PERMANENTE — sem
+    // adversários vale com aliado livre P2+; com adversários, só
+    // quando o ataque livre DESTRÓI alguém. Nunca em P1, nunca num
+    // SILENCIADO (item 13a: não recebe status).
+    return investidaTalentWorthIt(state, seat) ? 8 : -9999;
   }
   if (te === "corromperTalento") {
     // U-B10 (rodada 5): o offline só exclui quem já tem o flag `corrupted`
     // ("corromper nunca 2x") — aliado nativo Sem Honra (onDestroy noHonor)
     // é jogado e o efeito é desperdiçado, igual ao offline.
-    const ok = (pl.field || []).some((c) => c && !c.corrupted);
+    // (1.51.96 item 13a) e nunca num SILENCIADO.
+    const ok = (pl.field || []).some((c) => c && !c.corrupted && !c.silenced);
     return ok ? 8 : -9999;
   }
   if (te === "ressuscitarTalento") {
@@ -874,7 +1058,13 @@ function scoreTalentStart(state, seat, action) {
   if (te === "tecnicasDeCombateTalento") {
     return canAllyFollowUpAttackAfterGrant(state, seat, actionsAfter, "tecnicas") ? 8 : -9999;
   }
-  if (te === "gritoDeGuerraTalento") return fc > 0 ? 8 : -9999;
+  if (te === "gritoDeGuerraTalento") {
+    // (1.51.96 item 11) o Grito só vale se algum aliado com a Fúria
+    // puder atacar e destruir um adversário depois de pagar o custo —
+    // sem ataque que aproveite o efeito, a carta é guardada. Sem
+    // adversários, o +1 de Poder ainda vale.
+    return gritoWorthIt(state, seat, cost) ? 8 : -9999;
+  }
   if (te === "explosao") {
     const ok = foes.some((t) => (t.c.currentPower ?? t.c.power ?? 0) !== 1
       && !(t.c.barrier || t.c.barrierPermanent));
@@ -907,6 +1097,13 @@ function scoreTalentStart(state, seat, action) {
     return ok ? 45 : -9999;
   }
   if (te === "baforadaVenenosa") {
+    // (1.51.96 item 8) com o Gancho pronto, a Baforada só vale num alvo
+    // que o Gancho NÃO pode roubar (P3+): envenenar um P1/P2 é estragar
+    // o roubo — roubar o campeão vale mais que envenená-lo.
+    if (hookReady(state, seat)) {
+      const ok = foes.some((t) => (t.c.currentPower ?? t.c.power ?? 0) >= 3 && !t.c.poisoned);
+      return ok ? 36 : -9999;
+    }
     const ok = foes.some((t) => (t.c.currentPower ?? t.c.power ?? 0) !== 1 && !t.c.poisoned);
     return ok ? 36 : -9999;
   }
@@ -942,6 +1139,12 @@ export function pickBestHardAction(state, seat, legal, opts = {}) {
     const s = scoreSummonCard(state, seat, card, a.handIdx, {});
     if (s <= -9999) continue;
     const actionsAfter = (state.players[seat]?.actions ?? 0) - championSummonCost(card);
+    // (1.51.96 item 9) REGRA GERAL: um campeão de habilidade INSTANTÂNEA
+    // cuja pré-condição falha NÃO é invocado — nem como último recurso
+    // (o corpo não compensa a habilidade perdida). O GRITO tem portão
+    // próprio no score e fica fora daqui.
+    const oe = card?.onEnter;
+    if (oe && oe !== "gritoDeGuerra" && !onEnterUsable(state, seat, oe, actionsAfter)) continue;
     const useless = !onEnterUsable(state, seat, card?.onEnter, actionsAfter);
     if (!useless && s > bestSummonScore) {
       bestSummonScore = s;
@@ -970,6 +1173,11 @@ export function pickBestHardAction(state, seat, legal, opts = {}) {
     const card = state.players[seat]?.hand?.[a.handIdx];
     const s = scoreSummonCard(state, seat, card, a.handIdx, {});
     if (s <= -9999 || s > bestSummonScore) continue;
+    // (1.51.96 item 9) o fallback plain também não força uma instantânea
+    // sem pré-condição (ver o trilho acima): sem ela, a IA guarda a carta.
+    const actionsAfterPlain = (state.players[seat]?.actions ?? 0) - championSummonCost(card);
+    const oePlain = card?.onEnter;
+    if (oePlain && oePlain !== "gritoDeGuerra" && !onEnterUsable(state, seat, oePlain, actionsAfterPlain)) continue;
     // Plain: sem onEnter que exige inimigo, ou qualquer quando board vazio.
     const needsEnemy = card && [
       "bolaDeFogo", "assassinar", "fumacaToxica", "raioDuplo", "mordidaVenenosa",
@@ -978,7 +1186,6 @@ export function pickBestHardAction(state, seat, legal, opts = {}) {
     // S2-M15: o fallback plain NÃO pode furar o GATE_8 (os 8 só entram com
     // ataque no mesmo turno) — sem isto, o campo vazio forçava a GRISELDA
     // mesmo sem alvo atacável.
-    const actionsAfterPlain = (state.players[seat]?.actions ?? 0) - championSummonCost(card);
     const gate8Blocked = card && GATE_8.has(card.name)
       && !gate8CanSummonAndAttack(state, seat, card, actionsAfterPlain);
     if ((!needsEnemy || enemyFieldCount(state, seat) > 0) && !gate8Blocked) {
@@ -1003,6 +1210,15 @@ export function pickBestHardAction(state, seat, legal, opts = {}) {
   let bestScore = -Infinity;
   for (const a of legal) {
     if (!a?.type || a.type === "END_TURN") continue;
+    // (1.51.96 item 9) o laço principal re-pontua cada ação — o veto da
+    // instantânea sem pré-condição vale aqui também, senão o score bruto
+    // (sem o boost do trilho útil) ainda escolheria a carta sozinha.
+    if (a.type === "SUMMON") {
+      const cardMain = state.players[seat]?.hand?.[a.handIdx];
+      const oeMain = cardMain?.onEnter;
+      const aaMain = (state.players[seat]?.actions ?? 0) - championSummonCost(cardMain);
+      if (oeMain && oeMain !== "gritoDeGuerra" && !onEnterUsable(state, seat, oeMain, aaMain)) continue;
+    }
     const s = scoreLegalAction(state, seat, a, meta);
     if (s > bestScore) {
       bestScore = s;
@@ -1109,7 +1325,8 @@ export function pickOnEnterResolution(state, seat, ability, casterIdx, fieldIdx)
   if (ability === "corromper") {
     // F7-11 D4: o nativo Sem Honra É alvo válido de CORROMPER (o offline
     // só exclui quem já tem o flag `corrupted`).
-    const allies = gatherAlly((c) => c && !c.corruptedNoHonor
+    // (1.51.96 item 13a) e nunca num SILENCIADO.
+    const allies = gatherAlly((c) => c && !c.corruptedNoHonor && !c.silenced
       && (c.currentPower ?? c.power ?? 0) === 1);
     if (!allies.length) return null;
     return { targetP: allies[0].p, targetI: allies[0].i };
@@ -1267,7 +1484,12 @@ export function listTalentPlays(state, seat) {
       play._target = { targetP: pool[0].p, targetI: pool[0].i };
     }
     if (te === "baforadaVenenosa") {
-      const pool = foes.filter((t) => t.pw > 1 && !t.ch.poisoned);
+      // (1.51.96 item 8) com o Gancho pronto, só mira o que o Gancho
+      // NÃO pode roubar (P3+): o alvo da Baforada nunca é um P1/P2
+      // que o roubo levaria limpo.
+      const pool = hookReady(state, seat)
+        ? foes.filter((t) => t.pw >= 3 && !t.ch.poisoned)
+        : foes.filter((t) => t.pw > 1 && !t.ch.poisoned);
       if (!pool.length) continue;
       pool.sort((a, b) => b.pw - a.pw);
       play._target = { targetP: pool[0].p, targetI: pool[0].i };
@@ -1308,11 +1530,14 @@ export function listTalentPlays(state, seat) {
       play._target = { targetP: seat, targetI: best };
     }
     if (te === "investidaTalento") {
+      // (1.51.96 item 14) NUNCA num P1, nunca num SILENCIADO (13a:
+      // não recebe status), nunca cansado ou apodrecida; o motor
+      // escolhe o mais forte entre os válidos.
       const pool = [];
       (pl.field || []).forEach((ch, fi) => {
-        if (!ch || ch.tapped) return;
+        if (!ch || ch.tapped || ch.podridao || ch.name === "APODRECIDA" || ch.silenced) return;
         const pw = ch.currentPower ?? ch.power ?? 0;
-        if (pw === 1 || hasInvestida(ch)) return;
+        if (pw < 2 || hasInvestida(ch)) return;
         pool.push({ i: fi, pw });
       });
       if (!pool.length) continue;
@@ -1331,10 +1556,11 @@ export function listTalentPlays(state, seat) {
       // U-B10 (rodada 5): espelho do gate do score — o offline só exclui
       // quem já tem o flag `corrupted`; o nativo Sem Honra é alvo válido
       // (o efeito é desperdiçado, igual ao offline).
+      // (1.51.96 item 13a) e nunca num SILENCIADO.
       let best = null;
       let bestP = Infinity;
       (pl.field || []).forEach((ch, fi) => {
-        if (!ch || ch.corrupted) return;
+        if (!ch || ch.corrupted || ch.silenced) return;
         if (ch.podridao || ch.name === "APODRECIDA") return;
         const pw = ch.currentPower ?? ch.power ?? 0;
         if (pw < bestP) {
@@ -1413,8 +1639,10 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     // Bastion: Proteção em todos os aliados de Poder 1 — usa no fim do turno.
     if (!forceEndOfTurn) return null;
     // D-N18 (offline next_action): basta qualquer P1 — a Proteção renova.
+    // (1.51.96 item 13a) e o P1 tem de NÃO estar silenciado: SILENCIADO
+    // não recebe outros status.
     const anyP1 = (pl.field || []).some((c) => c
-      && (c.currentPower ?? c.power) === 1);
+      && (c.currentPower ?? c.power) === 1 && !c.silenced);
     if (!anyP1) return null;
     return { ...base, targetP: null, targetI: null };
   }
@@ -1434,12 +1662,18 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
   }
   if (ultType === "targetAlly" || ultType === "targetAllyFreeAttack") {
     if (ultType === "targetAllyFreeAttack" && !forceEndOfTurn) return null;
+    if (ultType === "targetAllyFreeAttack") {
+      // (1.51.96 itens 12 e 14) a Ultimate da Tina só vale quando o
+      // ataque livre DESTRÓI um adversário — NUNCA num aliado de Poder
+      // 1, nunca num SILENCIADO (não recebe status). O motor escolhe
+      // o aliado mais forte; o portão olha para ele.
+      const kill = freeAttackKillPossible(state, seat);
+      if (!kill) return null;
+      return { ...base, targetP: seat, targetI: kill.attIdx };
+    }
     // U-D06 (rodada 3, offline use_ultimate game_state.gd:1449-1485):
-    // FORTALECER mira o mais forte entre os NÃO-apodrecidos; INVESTIDA
-    // mira o mais forte entre os NÃO-apodrecidos E NÃO-cansados. Antes, o
-    // mais forte ganhava sem filtro — o motor recusava e o uso ficava
-    // PRESERVADO (o offline GASTA o uso à toa; aqui o filtro torna o caso
-    // inalcançável na prática).
+    // FORTALECER mira o mais forte entre os NÃO-apodrecidos. (A INVESTIDA
+    // — targetAllyFreeAttack — sai pelo portão estrito acima, 1.51.96.)
     const field = pl.field || [];
     if (!field.length) return null;
     let idx = -1;
@@ -1447,7 +1681,6 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     field.forEach((c, i) => {
       if (!c) return;
       if (c.podridao || c.name === "APODRECIDA") return;
-      if (ultType === "targetAllyFreeAttack" && c.tapped) return;
       const pw = c.currentPower ?? c.power ?? 0;
       if (pw > best) {
         best = pw;
@@ -1485,9 +1718,10 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
         // olha o Poder) — o veto a `shielded` guardava um banimento
         // válido; a IA nunca usava OUTRA DIMENSÃO num protegido.
         if (c.charme && c.charmeOriginalOwner === seat) return;
-        // S2-A10 (offline): BANIR qualquer P<=2 ATUAL (não só impresso 2).
+        // (1.51.96 item 12) NUNCA num P1: banir um P1 não dá PV e
+        // gasta a Ultimate à toa. Só vale com um P2 exato.
         const cur = c.currentPower ?? c.power ?? 0;
-        if (cur > 2) return;
+        if (cur !== 2) return;
         pool.push({ p, i, noHonor: !!(c.noHonor || c.corrupted) });
       });
     }
@@ -1501,7 +1735,9 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     // sem Crescimento — o offline usa e gasta o uso à toa; o motor
     // aceita (validate só exige campo não vazio; o apply não faz nada
     // de novo quando todos já têm Crescimento).
-    if (!(pl.field || []).length)
+    // (1.51.96 item 13a) a Força Infinita dá CRESCIMENTO (status) — num
+    // campo só de SILENCIADOS ela não faz nada; a IA guarda o uso.
+    if (!(pl.field || []).some((c) => c && !c.silenced))
       return null;
     return { ...base, targetP: null, targetI: null };
   }
@@ -1510,12 +1746,17 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     // com um aliado de Habilidade Instantânea, sem SILÊNCIO — e nunca
     // re-dispara BOLHAS/PESADELO já usados neste turno. O motor
     // (canReuseInstant) valida o alvo de verdade no ULTIMATE_PLAY.
+    // (1.51.96 item 7) SÓ a TROCA INJUSTA ganha a checagem da
+    // pré-condição aqui: reutilizá-la sem um P2 adversário gasta a
+    // Ultimate à toa — esse candidato é pulado, e o próximo vale.
     const usedThisTurn = pl.onEnterUsedThisTurn || [];
     let idx = -1;
     (pl.field || []).forEach((c, i) => {
       if (idx >= 0 || !c || c.silenced || c.abilityType !== "instant" || !c.onEnter)
         return;
       if ((c.onEnter === "bolhas" || c.onEnter === "pesadelo") && usedThisTurn.includes(c.onEnter))
+        return;
+      if (c.onEnter === "trocaInjusta" && !hasFoePower(state, seat, 2))
         return;
       idx = i;
     });
@@ -1581,23 +1822,32 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     // campo + alvo P1/P2 — COM OU SEM Proteção (temporária ou
     // permanente), não-apodrecida. Único critério: Poder 1 ou 2.
     // BARREIRA não bloqueia (offline, 1.51.65 T7).
+    // (1.51.96 item 8) EXCETO envenenado: roubar um campeão com veneno
+    // é ficar com um campeão que morre em 2 rodadas no próprio campo
+    // — só vale com um P1/P2 LIMPO para roubar.
     if ((pl.field || []).length >= MAX_FIELD) return null;
     const hs = humanSeat(state, seat);
     const ok = (state.players[hs]?.field || []).some((c) => c
       && [1, 2].includes(c.currentPower ?? c.power ?? 0)
       && !(c.podridao || c.name === "APODRECIDA")
+      && !c.poisoned
       && !(c.charme && c.charmeOriginalOwner === seat));
     if (!ok) return null;
     return { ...base, targetP: null, targetI: null };
   }
   if (ultType === "poison") {
     // ENVENENAR (offline): vale com qualquer adversário em campo.
+    // (1.51.96 item 12) o mais forte morre em 2 rodadas — mas NUNCA
+    // num P1 (morre fácil de qualquer jeito) e nunca 2x no mesmo
+    // campeão (reaplicar só refresca o timer). Só vale com um P2+
+    // ainda sem veneno.
     if (enemyFieldCount(state, seat) <= 0) return null;
     // (C5-01, rodada 9) o pick devolvia alvo nulo e o motor recusava
     // com TARGET_REQUIRED — espelha o auto_pick_uid offline
     // (ultEnvenenar): o mais forte entre os adversários, menos o
     // próprio enfeitiçado.
-    const foes = foesExcludingCharmed(state, seat);
+    const foes = foesExcludingCharmed(state, seat)
+      .filter((t) => (t.c.currentPower ?? t.c.power ?? 0) >= 2 && !t.c.poisoned);
     if (!foes.length) return null;
     foes.sort((a, b) => (b.c.currentPower ?? b.c.power ?? 0) - (a.c.currentPower ?? a.c.power ?? 0));
     return { ...base, targetP: foes[0].p, targetI: foes[0].i };
@@ -1798,6 +2048,7 @@ export const DfAiHardBrain = {
   pickTalentByMode,
   gate8CanSummonAndAttack,
   pickWinAttack,
+  pickDecisiveAttack,
   pickBestSummon,
   pickBestAttack,
   pickDraw,

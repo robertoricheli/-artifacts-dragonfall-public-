@@ -709,6 +709,11 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             const ally = state.players[casterIdx]?.field?.[ti];
             if (!ally)
                 break;
+            // (1.51.96 item 13a) SILENCIADO não recebe outros status —
+            // nem CORROMPER. A validação (validateAbilityTarget) já recusa
+            // o alvo antes; isto é defesa em profundidade.
+            if (ally.silenced)
+                break;
             const abilityName = String(ally.mimicAbilityName || ally.abilityName || "");
             const nativeNoHonor = ally.onDestroy === "noHonor"
                 || ally.mimicOnDestroy === "noHonor"
@@ -1105,6 +1110,11 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             state.players[casterIdx].field.forEach((ally, i) => {
                 if (!ally || i === fieldIdx)
                     return;
+                // (1.51.96 item 13a) SILENCIADO não recebe FÚRIA
+                // (grantFuryStacks também barra; aqui o aliado nem
+                // entra na lista `applied`).
+                if (ally.silenced)
+                    return;
                 R()?.grantFuryStacks?.(ally, 1);
                 applied.push({
                     p: casterIdx,
@@ -1128,7 +1138,8 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
         case "guardiao": {
             const picks = [];
             state.players[casterIdx].field.forEach((c, i) => {
-                if (i !== fieldIdx && c)
+                // (1.51.96 item 13a) SILENCIADO não recebe PROTEÇÃO.
+                if (i !== fieldIdx && c && !c.silenced)
                     picks.push(i);
             });
             const names = [];
@@ -1155,6 +1166,9 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             const applied = [];
             state.players[casterIdx].field.forEach((ally, i) => {
                 if (!ally || i === fieldIdx)
+                    return;
+                // (1.51.96 item 13a) SILENCIADO não recebe SOBREPUJAR.
+                if (ally.silenced)
                     return;
                 ally.tecnicasSobrepujar = true;
                 ally.tecnicasSobrepujarTurns = Math.max(ally.tecnicasSobrepujarTurns ?? 0, 2);
@@ -2023,6 +2037,10 @@ function applyTalentTarget(state, pIdx, targetP, targetI, extra) {
             // C-A12 (offline _apply_investida_talento): a mira exclui
             // CANSADOS — a rejeição deixa o talento ATIVO (o jogador
             // escolhe outro alvo; a carta não é perdida nem consumida).
+            // (1.51.96 item 13a) SILENCIADO não recebe INVESTIDA — mesma
+            // rejeição, sem consumir o talento.
+            if (target.silenced)
+                return { ok: false, state, events, error: "SILENCED_TARGET" };
             if (target.tapped)
                 return { ok: false, state, events, error: "TIRED_TARGET" };
             target.constantEffect = "investida";
@@ -2116,6 +2134,11 @@ function applyTalentTarget(state, pIdx, targetP, targetI, extra) {
         case "corromperTalento": {
             if (tp !== pIdx)
                 return { ok: false, state, events, error: "ALLY_ONLY" };
+            // (1.51.96 item 13a) SILENCIADO não recebe CORROMPER — a
+            // rejeição deixa o talento ATIVO (o jogador escolhe outro
+            // alvo; a carta não é perdida nem consumida).
+            if (target.silenced)
+                return { ok: false, state, events, error: "SILENCED_TARGET" };
             const abilityName = String(target.mimicAbilityName || target.abilityName || "");
             const nativeNoHonor = target.onDestroy === "noHonor"
                 || target.mimicOnDestroy === "noHonor"
@@ -2331,6 +2354,9 @@ function applyTalentAuto(state, pIdx, rng = Math.random) {
             (pl.field || []).forEach((ally, i) => {
                 if (!ally)
                     return;
+                // (1.51.96 item 13a) SILENCIADO não recebe FÚRIA.
+                if (ally.silenced)
+                    return;
                 R()?.grantFuryStacks?.(ally, 1);
                 applied.push({
                     p: pIdx, i, name: ally.name,
@@ -2348,6 +2374,9 @@ function applyTalentAuto(state, pIdx, rng = Math.random) {
             const applied = [];
             (pl.field || []).forEach((ally, i) => {
                 if (!ally)
+                    return;
+                // (1.51.96 item 13a) SILENCIADO não recebe SOBREPUJAR.
+                if (ally.silenced)
                     return;
                 ally.tecnicasSobrepujar = true;
                 ally.tecnicasSobrepujarTurns = Math.max(ally.tecnicasSobrepujarTurns ?? 0, 2);
@@ -2405,7 +2434,8 @@ function applyTalentAuto(state, pIdx, rng = Math.random) {
             // (barrierPermanent) nunca é tocada.
             const field = pl.field || [];
             for (const c of field) {
-                if (c && !c.barrierPermanent) {
+                // (1.51.96 item 13a) SILENCIADO não recebe BARREIRA.
+                if (c && !c.barrierPermanent && !c.silenced) {
                     c.barrier = true;
                     c.barrierTurns = Math.max(c.barrierTurns || 0, 2);
                 }

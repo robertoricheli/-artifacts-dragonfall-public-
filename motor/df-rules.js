@@ -106,7 +106,11 @@ function recalcInspirar(state) {
                 return;
             let target = 0;
             const apodrecida = !!(c.podridao || c.name === "APODRECIDA" || c.talentEffect === "apodrecidaDescarte");
-            if (!apodrecida && !c.inspirarBroken) {
+            // (1.51.96 item 13a) SILENCIADO não recebe outros status — nem
+            // o INSPIRAR do vizinho (espelho do offline _recalc_constants,
+            // game_state.gd:2175). A fonte silenciada já não buffa
+            // (hasInspirar); aqui é o VIZINHO que não recebe.
+            if (!apodrecida && !c.inspirarBroken && !c.silenced) {
                 for (const j of [i - 1, i + 1]) {
                     if (j >= 0 && j < field.length && hasInspirar(field[j]))
                         target += 1;
@@ -352,6 +356,11 @@ function grantFuryStacks(champ, amount = 1, rounds = 1) {
     // dá Fúria a ela.
     if (champ.podridao || champ.name === "APODRECIDA" || champ.talentEffect === "apodrecidaDescarte")
         return 0;
+    // (1.51.96 item 13a) SILENCIADO não recebe outros status — nem FÚRIA
+    // (espelho do offline _apply_furia_now, game_state.gd:4000). Central:
+    // cobre o GRITO (habilidade e talento), a FÚRIA em si e a do LEGADO.
+    if (champ.silenced)
+        return 0;
     const add = Math.max(0, Math.floor(amount));
     champ.furyStacks = getFuryStacks(champ) + add;
     champ.fury = champ.furyStacks > 0;
@@ -442,6 +451,11 @@ function applyOnDestroyBurst(state, ownerIdx, champ, reason, rng = Math.random, 
         for (const target of targets) {
             const ally = state.players[target.p]?.field?.[target.i];
             if (!ally)
+                continue;
+            // (1.51.96 item 13a) SILENCIADO não recebe FÚRIA — a guarda
+            // central (grantFuryStacks) já barra o ganho; aqui o aliado
+            // nem entra na lista `applied` (o evento não pode mentir).
+            if (ally.silenced)
                 continue;
             grantFuryStacks(ally, 1);
             applied.push({
@@ -707,7 +721,10 @@ function validateAbilityTarget(state, casterIdx, fieldIdx, targetP, targetI) {
                 return { ok: false, code: "INVALID_TARGET" };
             return { ok: true };
         case "corromper":
-            if (!isAlly)
+            // (1.51.96 item 13a) SILENCIADO não recebe outros status —
+            // nem CORROMPER (espelho do offline _status_target_ok e
+            // _apply_corromper, game_state.gd:2222/4187).
+            if (!isAlly || target.silenced)
                 return { ok: false, code: "INVALID_TARGET" };
             return { ok: true };
         case "imitar":

@@ -546,7 +546,10 @@ export function validateUltimatePlay(state, action) {
                 // URSO PESADO / Pesado Demais / Prisão NÃO são vetos aqui
                 // (C-M34); CONGELADO também não (S2-B18 — não
                 // reintroduzir).
-                if (t.podridao || t.name === "APODRECIDA" || t.talentEffect === "apodrecidaDescarte" || t.tapped)
+                // (1.51.96 item 13a) SILENCIADO não recebe INVESTIDA
+                // (espelho do offline _status_target_ok "ultInvestida"
+                // e do pool ultInvestida, game_state.gd:2222/2422).
+                if (t.podridao || t.name === "APODRECIDA" || t.talentEffect === "apodrecidaDescarte" || t.tapped || t.silenced)
                     return { ok: false, code: "INVALID_TARGET" };
             }
             if (ut === "potion" && !allyCanGainPower(field[ti]))
@@ -726,6 +729,9 @@ export function applyUltimatePlay(state, action, rng = Math.random, opts = {}) {
         case "targetAllyShield": {
             pl.field.forEach((c, i) => {
                 if (!isPower1Champ(c))
+                    return;
+                // (1.51.96 item 13a) SILENCIADO não recebe PROTEÇÃO.
+                if (c.silenced)
                     return;
                 c.shielded = true;
                 c.shieldedTurns = 1;
@@ -961,6 +967,11 @@ export function applyUltimatePlay(state, action, rng = Math.random, opts = {}) {
         }
         case "infinitePower": {
             pl.field.forEach((c, i) => {
+                // (1.51.96 item 13a) SILENCIADO não recebe CRESCIMENTO
+                // (espelho do offline use_ultimate "infinitePower",
+                // game_state.gd:1785-1795).
+                if (c.silenced)
+                    return;
                 if (allyCanGainPower(c) && !c.foreverGrowth) {
                     c.foreverGrowth = true;
                     events.push({ type: "FOREVER_GROWTH", targetP: pid, targetI: i });

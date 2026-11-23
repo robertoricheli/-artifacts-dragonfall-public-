@@ -16,6 +16,7 @@ import {
   listTalentPlays,
   pickUltimate,
   pickWinAttack,
+  pickDecisiveAttack,
   championSummonCost,
 } from "./df-ai-hard-brain.mjs";
 
@@ -406,6 +407,47 @@ export function pickAndApplyAiAction(room, seat) {
       return { action: winAtk, result: res, talentMeta: null, phase: "win" };
     }
     // Ataque vencedor falhou (alvo mudou, etc.): cai no loop normal.
+  }
+
+  // (1.51.96 item 10) ATAQUE DECISIVO, antes de invocar: um abate limpo
+  // que pontua ou vira o jogo passa na frente de invocar (offline
+  // next_action passo 0.5). A melhor invocação é lida antes (peek) só
+  // para a conta de ações do aperto — a escolha em si não muda. Mesmo
+  // caminho do ataque vencedor acima (pergunta reativa + aplicação
+  // autoritativa + marcas de status/bolhas).
+  {
+    const legalDec = listLegal(state, seat);
+    const summonPeek = pickBestSummon(state, seat, legalDec, { minScore: 0 });
+    const summonPeekCost = summonPeek?.type === "SUMMON"
+      ? championSummonCost(state.players[seat]?.hand?.[summonPeek.handIdx]) : 0;
+    const decAtk = pickDecisiveAttack(state, seat, summonPeekCost);
+    if (decAtk && !tried.has(actionKey(decAtk))) {
+      tried.add(actionKey(decAtk));
+      const susp = maybeSuspendAiAction(room, seat, decAtk, null);
+      if (susp.suspend) {
+        return {
+          action: decAtk,
+          result: {
+            ok: true, suspended: true,
+            suspendKind: susp.spec.kind, suspendSpec: susp.spec,
+            committed: false,
+          },
+          talentMeta: null,
+          phase: "decisive",
+        };
+      }
+      const beforeDec = room.gameState;
+      const res = applyAuthoritativeAction(room, seat, decAtk, null, { serverAi: true });
+      if (res.suspended) {
+        return { action: decAtk, result: res, talentMeta: null, phase: "decisive" };
+      }
+      if (res.ok) {
+        markAiStatusedFromResult(room, seat, beforeDec, res.state, decAtk);
+        markAiBolhasPesadeloFromEvents(room, res.events);
+        return { action: decAtk, result: res, talentMeta: null, phase: "decisive" };
+      }
+      // Ataque decisivo falhou (alvo mudou, etc.): cai no loop normal.
+    }
   }
 
   // S2-M13 passo 2: o floor (5 -> 0) é resetado após cada ação bem-sucedida

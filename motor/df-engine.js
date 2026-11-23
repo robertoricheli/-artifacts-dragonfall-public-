@@ -282,6 +282,12 @@ export function validateAction(state, action, ctx = {}) {
                 "transformarBichinhoTalento", "tornadoDeFogo"];
             if (blockedByBarrier.includes(te) && (target.barrier || target.barrierPermanent))
                 return { ok: false, code: "INVALID_TARGET" };
+            // (1.51.96 item 13a) SILENCIADO não recebe outros status —
+            // nem INVESTIDA nem CORROMPER (espelho do offline
+            // _status_target_ok, game_state.gd:2222). Recusado SEM
+            // consumir o talento (B-N04/B-N05): o jogador escolhe outro.
+            if ((te === "investidaTalento" || te === "corromperTalento") && target.silenced)
+                return { ok: false, code: "INVALID_TARGET" };
             return { ok: true, code: "OK" };
         }
         case T.TALENT_AUTO: {
