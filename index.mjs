@@ -92,14 +92,6 @@ import {
   recordPairExclusion,
   exclusionKeyForPlayer,
 } from "./df-pair-exclusion.mjs";
-import {
-  recordOnlineBan,
-  onlineBanRemainingSeconds,
-  onlineBanUntil,
-  onlineBanKeyForPlayer,
-  ONLINE_BAN_FOUND_SECONDS,
-  ONLINE_BAN_STARTING_SECONDS,
-} from "./df-online-ban.mjs";
 import { ensureSeatTokens, seatTokenFor } from "./df-seat-token.mjs";
 import {
   redisConfigured,
@@ -343,13 +335,18 @@ const socketPlayer = new Map();
 /**
  * Aceite da partida (1.51.86) — Tela de Encontro de Partidas.
  * code -> { accepted: [bool, bool], playerKeys: [chave0, chave1],
- *           socketKeys: [sid0, sid1], acceptTimer, startTimer }.
+ *           socketKeys: [sid0, sid1], entries: [fila0, fila1] | null,
+ *           acceptTimer, startTimer }.
  * O estado vive FORA da sala (nunca vai p/ o espelho Postgres/Redis, que
  * não serializa timers) e morre junto com ela na dissolução.
- * Tempos do protocolo: 30 s p/ aceitar, 5 s de contagem p/ iniciar.
+ * Tempos do protocolo: 20 s p/ aceitar (1.51.95 item 7, era 30 s),
+ * 5 s de contagem p/ iniciar.
+ * (1.51.95 item 4) entries só existe no pareamento casual: é a cópia
+ * das entradas da fila, p/ recolocar os dois na busca quando o tempo
+ * esgota com os dois aceites (a busca tenta de novo sozinha).
  */
 const matchAcceptState = new Map();
-const ACCEPT_TIMEOUT_MS = 30000;
+const ACCEPT_TIMEOUT_MS = 20000;
 const START_COUNTDOWN_MS = 5000;
 
 function clearAcceptState(code) {
@@ -361,10 +358,13 @@ function clearAcceptState(code) {
 }
 
 /**
- * Arma o aceite de uma sala recém-pareada (casual ou ranked): 30 s a
- * partir do match_found. Sem os dois aceites, dissolve como tempo esgotado.
+ * Arma o aceite de uma sala recém-pareada (casual ou ranked): 20 s a
+ * partir do match_found (1.51.95 item 7, era 30 s). Sem os dois aceites,
+ * dissolve como tempo esgotado.
+ * (1.51.95 item 4) entry0/entry1 só no casual: cópia das entradas da fila
+ * p/ a nova tentativa automática (dissolveLobbyRoom).
  */
-function armMatchAccept(room, key0, key1) {
+function armMatchAccept(room, key0, key1, entry0 = null, entry1 = null) {
   clearAcceptState(room.code);
   const st = {
     accepted: [false, false],
@@ -373,10 +373,12 @@ function armMatchAccept(room, key0, key1) {
     // com outro socket) a exclusão tem de valer p/ os dois aparelhos.
     playerKeys: [key0, key1],
     socketKeys: [room.sockets[0], room.sockets[1]],
+    entries: entry0 && entry1 ? [entry0, entry1] : null,
     acceptTimer: null,
     startTimer: null,
   };
   matchAcceptState.set(room.code, st);
+  logMp("match_accept_armed", { code: room.code, timeoutMs: ACCEPT_TIMEOUT_MS });
   st.acceptTimer = setTimeout(() => {
     const live = getRoom(room.code);
     if (!live || live.status !== "lobby") {
@@ -384,7 +386,21 @@ function armMatchAccept(room, key0, key1) {
       return;
     }
     const cur = matchAcceptState.get(room.code);
-    if (!cur || (cur.accepted[0] && cur.accepted[1])) return;
+    if (!cur) return;
+    // (1.51.95 item 4) DEFEITO REAL (t_1191 RED): o timer desistia
+    // quando os dois tinham aceitado — `if (aceitos) return` — mas o
+    // início também exige os DOIS HERÓIS (maybeBeginStarting). Se um
+    // set_hero não chegou, a sala ficava presa em lobby PARA SEMPRE,
+    // sem match_declined e sem ninguém avisar: os dois clientes
+    // esperavam até a guarda de silêncio deles agir. O timer tem de
+    // dissolver SEMPRE que a partida não começou no prazo, aceites ou
+    // não — o início (maybeBeginStarting) já cancela o timer quando sai.
+    logMp("match_accept_timeout", {
+      code: room.code,
+      accepted: [!!cur.accepted[0], !!cur.accepted[1]],
+      heroes: [!!live.heroes[0], !!live.heroes[1]],
+      sockets: [!!live.sockets[0], !!live.sockets[1]],
+    });
     dissolveLobbyRoom(live, "timeout", null);
   }, ACCEPT_TIMEOUT_MS);
   st.acceptTimer.unref?.();
@@ -431,6 +447,17 @@ function maybeBeginStarting(room) {
  */
 function dissolveLobbyRoom(room, reason, bySeat) {
   const st = matchAcceptState.get(room.code);
+  // (1.51.95 item 4) nova tentativa automática: só quando o tempo
+  // esgota COM OS DOIS aceites — os dois queriam jogar e alguma coisa
+  // travou (ex.: um set_hero não chegou). Quem não aceitou NÃO volta
+  // sozinho: jogador ausente não pode ficar sendo pareado. Só vale no
+  // casual (entries), e só p/ sockets ainda vivos. A exclusão do par
+  // (30 s, registrada abaixo) impede o pareamento imediato com o mesmo
+  // adversário — a nova tentativa se forma quando ela expira.
+  const bothAccepted = !!(st?.accepted?.[0] && st?.accepted?.[1]);
+  const retryEntries = reason === "timeout" && bothAccepted && st?.entries
+    ? st.entries.filter((e) => e?.socketId && io.sockets.sockets.get(e.socketId))
+    : [];
   if (st?.playerKeys?.[0] && st?.playerKeys?.[1]) {
     recordPairExclusion(st.playerKeys[0], st.playerKeys[1]);
   }
@@ -459,6 +486,10 @@ function dissolveLobbyRoom(room, reason, bySeat) {
   deleteRoom(room.code);
   void deleteLiveRoom(room.code);
   logMp("lobby_dissolved", { code: room.code, reason, bySeat: bySeat ?? null });
+  if (retryEntries.length) {
+    requeueFront(retryEntries);
+    logMp("lobby_timeout_requeue", { code: room.code, count: retryEntries.length });
+  }
 }
 
 function leaveSocketRoom(socket, peerLeftExtra = null) {
@@ -533,9 +564,14 @@ function startMatchForRoom(room, io) {
   broadcastRoomState(room);
   resetTurnTimer(room);
   touchPersist(room);
-  // (1.51.78 ponto 2) Saque livre do 1º turno de quem começa: 4,5 s
-  // após o match_start (3 s de contagem + 1,5 s após a batalha abrir).
-  // Sem isto quem começa nasceria com 5 cartas na mão. O timer só
+  // (1.51.78 ponto 2; 1,5 s a partir da 1.51.95 D2) Saque livre do
+  // 1º turno de quem começa: 1,5 s após o match_start. Os 4,5 s
+  // antigos supunham uma contagem de 3 s DEPOIS do match_start, mas
+  // ela não existe no cliente atual: a batalha abre no match_start
+  // (a contagem de 5 s acontece ANTES, no match_starting). Com 4,5 s
+  // a carta pousava ~3 s depois da mesa aparecer (t_1204 mediu
+  // 2,93 s; o pedido do item 5 é 1,5 s). Sem isto quem começa
+  // nasceria com 5 cartas na mão. O timer só
   // dispara se a partida ainda estiver no 1º turno sem vencedor; se a
   // sala acabou antes, não faz nada. O envelope vai aos DOIS assentos
   // (emitActionEnvelope projeta a mão do adversário por assento).
@@ -543,8 +579,9 @@ function startMatchForRoom(room, io) {
   return match;
 }
 
-// (1.51.78 ponto 2) Saca a 5ª carta de quem começa, 4,5 s após o
-// match_start, e difunde como DRAW_CARD com o estado autoritativo.
+// (1.51.78 ponto 2; 1,5 s a partir da 1.51.95 D2) Saca a 5ª carta de
+// quem começa, 1,5 s após o match_start, e difunde como DRAW_CARD com
+// o estado autoritativo.
 function scheduleOpeningFreeDraw(room, io, firstPlayer) {
   setTimeout(() => {
     void (async () => {
@@ -582,7 +619,7 @@ function scheduleOpeningFreeDraw(room, io, firstPlayer) {
         });
       } catch (e) { /* o saque não pode derrubar a partida */ }
     })();
-  }, 4500);
+  }, 1500);
 }
 
 /**
@@ -656,6 +693,10 @@ function pairRankedSockets(io, entry0, entry1) {
   room.winPoints = 15;
   room.sockets[0] = sid0;
   room.sockets[1] = sid1;
+  // (1.51.95 item 5) o pareamento marca a última vez visto: sem isto a
+  // regra de partida abandonada usaria a criação como relógio.
+  touchLastSeen(room, 0);
+  touchLastSeen(room, 1);
   ensureSeatTokens(room);
   socketRoom.set(sid0, room.code);
   socketRoom.set(sid1, room.code);
@@ -663,7 +704,7 @@ function pairRankedSockets(io, entry0, entry1) {
   const s1 = io.sockets.sockets.get(sid1);
   s0?.join(room.code);
   s1?.join(room.code);
-  // (1.51.86) aceite: 30 s a partir do ranked_match_found.
+  // (1.51.86) aceite: 20 s a partir do ranked_match_found (1.51.95 item 7).
   armMatchAccept(
     room,
     exclusionKeyForPlayer(entry0.playerId, sid0),
@@ -802,6 +843,10 @@ function pairQueueSockets(io) {
     room.winPoints = 15;
     room.sockets[0] = sid0;
     room.sockets[1] = sid1;
+    // (1.51.95 item 5) o pareamento marca a última vez visto: sem isto a
+    // regra de partida abandonada usaria a criação como relógio.
+    touchLastSeen(room, 0);
+    touchLastSeen(room, 1);
     // Nome do jogador na sala (Fase 5, decisão 4): vem da fila; sem
     // token o nome fica null e o cliente mostra só o herói.
     room.playerNames = [e0.displayName || null, e1.displayName || null];
@@ -818,11 +863,15 @@ function pairQueueSockets(io) {
     const s1 = io.sockets.sockets.get(sid1);
     s0?.join(room.code);
     s1?.join(room.code);
-    // (1.51.86) aceite: 30 s a partir do match_found.
+    // (1.51.86) aceite: 20 s a partir do match_found (1.51.95 item 7).
+    // (1.51.95 item 4) as entradas da fila vão junto: se o tempo
+    // esgotar com os dois aceites, o servidor as recoloca na busca.
     armMatchAccept(
       room,
       exclusionKeyForPlayer(e0.playerId, sid0),
       exclusionKeyForPlayer(e1.playerId, sid1),
+      e0,
+      e1,
     );
     io.to(sid0).emit("match_found", {
       ...roomPublicView(room, 0),
@@ -1468,12 +1517,12 @@ io.on("connection", (socket) => {
     dissolveLobbyRoom(room, "decline", seat);
   });
 
-  // (1.51.88 item 8) Fechar a tela de encontro em PARTIDA ENCONTRADA
-  // (30 s) ou PARTIDA INICIANDO (60 s): registra a pausa na conta de
-  // quem fechou e dissolve a sala como uma recusa — o adversário
-  // recebe o mesmo match_declined de sempre e volta a procurar. A
-  // pausa vale mesmo relogando (a chave é a conta); sem conta, a
-  // conexão. O botão RECUSAR não passa por aqui e não tem pausa.
+  // (1.51.88 item 8, FIM DA REGRA EM 1.51.95 item 7) Fechar a tela de
+  // encontro em PARTIDA ENCONTRADA ou PARTIDA INICIANDO dissolve a sala
+  // como uma recusa — o adversário recebe o mesmo match_declined de
+  // sempre e volta a procurar. NÃO há mais pausa/banimento: quem fechou
+  // volta à busca na hora (ack com banSeconds 0, p/ clientes antigos
+  // lerem "sem pausa"). O botão RECUSAR continua sem passar por aqui.
   socket.on("leave_encontro", (payload, ack) => {
     const room = getRoom(socketRoom.get(socket.id));
     if (!room) return ack?.({ ok: false, error: "NOT_IN_ROOM" });
@@ -1482,11 +1531,7 @@ io.on("connection", (socket) => {
     if (room.status !== "lobby") return ack?.({ ok: false, error: "NOT_LOBBY" });
     const st = matchAcceptState.get(room.code);
     if (!st) return ack?.({ ok: false, error: "NOT_IN_MATCH" });
-    const phase = payload?.phase === "starting" ? "starting" : "found";
-    const seconds = phase === "starting" ? ONLINE_BAN_STARTING_SECONDS : ONLINE_BAN_FOUND_SECONDS;
-    const key = st.playerKeys?.[seat] || onlineBanKeyForPlayer(null, socket.id);
-    const bannedUntil = recordOnlineBan(key, seconds);
-    ack?.({ ok: true, banSeconds: seconds, bannedUntil });
+    ack?.({ ok: true, banSeconds: 0, bannedUntil: 0 });
     dissolveLobbyRoom(room, "decline", seat);
   });
 
@@ -1570,17 +1615,9 @@ io.on("connection", (socket) => {
       } catch (e) { /* */ }
     }
     if (!playerId) playerId = `anon-${socket.id.slice(0, 12)}`;
-    // (1.51.88 item 8) pausa do online: fechar a tela de encontro em
-    // PARTIDA ENCONTRADA (30 s) ou INICIANDO (60 s) deixa a conta sem
-    // entrar na fila até o prazo passar. Depois da checagem de sala
-    // (quem já tem sala volta para ela) e com a conta resolvida (a
-    // mesma chave do leave_encontro). Vale relogando.
-    const rankedBanKey = onlineBanKeyForPlayer(playerId, socket.id);
-    const rankedBanLeft = onlineBanRemainingSeconds(rankedBanKey);
-    if (rankedBanLeft > 0) {
-      ack?.({ ok: false, error: "ONLINE_BAN", remainingSeconds: rankedBanLeft, bannedUntil: onlineBanUntil(rankedBanKey) });
-      return;
-    }
+    // (1.51.95 item 7) FIM DA REGRA DE BANIMENTO: fechar a tela de
+    // encontro não deixa mais a conta sem entrar na fila (o bloco
+    // ONLINE_BAN da 1.51.88 foi removido daqui).
     const info = addToRankedQueue(socket.id, playerId, rankedProfile);
     if (info?.ok === false) {
       ack?.({ ok: false, error: info.error || "SERVER_BUSY" });
@@ -1645,17 +1682,9 @@ io.on("connection", (socket) => {
         }
       } catch (e) { /* anônimo */ }
     }
-    // (1.51.88 item 8) pausa do online: fechar a tela de encontro em
-    // PARTIDA ENCONTRADA (30 s) ou INICIANDO (60 s) deixa a conta sem
-    // entrar na fila até o prazo passar. Depois da checagem de sala
-    // (quem já tem sala volta para ela) e com a conta resolvida (a
-    // mesma chave do leave_encontro). Vale relogando.
-    const banKey = onlineBanKeyForPlayer(queuePlayerId, socket.id);
-    const banLeft = onlineBanRemainingSeconds(banKey);
-    if (banLeft > 0) {
-      ack?.({ ok: false, error: "ONLINE_BAN", remainingSeconds: banLeft, bannedUntil: onlineBanUntil(banKey) });
-      return;
-    }
+    // (1.51.95 item 7) FIM DA REGRA DE BANIMENTO: fechar a tela de
+    // encontro não deixa mais a conta sem entrar na fila (o bloco
+    // ONLINE_BAN da 1.51.88 foi removido daqui).
     const queued = addToQueue(socket.id, displayName, queueProfile, queuePlayerId);
     if (queued?.ok === false) {
       ack?.({ ok: false, error: queued.error || "SERVER_BUSY" });
@@ -2259,6 +2288,10 @@ setInterval(() => {
       // pode existir como 'playing' órfã de uma corrida antiga).
       void deleteLiveRoom(p.code);
     }
+    // (1.51.95 item 5) a poda tem de chegar aos espelhos: sem isto uma
+    // sala podada da memória voltava no próximo boot pelo rooms.json
+    // (quando o Postgres está desligado) — o vazamento ressuscitava.
+    if (pruned.length) touchPersist();
     void deleteStaleLiveRooms();
     // Reconciliação: linha 'playing' sem sala viva na memória é órfã
     // (podada por outro caminho, ex.: create/join). Só com 1 shard — com

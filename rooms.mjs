@@ -4,7 +4,6 @@
 import { MAX_ROOMS } from "./df-mp-limits.mjs";
 import { ensureSeatTokens, seatTokenFor } from "./df-seat-token.mjs";
 import { scheduleRoomMirror, scheduleRoomMirrorDelete } from "./df-room-store.mjs";
-import { normalizeAvatarFrame } from "./df-auth-pg.mjs";
 
 const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
 // Sala encerrada: só precisa ficar viva p/ o jogador que volta ver o fim
@@ -13,6 +12,16 @@ const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
 const ENDED_ROOM_TTL_MS = Number(process.env.DF_ENDED_ROOM_TTL_MS) || 10 * 60 * 1000;
 // Lobby sem ninguém conectado: ninguém vai voltar a ele.
 const EMPTY_LOBBY_TTL_MS = 10 * 60 * 1000;
+// (1.51.95 item 5) Partida em jogo ABANDONADA: os dois jogadores
+// desconectaram (a IA assume os dois lados) e ninguém mais é visto.
+// Antes só o TTL de 2 h a removia — cada run de teste deixava ~1 sala
+// e com 40/40 a busca travava em SERVER_BUSY. Com os dois sockets
+// mortos e ninguém visto por este tempo, a partida é órfã: a IA já
+// teria terminado o jogo bem antes (o relógio de 70 s força o turno);
+// se não terminou, está travada. 10 min é folga de sobra p/ quem caiu
+// e volta — e com UM socket vivo a regra nem se aplica (a partida
+// continua). Ajustável por ambiente (DF_PLAYING_IDLE_TTL_MS).
+const PLAYING_IDLE_TTL_MS = Number(process.env.DF_PLAYING_IDLE_TTL_MS) || 10 * 60 * 1000;
 
 const rooms = new Map();
 
@@ -118,6 +127,16 @@ export function pruneOldRooms() {
     }
     if (!expired && room.status === "lobby" && !room.sockets[0] && !room.sockets[1]) {
       expired = now - room.createdAt > EMPTY_LOBBY_TTL_MS;
+    }
+    if (!expired && room.status === "playing" && !room.sockets[0] && !room.sockets[1]) {
+      // (1.51.95 item 5) partida abandonada: o relógio é a última vez
+      // que um humano foi visto (match_ping/join tocam lastSeen); sem
+      // nenhum toque, vale a criação (pareamento não tocava lastSeen
+      // até a 1.51.95 — ver pairQueueSockets). Só poda com os DOIS
+      // sockets mortos: com um vivo, a partida continua.
+      const seen = Math.max(room.lastSeen?.[0] || 0, room.lastSeen?.[1] || 0);
+      const idleRef = seen > 0 ? seen : room.createdAt;
+      expired = now - idleRef > PLAYING_IDLE_TTL_MS;
     }
     if (expired) {
       rooms.delete(code);
@@ -291,11 +310,11 @@ export function roomPublicView(room, yourSeat = null, opts = {}) {
         // (1.51.75) avatar e nível do perfil, para a tela de Partida
         // Encontrada — preenchidos no pareamento; sem eles, null/0 e
         // o cliente usa o retrato do herói / esconde o nível.
+        // (1.51.80) moldura do avatar, mesmo caminho (room.playerFrames);
+        // sem ela, null e o cliente usa a borda dourada de hoje.
         avatarHeroId: (room.playerAvatars || [null, null])[0] || null,
         level: (room.playerLevels || [0, 0])[0] || 0,
-        // (1.51.80) moldura do avatar, mesmo caminho (room.playerFrames).
-        // (1.51.82) moldura 2 p/ todos; sem ela, "2" (nunca null nem "0").
-        avatarFrame: normalizeAvatarFrame((room.playerFrames || [null, null])[0]),
+        avatarFrame: (room.playerFrames || [null, null])[0] || null,
         ready: room.ready[0],
         isYou: yourSeat === 0,
       },
@@ -306,7 +325,7 @@ export function roomPublicView(room, yourSeat = null, opts = {}) {
         displayName: (room.playerNames || [null, null])[1] || null,
         avatarHeroId: (room.playerAvatars || [null, null])[1] || null,
         level: (room.playerLevels || [0, 0])[1] || 0,
-        avatarFrame: normalizeAvatarFrame((room.playerFrames || [null, null])[1]),
+        avatarFrame: (room.playerFrames || [null, null])[1] || null,
         ready: room.ready[1],
         isYou: yourSeat === 1,
       },
@@ -399,7 +418,11 @@ export function importPersistedRoom(data) {
     ranked: !!data.ranked,
     rankedPlayerIds: data.rankedPlayerIds || null,
     seatTokens: data.seatTokens || [null, null],
-    lastSeen: [0, 0],
+    // (1.51.95 item 5) restaurada ganha olhos novos: sem isto o lastSeen
+    // [0,0] herdado + createdAt antigo fariam a regra de partida
+    // abandonada podar a sala no primeiro sweep após o boot — e quem
+    // voltou depois de um restart do servidor perderia a partida.
+    lastSeen: [Date.now(), Date.now()],
     aiControlled: Array.isArray(data.aiControlled)
       ? [!!data.aiControlled[0], !!data.aiControlled[1]]
       : [false, false],

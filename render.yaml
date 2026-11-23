@@ -18,6 +18,10 @@ services:
         value: "https://dragonfall.netlify.app,https://artifacts-dragonfall.netlify.app,http://127.0.0.1:5173,http://localhost:5173"
       - key: DF_KEEPALIVE
         value: "1"
+      # (1.51.95 item 1) o ping do keep-alive sai para o endereço
+      # público — ping só para o localhost não acorda o Render.
+      - key: DF_KEEPALIVE_URL
+        value: "https://artifacts-dragonfall-public.onrender.com/health"
       - key: DF_MAX_ROOMS
         value: "40"
       - key: DF_MAX_QUEUE

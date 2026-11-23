@@ -1,15 +1,14 @@
 /**
  * Pausa do online (1.51.88 item 8) — fechar a tela de encontro.
  *
- * Fechar a tela de encontro em PARTIDA ENCONTRADA deixa a conta 30 s
- * sem jogar partida Online; em PARTIDA INICIANDO, 60 s. A pausa é
- * registrada na CONTA (não na conexão): relogar não burla — o
- * join_queue / join_ranked_queue recusa com ONLINE_BAN enquanto ela
- * durar. Sem login a chave é a conexão (s:<sid>), mas o login é
- * obrigatório para jogar online (1.51.67), então na prática a conta
- * sempre está lá. Mesmo esquema de chave da exclusão pós-recusa
- * (df-pair-exclusion.mjs): conta (u:<id>) quando houver, senão socket.
- * Só vive em memória; o prazo passa sozinho.
+ * FIM DA REGRA EM 1.51.95 (item 7, decisão dela): fechar a tela de
+ * encontro NÃO bane mais. Este módulo fica guardado sem uso (nenhum
+ * caminho do index.mjs o chama mais) — não apagar: o deploy ao vivo
+ * (e604ec21) ainda tem o módulo e a remoção do arquivo exigiria
+ * sincronizar a lista SERVER_FILES; o custo de manter é zero.
+ *
+ * Regra antiga (só p/ referência): fechar em PARTIDA ENCONTRADA deixava
+ * a conta 30 s sem jogar partida Online; em PARTIDA INICIANDO, 60 s.
  */
 
 export const ONLINE_BAN_FOUND_SECONDS = 30;

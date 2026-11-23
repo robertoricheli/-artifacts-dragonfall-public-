@@ -137,9 +137,10 @@ export function createInitialMatchState(opts) {
   // (1.51.78 ponto 2) O saque livre do 1º turno NÃO acontece aqui:
   // os dois jogadores saem do match_start com 4 cartas (igual ao
   // offline, que dá 4 e só saca a 5ª depois). A 5ª carta de quem começa
-  // é sacada por startMatchForRoom (index.mjs), 4,5 s após o match_start
-  // — 3 s de contagem da "Partida Encontrada" + 1,5 s após a batalha
-  // abrir — via envelope DRAW_CARD (o cliente já o aplica).
+  // é sacada por startMatchForRoom (index.mjs), 1,5 s após o match_start
+  // (1,5 s a partir da 1.51.95 D2; os 4,5 s antigos supunham uma contagem
+  // de 3 s depois do match_start que não existe no cliente atual)
+  // via envelope DRAW_CARD (o cliente já o aplica).
   // A manutenção de início de turno continua (status/PV/refresh do
   // campo vazio); só o saque explícito saiu daqui.
   const { DfRules } = bootDragonfallEngine();

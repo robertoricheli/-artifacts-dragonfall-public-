@@ -20,6 +20,14 @@ export function addToQueue(socketId, displayName = null, profile = null, playerI
   if (queue.length >= MAX_QUEUE) {
     return { ok: false, error: "SERVER_BUSY", size: queue.length };
   }
+  // (1.51.95 item 3) o mesmo jogador não entra na busca 2×: um segundo
+  // join do mesmo playerId (outra conexão/aparelho) é recusado. O
+  // re-join da MESMA conexão continua permitido (removeFromQueue acima
+  // já tirou a entrada dela — é só uma atualização). Sem playerId
+  // (anônimo) não há como identificar: entra como antes.
+  if (playerId && queue.some((e) => e.playerId && e.playerId === playerId)) {
+    return { ok: false, error: "ALREADY_IN_QUEUE", size: queue.length };
+  }
   // (1.51.75) avatar e nível do perfil, capturados no join_queue —
   // o pareamento os copia para a sala e o roomPublicView os emite.
   // (1.51.80) moldura do avatar: mesmo caminho, para a Partida Encontrada.
@@ -60,6 +68,11 @@ export function takePair() {
     for (let j = i + 1; j < queue.length; j++) {
       const a = queue[i];
       const b = queue[j];
+      // (1.51.95 item 3) rede de segurança: mesmo que duas entradas do
+      // mesmo jogador cheguem à fila (ex.: corrida), nunca pareiam entre
+      // si — nem o mesmo playerId, nem o mesmo socket.
+      if (a.socketId === b.socketId) continue;
+      if (a.playerId && b.playerId && a.playerId === b.playerId) continue;
       if (
         isPairExcluded(
           exclusionKeyForPlayer(a.playerId, a.socketId),

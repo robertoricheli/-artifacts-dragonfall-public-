@@ -200,6 +200,20 @@ export function logMp(event, fields = {}) {
   } catch (e) { /* */ }
 }
 
+export const PUBLIC_KEEPALIVE_URL = "https://artifacts-dragonfall-public.onrender.com/health";
+
+/**
+ * URL do keep-alive (1.51.95 item 1): DF_KEEPALIVE_URL quando definida;
+ * em produção, o endereço público (o ping tem de sair para fora — um
+ * ping só para o localhost não acorda o Render quando ninguém joga);
+ * fora de produção, o /health local. Testável sem rede (t_1188).
+ */
+export function resolveKeepAliveUrl(port) {
+  if (process.env.DF_KEEPALIVE_URL) return process.env.DF_KEEPALIVE_URL;
+  if (process.env.NODE_ENV === "production") return PUBLIC_KEEPALIVE_URL;
+  return `http://127.0.0.1:${port}/health`;
+}
+
 /**
  * Keep-alive: pinga o próprio /health periodicamente (evita sleep em planos que dormem).
  * Desliga com DF_KEEPALIVE=0.
@@ -207,8 +221,7 @@ export function logMp(event, fields = {}) {
 export function startSelfKeepAlive(port, opts = {}) {
   if (process.env.DF_KEEPALIVE === "0") return () => {};
   const intervalMs = Number(process.env.DF_KEEPALIVE_MS) || opts.intervalMs || 4 * 60 * 1000;
-  const url = process.env.DF_KEEPALIVE_URL
-    || `http://127.0.0.1:${port}/health`;
+  const url = opts.url || resolveKeepAliveUrl(port);
   const tick = () => {
     fetch(url, { signal: AbortSignal.timeout(15_000) })
       .then((r) => r.json())
