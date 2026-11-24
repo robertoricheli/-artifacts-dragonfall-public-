@@ -4,6 +4,8 @@
  */
 import { getPgPool, isPostgresEnabled } from "./df-postgres.mjs";
 import { logMp } from "./df-mp-metrics.mjs";
+// Frente 1 (MÉDIA 3): contexto reativo persistível (pergunta aberta).
+import { serializeReactiveContext } from "./df-reactive-persist.mjs";
 
 const LIVE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS df_live_rooms (
@@ -21,9 +23,12 @@ CREATE TABLE IF NOT EXISTS df_live_rooms (
   ranked BOOLEAN NOT NULL DEFAULT FALSE,
   ranked_player_ids JSONB,
   seat_tokens JSONB,
+  reactive_ctx JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- Frente 1 (MÉDIA 3): a tabela já existe no Render sem esta coluna.
+ALTER TABLE df_live_rooms ADD COLUMN IF NOT EXISTS reactive_ctx JSONB;
 CREATE INDEX IF NOT EXISTS df_live_rooms_status ON df_live_rooms (status);
 CREATE INDEX IF NOT EXISTS df_live_rooms_updated ON df_live_rooms (updated_at DESC);
 `;
@@ -63,6 +68,7 @@ function serializeRoom(room) {
     ranked: !!room.ranked,
     ranked_player_ids: room.rankedPlayerIds || null,
     seat_tokens: room.seatTokens || null,
+    reactive_ctx: serializeReactiveContext(room),
   };
 }
 
@@ -95,11 +101,11 @@ export async function flushLiveRoomPending() {
         `INSERT INTO df_live_rooms (
           code, status, game_state, last_snapshot, event_log, action_seq,
           heroes, ready, win_points, deck_seed, arena_scenario_id,
-          ranked, ranked_player_ids, seat_tokens, updated_at
+          ranked, ranked_player_ids, seat_tokens, reactive_ctx, updated_at
         ) VALUES (
           $1,$2,$3::jsonb,$4::jsonb,$5::jsonb,$6,
           $7::jsonb,$8::jsonb,$9,$10,$11,
-          $12,$13::jsonb,$14::jsonb, NOW()
+          $12,$13::jsonb,$14::jsonb,$15::jsonb, NOW()
         )
         ON CONFLICT (code) DO UPDATE SET
           status = EXCLUDED.status,
@@ -115,6 +121,7 @@ export async function flushLiveRoomPending() {
           ranked = EXCLUDED.ranked,
           ranked_player_ids = EXCLUDED.ranked_player_ids,
           seat_tokens = EXCLUDED.seat_tokens,
+          reactive_ctx = EXCLUDED.reactive_ctx,
           updated_at = NOW()`,
         [
           row.code,
@@ -131,6 +138,7 @@ export async function flushLiveRoomPending() {
           row.ranked,
           JSON.stringify(row.ranked_player_ids),
           JSON.stringify(row.seat_tokens),
+          JSON.stringify(row.reactive_ctx),
         ],
       );
     } catch (e) {
@@ -174,6 +182,7 @@ export async function loadLiveRoomsFromPg() {
       ranked: !!r.ranked,
       rankedPlayerIds: r.ranked_player_ids || null,
       seatTokens: r.seat_tokens || null,
+      reactiveCtx: r.reactive_ctx || null,
     }));
   } catch (e) {
     logMp("live_room_load_err", { error: e?.message || String(e) });

@@ -10,6 +10,8 @@
  * Socket IDs e turnTimer nunca vão no blob.
  */
 import { randomUUID } from "node:crypto";
+// Frente 1 (MÉDIA 3): contexto reativo persistível (pergunta aberta).
+import { serializeReactiveContext } from "./df-reactive-persist.mjs";
 import { logMp } from "./df-mp-metrics.mjs";
 import {
   getRedisClient,
@@ -80,6 +82,8 @@ export function serializeRoomBlob(room) {
       ? [!!room.aiControlled[0], !!room.aiControlled[1]]
       : [false, false],
     lastSeen: room.lastSeen || [0, 0],
+    // Frente 1 (MÉDIA 3): pergunta reativa aberta / Proteção Divina.
+    reactiveCtx: serializeReactiveContext(room),
   };
 }
 
@@ -259,6 +263,7 @@ export async function hydrateRoomsFromRedis(importFn) {
       rankedPlayerIds: blob.rankedPlayerIds,
       seatTokens: blob.seatTokens,
       aiControlled: blob.aiControlled,
+      reactiveCtx: blob.reactiveCtx || null,
     };
     if (importFn(mapped)) n += 1;
   }

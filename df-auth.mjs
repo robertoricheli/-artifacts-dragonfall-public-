@@ -23,7 +23,6 @@ import {
   getDisplayNameOwner,
   updateDisplayName,
 } from "./df-auth-store.mjs";
-import { normalizeAvatarFrame } from "./df-auth-pg.mjs";
 import { verifyGoogleIdToken } from "./df-auth-google.mjs";
 import { createRateLimiter } from "./rate-limit.mjs";
 import {
@@ -387,7 +386,7 @@ function playerPublic(p) {
     avatarHeroId: p.avatarHeroId || null,
     hubBackgroundId: p.hubBackgroundId || null,
     avatarColor: p.avatarColor || null,
-    avatarFrame: normalizeAvatarFrame(p.avatarFrame),
+    avatarFrame: p.avatarFrame || null,
     battleBg: p.battleBg || null,
     language: LANGUAGE_IDS.has(p.language) ? p.language : null,
     customDecks: Array.isArray(p.customDecks) ? p.customDecks : null,
@@ -544,7 +543,7 @@ async function authRegister(req, body) {
     avatarHeroId: null,
     hubBackgroundId: null,
     avatarColor: null,
-    avatarFrame: "2", // (1.51.85) padrao p/ conta nova: MOLDURA AVATAR 2.
+    avatarFrame: null,
     battleBg: null,
     language: null,
     customDecks: null,
@@ -584,23 +583,32 @@ async function authRegister(req, body) {
 }
 
 async function authLogin(req, body) {
-  const limited = allowAuthAttempt(req, body?.email);
-  if (limited) return limited;
-  const email = normEmail(body?.email);
-  const password = body?.password;
-  const player = await findPlayerByEmail(email);
-  if (!player || !verifyPassword(password, player.passwordSalt, player.passwordHash)) {
-    return { status: 401, data: { ok: false, error: "INVALID_CREDENTIALS" } };
+  // Frente 1 (ALTA 3, 2026-11-24): um soluço do banco durante o login
+  // virava rejeição async sem try/catch e derrubava o processo
+  // (Express 4 não captura). Agora devolve 503 AUTH_UNAVAILABLE e o
+  // servidor segue vivo.
+  try {
+    const limited = allowAuthAttempt(req, body?.email);
+    if (limited) return limited;
+    const email = normEmail(body?.email);
+    const password = body?.password;
+    const player = await findPlayerByEmail(email);
+    if (!player || !verifyPassword(password, player.passwordSalt, player.passwordHash)) {
+      return { status: 401, data: { ok: false, error: "INVALID_CREDENTIALS" } };
+    }
+    // Limpa passwordEnc legado se ainda existir na linha.
+    if (player.passwordEnc) {
+      player.passwordEnc = null;
+      await persistPlayer(player).catch(() => {});
+    }
+    const token = await createSession(player.id, deviceFromBody(body));
+    const fresh = await withCollection(await getPlayerById(player.id));
+    recordActivity(player.id, "login");
+    return { status: 200, data: { ok: true, token, player: playerPublic(fresh || player) } };
+  } catch (e) {
+    console.error("[auth] login indisponível:", e?.message || e);
+    return { status: 503, data: { ok: false, error: "AUTH_UNAVAILABLE" } };
   }
-  // Limpa passwordEnc legado se ainda existir na linha.
-  if (player.passwordEnc) {
-    player.passwordEnc = null;
-    await persistPlayer(player).catch(() => {});
-  }
-  const token = await createSession(player.id, deviceFromBody(body));
-  const fresh = await withCollection(await getPlayerById(player.id));
-  recordActivity(player.id, "login");
-  return { status: 200, data: { ok: true, token, player: playerPublic(fresh || player) } };
 }
 
 /**
@@ -709,7 +717,7 @@ async function authGoogle(req, body) {
     avatarHeroId: null,
     hubBackgroundId: null,
     avatarColor: null,
-    avatarFrame: "2", // (1.51.85) padrao p/ conta nova: MOLDURA AVATAR 2.
+    avatarFrame: null,
     battleBg: null,
     language: null,
     customDecks: null,
@@ -970,12 +978,6 @@ async function authProfile(req, body) {
   // batalha. Valores inválidos são ignorados (normCustomField → null).
   for (const [bodyKey, playerKey] of [["avatarColor", "avatarColor"], ["avatarFrame", "avatarFrame"], ["battleBg", "battleBg"]]) {
     if (body[bodyKey] != null) {
-      // (1.51.85) molduras 1/2/3 voltaram: 1/2/3 passam, 0/ausente/
-      // invalido -> "2". Aceita n. ou string.
-      if (playerKey === "avatarFrame") {
-        player[playerKey] = normalizeAvatarFrame(body[bodyKey]);
-        continue;
-      }
       const v = normCustomField(body[bodyKey]);
       if (v != null) player[playerKey] = v;
     }
@@ -1187,12 +1189,6 @@ async function authProfileImport(req, body) {
   // ausente/null não apaga o que já existe.
   const customFields = {};
   for (const key of ["avatarColor", "avatarFrame", "battleBg"]) {
-    if (body?.[key] == null) continue;
-    // (1.51.85) molduras 1/2/3 voltaram (ver PATCH acima).
-    if (key === "avatarFrame") {
-      customFields[key] = normalizeAvatarFrame(body[key]);
-      continue;
-    }
     const v = normCustomField(body?.[key]);
     if (v != null) customFields[key] = v;
   }

@@ -44,7 +44,12 @@ export const AUTHORITATIVE_TYPES = new Set([
   "TALENT_DISCARD",
   "ULTIMATE_PLAY",
   "SURRENDER",
-  "FIELD_COMMIT",
+  // Frente 1 (GRAVE 1, 2026-11-24): FIELD_COMMIT REMOVIDO — nenhum cliente
+  // legítimo envia este tipo (só o motor o tratava); um celular modificado
+  // usava as mutações para inventar carta, mudar Poder, zerar ações do
+  // adversário e ganhar VP. A rejeição explícita vive em
+  // applyAuthoritativeAction (FIELD_COMMIT_DISABLED); o motor também
+  // rejeita (df-engine.js) — defesa em profundidade.
   ...(FORCE_SNAPSHOT_FALLBACK ? [] : PHASE2_AUTHORITATIVE_TYPES),
 ]);
 
@@ -64,6 +69,22 @@ export const UI_ONLY_TYPES = new Set([
   "ULTIMATE_START",
   "OPEN_DISCARD",
 ]);
+
+/** Pergunta → resposta (fluxo pré-perguntado pelo cliente). Espelho de
+ * QUERY_TO_ANSWER em df-reactive-suspend.mjs — duplicado aqui de propósito:
+ * df-authority.mjs não pode importar df-reactive-suspend.mjs (ele importa
+ * daqui) e o ciclo quebraria a inicialização. */
+export const REACTIVE_QUERY_TO_ANSWER = Object.freeze({
+  REACTIVE_BLOCK_QUERY: "REACTIVE_BLOCK_ANSWER",
+  REACTIVE_PROTECTION_QUERY: "REACTIVE_PROTECTION_ANSWER",
+  REACTIVE_CANCEL_QUERY: "REACTIVE_CANCEL_ANSWER",
+  REACTIVE_EXHAUSTION_QUERY: "REACTIVE_EXHAUSTION_ANSWER",
+  REACTIVE_COUNTER_QUERY: "REACTIVE_COUNTER_ANSWER",
+});
+
+/** Prazo de uma pergunta pré-feita pelo cliente: o mesmo da suspensão
+ * (7 s + 1 s de folga, df-reactive-suspend.mjs). */
+export const REACTIVE_CLIENT_QUERY_MS = 8000;
 
 /**
  * Tipos delegados — tenta motor; snapshot só se CLIENT_ONLY / NOT_IMPLEMENTED.
@@ -133,6 +154,14 @@ export function seedRoomFromSnapshot(room, snapshot) {
 }
 
 function mergeValidatedSnapshot(room, seat, action, snapshot) {
+  // Frente 1 (MÉDIA 2, 2026-11-24): por padrão NÃO HÁ uso legítimo de
+  // fundir tabuleiro enviado pelo cliente (o motor é o juiz; SYNC_STATE
+  // é cosmético e nunca faz merge). O merge só existe como válvula de
+  // emergência com DF_FORCE_SNAPSHOT_FALLBACK=1 (ops) — e mesmo aí a
+  // validação abaixo recusa carta inventada.
+  if (!FORCE_SNAPSHOT_FALLBACK) {
+    return { ok: false, error: "SNAPSHOT_MERGE_DISABLED" };
+  }
   const prev = resolveGameState(room);
   const next = unwrapGameState(snapshot);
   const guard = validateSnapshotUpdate(prev, next, seat, action.type, action);
@@ -971,22 +1000,28 @@ export function buildPresentationEnvelope(events = [], action = null, meta = {})
 /**
  * Fog-of-war: peer recebe mãos adversárias só como contagem (anti-cheat).
  * Viewer vê a própria mão completa.
+ * Frente 1 (MÉDIA 5, 2026-11-24): o BARALHO é escondido de TODOS os
+ * assentos — inclusive do dono (só fica o deckCount, que é o que o
+ * cliente usa: online_match_state.gd lê deckCount, nunca o conteúdo
+ * do deck). Antes, o cliente recebia o próprio baralho inteiro, na
+ * ordem, e podia saber as próximas compras.
  */
 export function projectStateForSeat(state, viewerSeat) {
   if (!state?.players?.length) return state;
   try {
     const next = JSON.parse(JSON.stringify(state));
     for (let i = 0; i < next.players.length; i++) {
-      if (i === viewerSeat) continue;
       const pl = next.players[i];
+      if (!pl) continue;
+      // Baralho escondido de todo mundo (MÉDIA 5): só a contagem viaja.
+      if (Array.isArray(pl.deck)) {
+        pl.deckCount = pl.deck.length;
+        pl.deck = [];
+      }
+      if (i === viewerSeat) continue;
       if (!pl?.hand) continue;
       const n = pl.hand.length;
       pl.hand = Array.from({ length: n }, () => ({ fog: true, category: "hidden" }));
-      if (pl.deck && Array.isArray(pl.deck)) {
-        pl.deckCount = pl.deck.length;
-        // Não vazar ordem do baralho.
-        pl.deck = [];
-      }
     }
     return next;
   } catch (e) {
@@ -1017,11 +1052,36 @@ export function projectEventsForSeat(events, viewerSeat) {
 export function applyAuthoritativeAction(room, seat, action, snapshot = null, opts = {}) {
   if (!action?.type) return { ok: false, error: "BAD_ACTION" };
 
+  // Frente 1 (GRAVE 1, 2026-11-24): FIELD_COMMIT FECHADO — mutação de
+  // tabuleiro enviada pelo cliente nunca é aplicada, nem validada.
+  // Nenhum cliente legítimo envia este tipo (nem o jogo, nem a IA
+  // substituta); o motor também rejeita (df-engine.js).
+  if (action.type === "FIELD_COMMIT") {
+    return { ok: false, error: "FIELD_COMMIT_DISABLED" };
+  }
+
   if (!room.eventLog) room.eventLog = [];
 
   if (UI_ONLY_TYPES.has(action.type)) {
     // QUERY UI-only: só repasse (a suspensão server-side vive em
     // room.mpPendingReactive — df-reactive-suspend.mjs). Sem janelas.
+    // Frente 2 (MÉDIA 1): a pergunta pré-feita pelo cliente (BLOQUEAR /
+    // CONTRAMÁGICA / EXAUSTÃO — o atacante pergunta antes de enviar a
+    // ação) é REGISTRADA na sala: a ANSWER só vale para ela, com o mesmo
+    // qid e dentro do prazo (7 s + 1 s). Sem registro, a ANSWER é avulsa
+    // e cai no portão abaixo. Uso único: a resposta consome o registro.
+    if (action.type.startsWith("REACTIVE_") && action.type.endsWith("_QUERY")
+        && REACTIVE_QUERY_TO_ANSWER[action.type]) {
+      room.mpClientReactive = {
+        qid: action.qid ?? null,
+        queryType: action.type,
+        answerType: REACTIVE_QUERY_TO_ANSWER[action.type],
+        askerSeat: seat,
+        defenderSeat: action.defenderPlayerId ?? (1 - seat),
+        createdAt: Date.now(),
+        expiresAt: Date.now() + REACTIVE_CLIENT_QUERY_MS,
+      };
+    }
     const presentationEnvelope = buildPresentationEnvelope([], action);
     return {
       ok: true,
@@ -1042,13 +1102,36 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null, op
   const { DfEngine, DfRules, DfData, DfEffects } = getEngine();
   const shaped = { ...action, playerId: seat };
 
-  // C-A05/C-A06/C-A07/C-A08 (Lote F): suspensão reativa. Uma ANSWER com
-  // qid diferente do pendente atual é descartada (resposta fora do
-  // prazo — o pendente já expirou ou outra pergunta está aberta).
-  if (shaped.type.startsWith("REACTIVE_") && shaped.type.endsWith("_ANSWER")
-      && room.mpPendingReactive && shaped.qid != null
-      && shaped.qid !== room.mpPendingReactive.qid) {
-    return { ok: false, error: "REACTIVE_EXPIRED" };
+  // Frente 2 (MÉDIA 1 / C-A05–C-A08): uma ANSWER só vale para uma
+  // pergunta ABERTA, do tipo certo e dentro do prazo. Dois caminhos:
+  // (a) suspensão do servidor (room.mpPendingReactive): qid + tipo da
+  // resposta têm de casar com o pendente, e o prazo (expiresAt, 7 s +
+  // 1 s) ainda tem de estar valendo — o timer pode não ter corrido
+  // ainda quando a resposta tardia chega, então o prazo é conferido
+  // aqui também; (b) pergunta pré-feita pelo cliente
+  // (room.mpClientReactive, registrada no repasse da QUERY): mesmo
+  // qid + tipo + prazo, uso único (a resposta consome o registro —
+  // uma 2ª resposta para o mesmo qid cai aqui). Sem pergunta aberta
+  // em nenhum dos dois: REACTIVE_EXPIRED. O que continua igual:
+  // qid errado → REACTIVE_EXPIRED; SIM duplicado → NO_CARD (a carta
+  // já saiu da mão no motor, abaixo).
+  if (shaped.type.startsWith("REACTIVE_") && shaped.type.endsWith("_ANSWER")) {
+    const pend = room.mpPendingReactive;
+    if (pend) {
+      if (shaped.qid == null || shaped.qid !== pend.qid
+          || (pend.answerType && shaped.type !== pend.answerType)
+          || (pend.expiresAt != null && Date.now() > pend.expiresAt)) {
+        return { ok: false, error: "REACTIVE_EXPIRED" };
+      }
+    } else {
+      const q = room.mpClientReactive;
+      if (!q || shaped.qid == null || shaped.qid !== q.qid
+          || shaped.type !== q.answerType
+          || (q.expiresAt != null && Date.now() > q.expiresAt)) {
+        return { ok: false, error: "REACTIVE_EXPIRED" };
+      }
+      room.mpClientReactive = null;
+    }
   }
   // Enquanto há pergunta aberta, nenhuma outra ação autoritativa entra
   // (o estado sob a ação suspensa não pode mudar — o actionSeq é a
@@ -1118,18 +1201,20 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null, op
 
   // C-A05/C-A06 (Lote F): a Ultimate resolve SOB SUSPENSÃO — o defensor
   // é perguntado ANTES do efeito (e o uso só é gasto na retomada).
-  // O cliente novo marca a ação com `reactiveServerDriven: true` e NÃO
-  // pergunta antes de enviar; sem a marca (cliente velho, que já
-  // perguntou), aplica direto. A IA do servidor é sempre server-driven
-  // (opts.serverAi — C-A08). A emissão da QUERY e o timer vivem em
-  // index.mjs / df-reactive-suspend.mjs (a autoridade só decide).
-  // opts.resume: retomada de uma suspensão — nunca re-suspender.
+  // Frente 2 (GRAVE 3): o SERVIDOR decide e pergunta SEMPRE — a
+  // suspensão não depende mais da marca `reactiveServerDriven` do
+  // celular do atacante (um celular modificado simplesmente não a
+  // marcava e a reação era pulada). O cliente atual sempre marcava;
+  // as funções de pré-pergunta de PROTEÇÃO/CANCELAR do cliente não
+  // têm chamadores — a pergunta já era só do servidor. A emissão da
+  // QUERY e o timer vivem em index.mjs / df-reactive-suspend.mjs (a
+  // autoridade só decide). opts.resume: retomada de uma suspensão —
+  // nunca re-suspender.
   // C-A05: CANCELAR ULTIMATE primeiro. C-A06: sem CANCELAR, a PROTEÇÃO
   // DIVINA é perguntada DIRETO (só BOMBA/VAMPIRISMO — targetEnemy/
   // vampirism; COMETA/FOGO E GELO/INCINERAR fora do escopo, D-2) — no
   // offline as duas perguntas são independentes.
   if ((shaped.type === "ULTIMATE_PLAY" || shaped.type === "ULTIMATE_TARGET")
-      && (shaped.reactiveServerDriven === true || opts?.serverAi === true)
       && !room.mpPendingReactive && !opts?.resume) {
     const defSeat = 1 - seat;
     const canAsk = DfRules?.canOfferCancelUltimate?.(state, defSeat, seat);
@@ -1161,18 +1246,17 @@ export function applyAuthoritativeAction(room, seat, action, snapshot = null, op
   // U-B07 / E-N1 Opção 1 (rodada 5): a PROTEÇÃO DIVINA das 7 fontes que
   // reduzem Poder (BOLA/ASSASSINAR/TRANSFORMAR/INCENDIAR como habilidade;
   // BOLA/EXPLOSÃO/TRANSFORMAR como talento) é perguntada DURANTE a
-  // animação — igual ao offline. O cliente novo marca a ação com
-  // `reactiveServerDriven: true` e NÃO pré-pergunta; a IA do servidor é
-  // sempre server-driven (opts.serverAi — C-A08). Sem a marca (cliente
-  // velho, que já perguntou), aplica direto. A suspensão é NÃO cometida:
-  // nada muda no estado até a resposta; o visual viaja com a suspensão
-  // (ack do ator + query do defensor, via suspendSpec) e a retomada NÃO o
-  // re-emite (o resume não tem envelope). opts.resume: nunca re-suspender.
+  // animação — igual ao offline. Frente 2 (GRAVE 3): o SERVIDOR decide
+  // e pergunta SEMPRE, sem depender da marca `reactiveServerDriven` do
+  // celular do atacante (ver o bloco da Ultimate acima). A suspensão é
+  // NÃO cometida: nada muda no estado até a resposta; o visual viaja
+  // com a suspensão (ack do ator + query do defensor, via suspendSpec)
+  // e a retomada NÃO o re-emite (o resume não tem envelope).
+  // opts.resume: nunca re-suspender.
   // Ordem EXAUSTÃO → PROTEÇÃO preservada: o cliente pergunta a EXAUSTÃO
   // antes de enviar (humano); a IA suspende a EXAUSTÃO primeiro em
   // maybeSuspendAiAction e encadeia a PROTEÇÃO na resposta NÃO.
   if ((shaped.type === "ABILITY_TARGET" || shaped.type === "TALENT_TARGET")
-      && (shaped.reactiveServerDriven === true || opts?.serverAi === true)
       && !room.mpPendingReactive && !opts?.resume) {
     const defSeat = 1 - seat;
     const abilityKey = shaped.type === "ABILITY_TARGET"
@@ -1430,17 +1514,44 @@ export function getRoomReplaySlice(room, fromSeq = 0) {
   return room.eventLog.filter((e) => e.seq > fromSeq);
 }
 
-export function buildReplayPayload(room) {
+/**
+ * Frente 1 (GRAVE 2, 2026-11-24): o replay do rejoin/get_replay passa
+ * pelo MESMO esconderijo da visão normal (projectStateForSeat) — antes
+ * devolvia o gameState cru e vazava a mão e o baralho do adversário.
+ * viewerSeat é quem pediu: sem assento conhecido, esconde as duas mãos
+ * (viewerSeat -1). Os eventos DRAW do adversário também são embaçados
+ * (projectEventsForSeat) e o deckSeed não viaja mais (MÉDIA 5).
+ */
+export function buildReplayPayload(room, viewerSeat = null) {
   if (!room || room.status !== "playing") return null;
   if (!room.gameState?.players?.length) return null;
+  const seat = viewerSeat === 0 || viewerSeat === 1 ? viewerSeat : -1;
+  let gameState = null;
+  let snapshot = null;
+  try {
+    gameState = projectStateForSeat(room.gameState, seat);
+    if (room.lastSnapshot) {
+      const snapState = unwrapGameState(room.lastSnapshot);
+      snapshot = snapState?.players?.length
+        ? { ...room.lastSnapshot, state: projectStateForSeat(snapState, seat) }
+        : room.lastSnapshot;
+    }
+  } catch (e) { /* keep raw */ }
+  let entries = getRoomReplaySlice(room, 0);
+  try {
+    entries = (entries || []).map((en) => ({
+      ...en,
+      events: projectEventsForSeat(en.events || [], seat),
+    }));
+  } catch (e) { /* keep raw */ }
   return {
     seq: room.actionSeq,
-    entries: getRoomReplaySlice(room, 0),
-    snapshot: room.lastSnapshot || null,
-    gameState: room.gameState || null,
+    entries,
+    snapshot,
+    gameState: gameState || room.gameState || null,
     heroIds: room.heroes || [null, null],
     arenaScenarioId: room.arenaScenarioId || null,
-    deckSeed: room.deckSeed != null ? room.deckSeed : null,
+    deckSeed: null,
     turnDeadline: room.turnDeadline || null,
     serverNow: Date.now(),
     // (F7, t_1020) o rejoin precisa saber se o oponente segue sob a IA:
@@ -1463,22 +1574,13 @@ export function buildReplayPayload(room) {
 export function buildFinalReplayPayload(room, yourSeat = null) {
   if (!room || room.status !== "ended") return null;
   if (!room.gameState?.players?.length) return null;
+  // Frente 1 (GRAVE 2 / MÉDIA 5, 2026-11-24): usa o mesmo esconderijo
+  // do replay normal (projectStateForSeat) — mão do oponente embaçada,
+  // baralhos escondidos (só deckCount) — e não envia o deckSeed.
+  const seat = yourSeat === 0 || yourSeat === 1 ? yourSeat : -1;
   let gameState = null;
   try {
-    gameState = JSON.parse(JSON.stringify(room.gameState));
-    if (yourSeat === 0 || yourSeat === 1) {
-      for (let i = 0; i < (gameState.players || []).length; i++) {
-        if (i === yourSeat) continue;
-        const pl = gameState.players[i];
-        if (!pl?.hand) continue;
-        const n = pl.hand.length;
-        pl.hand = Array.from({ length: n }, () => ({ fog: true, category: "hidden" }));
-        if (Array.isArray(pl.deck)) {
-          pl.deckCount = pl.deck.length;
-          pl.deck = [];
-        }
-      }
-    }
+    gameState = projectStateForSeat(room.gameState, seat);
   } catch (e2) { /* keep raw */ }
   return {
     seq: room.actionSeq,
@@ -1487,7 +1589,7 @@ export function buildFinalReplayPayload(room, yourSeat = null) {
     gameState,
     heroIds: room.heroes || [null, null],
     arenaScenarioId: room.arenaScenarioId || null,
-    deckSeed: room.deckSeed != null ? room.deckSeed : null,
+    deckSeed: null,
     turnDeadline: null,
     serverNow: Date.now(),
     aiControlled: [false, false],

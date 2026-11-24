@@ -4,6 +4,10 @@
 import { MAX_ROOMS } from "./df-mp-limits.mjs";
 import { ensureSeatTokens, seatTokenFor } from "./df-seat-token.mjs";
 import { scheduleRoomMirror, scheduleRoomMirrorDelete } from "./df-room-store.mjs";
+// Frente 1 (MÉDIA 3): contexto reativo persistível (pergunta aberta).
+import { parseReactiveContext } from "./df-reactive-persist.mjs";
+// Frente 1 (ALTA 2): hash de estado para detecção de dessincronia.
+import { computeStateHash, recordStateHash } from "./df-state-hash.mjs";
 
 const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
 // Sala encerrada: só precisa ficar viva p/ o jogador que volta ver o fim
@@ -51,10 +55,24 @@ export function makeRoomCode(opts = {}) {
   return code;
 }
 
+/**
+ * Salas que OCUPAM vaga no limite de 40: lobby + playing. Uma partida
+ * encerrada fica viva só para o replay final (TTL 10 min) e NÃO ocupa
+ * vaga — antes, 40 salas encerradas travavam o pareamento com
+ * SERVER_BUSY até o TTL expirar (Frente 1, MÉDIA 4, 2026-11-24).
+ */
+export function countOccupyingRooms() {
+  let n = 0;
+  for (const room of rooms.values()) {
+    if (room.status !== "ended") n += 1;
+  }
+  return n;
+}
+
 /** @returns {{ ok: true, room: object } | { ok: false, error: string }} */
 export function createRoom(opts = {}) {
   pruneOldRooms();
-  if (rooms.size >= MAX_ROOMS) {
+  if (countOccupyingRooms() >= MAX_ROOMS) {
     return { ok: false, error: "SERVER_BUSY" };
   }
   const code = makeRoomCode(opts);
@@ -285,17 +303,28 @@ export function roomPublicView(room, yourSeat = null, opts = {}) {
     try {
       gameState = JSON.parse(JSON.stringify(gameState));
       for (let i = 0; i < (gameState.players || []).length; i++) {
-        if (i === yourSeat) continue;
         const pl = gameState.players[i];
-        if (!pl?.hand) continue;
-        const n = pl.hand.length;
-        pl.hand = Array.from({ length: n }, () => ({ fog: true, category: "hidden" }));
+        if (!pl) continue;
+        // Frente 1 (MÉDIA 5, 2026-11-24): o baralho é escondido de TODOS
+        // os assentos, inclusive do dono — só fica o deckCount (é o que
+        // o cliente usa; o conteúdo/ordem do deck nunca viaja).
         if (Array.isArray(pl.deck)) {
           pl.deckCount = pl.deck.length;
           pl.deck = [];
         }
+        if (i === yourSeat) continue;
+        if (!pl?.hand) continue;
+        const n = pl.hand.length;
+        pl.hand = Array.from({ length: n }, () => ({ fog: true, category: "hidden" }));
       }
     } catch (e2) { /* keep raw */ }
+  }
+  // Frente 1 (ALTA 2): hash do estado projetado neste seq (o cliente
+  // confere o seu contra este em match_ping/state_check).
+  let stateHash = null;
+  if (gameState && (yourSeat === 0 || yourSeat === 1)) {
+    stateHash = computeStateHash(gameState);
+    recordStateHash(room, yourSeat, room.actionSeq | 0, stateHash);
   }
   return {
     code: room.code,
@@ -342,6 +371,7 @@ export function roomPublicView(room, yourSeat = null, opts = {}) {
     turnDeadline: room.turnDeadline || null,
     arenaScenarioId: room.arenaScenarioId || null,
     gameState,
+    stateHash,
     seatToken: yourSeat === 0 || yourSeat === 1 ? seatTokenFor(room, yourSeat) : null,
   };
 }
@@ -384,7 +414,7 @@ export function listActiveMatchCount() {
 /** Restaura sala persistida (sem sockets — reconexão preenche assentos). */
 export function importPersistedRoom(data) {
   if (!data?.code || rooms.has(data.code)) return null;
-  if (rooms.size >= MAX_ROOMS) return null;
+  if (countOccupyingRooms() >= MAX_ROOMS) return null;
   // Não ressuscitar sala velha demais (ex.: linha 'playing' de horas
   // atrás que escapou do filtro de idade na leitura).
   const ageRef = data.createdAt || Date.now();
@@ -427,6 +457,18 @@ export function importPersistedRoom(data) {
       ? [!!data.aiControlled[0], !!data.aiControlled[1]]
       : [false, false],
   };
+  // Frente 1 (MÉDIA 3): contexto reativo persistido (pergunta aberta /
+  // Proteção Divina). A Proteção volta só se o prazo ainda não passou;
+  // o pendente é ativado no boot (restoreReactiveSuspension, chamado
+  // por revivePlayingRoomTimers em index.mjs).
+  const rctx = parseReactiveContext(data.reactiveCtx);
+  if (rctx) {
+    room._restoredReactiveCtx = rctx;
+    if (rctx.reactiveSeq) room._reactiveSeq = rctx.reactiveSeq;
+    if (rctx.protectedTarget?.until > Date.now()) {
+      room.mpProtectedTarget = { ...rctx.protectedTarget };
+    }
+  }
   ensureSeatTokens(room);
   rooms.set(room.code, room);
   scheduleRoomMirror(room);

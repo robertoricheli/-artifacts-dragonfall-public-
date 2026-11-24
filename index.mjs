@@ -65,7 +65,9 @@ import { turnDeadlineFor } from "./df-turn-clock.mjs";
 import { applyAuthoritativeAction, seedRoomFromSnapshot, buildReplayPayload, buildFinalReplayPayload, getEngineBootStatus, projectStateForSeat, projectEventsForSeat, buildPresentationEnvelope } from "./df-authority.mjs";
 import { armApodrecidaTimer, clearApodrecidaTimer } from "./df-apodrecida-timer.mjs";
 import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
-import { attachPeerStateDiff } from "./df-state-diff.mjs";
+import { attachPeerStateDiff, resetPeerProjectionBases } from "./df-state-diff.mjs";
+// Frente 1 (ALTA 2, 2026-11-24): hash de estado para detecção de dessincronia.
+import { computeStateHash, recordStateHash, checkClientState } from "./df-state-hash.mjs";
 import { loadPersistedRooms, schedulePersistRooms, flushPersistRooms } from "./room-persist.mjs";
 import {
   initLiveRoomsSchema,
@@ -83,6 +85,7 @@ import {
   recordReject,
   recordDisconnect,
   recordStateDiff,
+  recordStateDesync,
   getActionStats,
   logMp,
   startSelfKeepAlive,
@@ -149,6 +152,7 @@ import {
   resolveReactiveSuspension,
   expireReactiveSuspensionLocked,
   reemitReactiveQuery,
+  restoreReactiveSuspension,
 } from "./df-reactive-suspend.mjs";
 import {
   validateJoinRoom,
@@ -255,6 +259,7 @@ app.get("/health", (_req, res) => {
     disconnects1m: stats.disconnects1m,
     gapFills1m: stats.gapFills1m,
     gapFillsTotal: stats.gapFillsTotal,
+    stateDesyncsTotal: stats.stateDesyncsTotal,
     rejectsTotal: stats.rejectsTotal,
     actionsTotal: stats.actionsTotal,
     actions1m: stats.actions1m,
@@ -546,22 +551,30 @@ function startMatchForRoom(room, io) {
     heroIds: [room.heroes[0], room.heroes[1]],
     winPoints: room.winPoints,
     firstPlayer,
-    deckSeed,
+    // Frente 1 (MÉDIA 5, 2026-11-24): o deckSeed NÃO viaja mais ao
+    // cliente (com ele + o algoritmo de embaralhamento, um celular
+    // modificado reproduzia a ordem do baralho). O seed continua no
+    // room (room.deckSeed) para o RNG do servidor (ultimates).
     arenaScenarioId,
     gameState,
   };
   for (let seat = 0; seat < 2; seat++) {
     const sid = room.sockets[seat];
     if (!sid) continue;
+    // (Fase 6 T1) fog: cada assento recebe só a própria mão; a do
+    // adversário vai como contagem (projectStateForSeat).
+    const projected = projectStateForSeat(match.gameState, seat);
+    const startHash = computeStateHash(projected);
     io.to(sid).emit("match_start", {
       ...match,
-      // (Fase 6 T1) fog: cada assento recebe só a própria mão; a do
-      // adversário vai como contagem (projectStateForSeat).
-      gameState: projectStateForSeat(match.gameState, seat),
+      gameState: projected,
       yourSeat: seat,
       seatToken: seatTokenFor(room, seat),
       code: room.code,
+      // Frente 1 (ALTA 2): hash do estado inicial (seq 0).
+      stateHash: startHash,
     });
+    recordStateHash(room, seat, 0, startHash);
   }
   broadcastRoomState(room);
   resetTurnTimer(room);
@@ -822,9 +835,9 @@ function pairQueueSockets(io) {
       } else {
         logMp("pair_casual_no_shard_url", {});
         requeueFront([e0, e1]);
-        const busy = { ok: false, error: "SERVER_BUSY", inQueue: true };
-        io.to(sid0).emit("queue_busy", busy);
-        io.to(sid1).emit("queue_busy", busy);
+        // Frente 1 (MÉDIA 4, 2026-11-24): avisar UMA vez só por entrada
+        // na fila — antes cada tentativa (1×/s) reemitia queue_busy.
+        notifyQueueBusyOnce(io, e0, e1, false);
         break;
       }
     }
@@ -836,9 +849,9 @@ function pairQueueSockets(io) {
       // saíam da fila sem erro e ficavam em "PROCURANDO PARTIDA…" para sempre.
       logMp("pair_casual_busy", { error: e?.message });
       requeueFront([e0, e1]);
-      const busy = { ok: false, error: "SERVER_BUSY", inQueue: true };
-      io.to(sid0).emit("queue_busy", busy);
-      io.to(sid1).emit("queue_busy", busy);
+      // Frente 1 (MÉDIA 4, 2026-11-24): avisar UMA vez só por entrada
+      // na fila — antes cada tentativa (1×/s) reemitia queue_busy.
+      notifyQueueBusyOnce(io, e0, e1, false);
       break;
     }
     void rememberRoomShard(room.code);
@@ -1255,12 +1268,42 @@ function revivePlayingRoomTimers() {
   for (const room of listPlayingRooms()) {
     if (room.gameState?.winner != null) continue;
     rearmTurnTimerPreserveDeadline(room);
+    // Frente 1 (MÉDIA 3): bases de patch rederivadas do estado atual
+    // (todo mundo que volta recebe o replay completo no join) e
+    // pergunta reativa / proteção restauradas — ANTES do tick da IA,
+    // para a IA não agir no meio de uma pergunta aberta.
+    resetPeerProjectionBases(room, projectStateForSeat);
+    void restoreReactiveSuspension(room, io, reactiveHooks(room)).catch((e) =>
+      console.warn("[revive] reactive restore", e?.message || e));
     scheduleServerAi(room, io, serverAiHooks(room));
   }
 }
 
-function replayPayload(room) {
-  return buildReplayPayload(room);
+function replayPayload(room, seat = null) {
+  return buildReplayPayload(room, seat);
+}
+
+// Frente 1 (ALTA 2, 2026-11-24): compara o hash que o cliente diz ter
+// com o do servidor para um seq. Seq atual = hash ao vivo; seq antigo =
+// histórico (últimos ~100). Divergência OU seq desconhecido => desync
+// (o chamador devolve resync:true + o estado completo projetado).
+function compareClientState(room, seat, seq, clientHash) {
+  let serverHash = null;
+  let known = false;
+  if (seq === (room.actionSeq | 0)) {
+    serverHash = computeStateHash(projectStateForSeat(room.gameState, seat));
+    known = true;
+    recordStateHash(room, seat, seq, serverHash);
+  } else {
+    const chk = checkClientState(room, seat, seq, clientHash);
+    serverHash = chk.serverHash;
+    known = chk.known;
+  }
+  const desync = !known || serverHash !== clientHash;
+  if (desync) {
+    recordStateDesync({ roomCode: room.code, seat, seq, clientHash, serverHash, known });
+  }
+  return { desync, serverHash, known };
 }
 
 function createRoomOptsForLocalShard() {
@@ -1389,7 +1432,12 @@ io.on("connection", (socket) => {
     // (§14.6) sala encerrada: o replay normal é null — o jogador que
     // volta depois do fim precisa do estado final no ack, senão a
     // batalha fica travada sem o que aplicar.
-    const replay = replayPayload(joined.room) ?? buildFinalReplayPayload(joined.room, joined.seat);
+    const replay = replayPayload(joined.room, joined.seat) ?? buildFinalReplayPayload(joined.room, joined.seat);
+    // Frente 1 (ALTA 2): hash do estado do replay (é o que o cliente
+    // aplica ao voltar) — fica no histórico para conferência.
+    if (replay?.gameState) {
+      recordStateHash(joined.room, joined.seat, joined.room.actionSeq | 0, computeStateHash(replay.gameState));
+    }
     ack?.({
       ok: true,
       ...view,
@@ -1443,6 +1491,19 @@ io.on("connection", (socket) => {
         });
       }
     }
+    // Frente 1 (ALTA 2): o cliente pode devolver o hash do estado que
+    // tem ({seq, stateHash}) — divergência (ou seq fora do histórico)
+    // vira resync com o estado completo projetado. Sem hash do cliente,
+    // a resposta só informa o hash atual do servidor.
+    let stateHash = computeStateHash(projectStateForSeat(room.gameState, seat));
+    let desync = null;
+    let resyncState = null;
+    if (payload && typeof payload === "object" && payload.stateHash != null && payload.seq != null) {
+      const cmp = compareClientState(room, seat, Number(payload.seq) | 0, String(payload.stateHash));
+      desync = cmp.desync;
+      stateHash = cmp.serverHash ?? stateHash;
+      if (desync) resyncState = projectStateForSeat(room.gameState, seat);
+    }
     ack?.({
       ok: true,
       serverTime: Date.now(),
@@ -1451,6 +1512,32 @@ io.on("connection", (socket) => {
       lastSeq: room.actionSeq | 0,
       presentBudgetMs: 2500,
       gameVersion: GAME_VERSION,
+      stateHash,
+      desync,
+      resync: desync === true,
+      resyncState,
+    });
+  });
+
+  // Frente 1 (ALTA 2): verificação explícita de estado — o cliente
+  // pergunta "meu hash do seq N bate com o seu?". Divergência (ou seq
+  // desconhecido) devolve resync:true + o estado completo projetado.
+  socket.on("state_check", (payload, ack) => {
+    const room = getRoom(socketRoom.get(socket.id));
+    if (!room) return ack?.({ ok: false, error: "NOT_IN_ROOM" });
+    const seat = seatForSocket(room, socket.id);
+    if (seat === null) return ack?.({ ok: false, error: "NO_SEAT" });
+    const seq = Number(payload?.seq) | 0;
+    const clientHash = payload?.stateHash != null ? String(payload.stateHash) : null;
+    if (clientHash == null) return ack?.({ ok: false, error: "NO_HASH" });
+    const cmp = compareClientState(room, seat, seq, clientHash);
+    ack?.({
+      ok: true,
+      seq,
+      desync: cmp.desync,
+      serverHash: cmp.serverHash ?? null,
+      resync: cmp.desync,
+      resyncState: cmp.desync ? projectStateForSeat(room.gameState, seat) : null,
     });
   });
 
@@ -1952,6 +2039,13 @@ io.on("connection", (socket) => {
             }
             : {}),
         };
+        // Frente 1 (ALTA 2): hash do estado projetado que o ator recebe
+        // — o cliente confere o seu contra este (match_ping/state_check).
+        if (ackPayload.authoritativeState) {
+          const h = computeStateHash(ackPayload.authoritativeState);
+          ackPayload.stateHash = h;
+          recordStateHash(room, seat, room.actionSeq | 0, h);
+        }
         if (clientActionId) {
           room._ackedClientActions.set(`${seat}:${clientActionId}`, { ack: ackPayload, actionJson: JSON.stringify(action) });
           // Limite simples — evita crescimento infinito.
@@ -1994,7 +2088,7 @@ io.on("connection", (socket) => {
         gap: actionSeq - fromSeq,
       });
     }
-    const full = buildReplayPayload(room);
+    const full = buildReplayPayload(room, seat);
     if (!full) return ack?.({ ok: false, error: "NOT_PLAYING" });
     ack?.({
       ok: true,

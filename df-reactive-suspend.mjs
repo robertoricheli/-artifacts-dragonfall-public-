@@ -8,10 +8,13 @@
  * parada explícitos (split planejar/aplicar nos resolvers).
  *
  * Estado pendente — um só por sala, NUNCA no gameState (ele é serializado
- * e enviado aos clientes) e NUNCA persistido (room-persist/df_live_rooms):
- * se o servidor reiniciar com pergunta aberta, a sala volta sem pendente
- * e a ação suspensa é descartada (o uso da Ultimate NÃO foi gasto, porque
- * o gasto só acontece na resolução ou no cancelamento confirmado).
+ * e enviado aos clientes). Desde a Frente 1 (MÉDIA 3, 2026-11-24) os campos
+ * PUROS do pendente SÃO persistidos (df-reactive-persist.mjs → rooms.json /
+ * df_live_rooms.reactive_ctx / blob do Redis) e reativados no boot
+ * (restoreReactiveSuspension): se o servidor reiniciar com pergunta aberta,
+ * a pergunta volta (timer com o tempo restante; se expirou na queda,
+ * resolve como NÃO). O uso da Ultimate NÃO foi gasto, porque o gasto só
+ * acontece na resolução ou no cancelamento confirmado.
  *   room.mpPendingReactive = {
  *     qid, kind, queryType, answerType, askerSeat, defenderSeat,
  *     deferredAction,      // C-A05/C-A06/C-A08: a ação inteira, ainda não aplicada
@@ -88,6 +91,22 @@ function armTimer(room, io, hooks, pendente) {
     }).catch((e) => console.warn("[reactive-suspend] expire", e?.message || e));
   }, REACTIVE_SUSPEND_TIMEOUT_MS);
   // O timer não segura o processo aberto sozinho.
+  if (typeof pendente.timer.unref === "function") pendente.timer.unref();
+}
+
+/**
+ * Frente 1 (MÉDIA 3): rearma o timer MANTENDO o expiresAt salvo —
+ * o tempo que já passou durante a queda não é devolvido ao defensor.
+ * (armTimer zera o prazo; aqui só o restante é armado.)
+ */
+function armTimerWithRemaining(room, io, hooks, pendente) {
+  clearTimer(pendente);
+  const remaining = Math.max(0, (pendente.expiresAt || 0) - Date.now());
+  pendente.timer = setTimeout(() => {
+    void withRoomLock(room.code, async () => {
+      await expireReactiveSuspensionLocked(room, io, hooks);
+    }).catch((e) => console.warn("[reactive-suspend] expire", e?.message || e));
+  }, remaining);
   if (typeof pendente.timer.unref === "function") pendente.timer.unref();
 }
 
@@ -172,6 +191,41 @@ export function reemitReactiveQuery(room, io, seat) {
   }
   if (!query) return false;
   return emitQuery(room, io, pendente, query);
+}
+
+/**
+ * Frente 1 (MÉDIA 3): reativa o pendente salvo na persistência após um
+ * reinício (chamado por revivePlayingRoomTimers, ANTES do tick da IA).
+ * A parte síncrona (recolocar o pendente + rearmar o timer) acontece
+ * na hora — o resto (resolver como NÃO se expirou, continuar a fila de
+ * reduções) devolve uma promise. A pergunta é reemitida ao defensor no
+ * join (reemitReactiveQuery); aqui só se garante que ela continua viva.
+ */
+export function restoreReactiveSuspension(room, io, hooks) {
+  const saved = room._restoredReactiveCtx;
+  room._restoredReactiveCtx = null;
+  if (!saved?.pending) return Promise.resolve({ status: "none" });
+  const pendente = {
+    ...saved.pending,
+    timer: null,
+    _state: room.gameState,
+    pendingEvents: Array.isArray(saved.pending.pendingEvents) ? saved.pending.pendingEvents : [],
+    reductions: Array.isArray(saved.pending.reductions) ? [...saved.pending.reductions] : [],
+    appliedReductions: Array.isArray(saved.pending.appliedReductions) ? [...saved.pending.appliedReductions] : [],
+  };
+  room.mpPendingReactive = pendente;
+  // Expirou durante a queda: resolve como NÃO (o defensor não respondeu).
+  if (pendente.expiresAt != null && pendente.expiresAt <= Date.now()) {
+    return resolveAsNo(room, io, hooks, pendente, "RESTART_EXPIRED");
+  }
+  // Fila de reduções: continua de onde parou (repergunta ou aplica).
+  if (pendente.kind === "reductions") {
+    return advanceReductions(room, io, hooks);
+  }
+  // Pergunta simples: rearma o timer com o tempo restante e espera a
+  // ANSWER (a pergunta é reemitida no join do defensor).
+  armTimerWithRemaining(room, io, hooks, pendente);
+  return Promise.resolve({ status: "waiting", qid: pendente.qid, restored: true });
 }
 
 function buildQuery(pendente, qid, extra = {}) {
@@ -307,10 +361,16 @@ export async function openReactiveSuspension(room, io, hooks, spec) {
     _state: room.gameState,
   };
   room.mpPendingReactive = pendente;
-  if (pendente.kind === "reductions") {
-    return advanceReductions(room, io, hooks);
-  }
-  return openSingleQuestion(room, io, hooks, pendente);
+  const result = pendente.kind === "reductions"
+    ? await advanceReductions(room, io, hooks)
+    : await openSingleQuestion(room, io, hooks, pendente);
+  // Frente 1 (MÉDIA 3): a pergunta aberta (ou o estado mudado por uma
+  // resposta imediata da IA) é persistida NA HORA — o touchPersist do
+  // game_action já passou ou nem existe neste caminho. Sem isto, um
+  // reinício no meio da pergunta a apagava. O persist é debounced
+  // (200 ms PG / 400 ms rooms.json); o shutdown gracioso descarrega.
+  try { if (typeof hooks?.persist === "function") await hooks.persist(room); } catch (e) { /* best-effort */ }
+  return result;
 }
 
 /** Uma pergunta só (C-A05/C-A06/C-A08): emite ou resolve na hora. */

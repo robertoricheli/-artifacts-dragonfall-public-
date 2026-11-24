@@ -4,6 +4,7 @@
  * Formato: { op: "set", path: "players.0.actions", value: ... }
  * path: chaves com índices numéricos (players.0.field).
  */
+import { computeStateHash, recordStateHash } from "./df-state-hash.mjs";
 const ROOT_KEYS = [
   "started",
   "currentPlayer",
@@ -160,6 +161,11 @@ export function attachPeerStateDiff(room, envelope, seat, projectFn, recordFn = 
   }
   const projected = projectFn(auth, seat);
   const seq = envelope.seq | 0;
+  // Frente 1 (ALTA 2, 2026-11-24): hash do estado projetado neste seq —
+  // vai no stateDiff de cada envelope (full ou patch) e fica no
+  // histórico da sala para o cliente conferir (match_ping/state_check).
+  const stateHash = computeStateHash(projected);
+  recordStateHash(room, seat, seq, stateHash);
   const useDiff = String(process.env.DF_STATE_DIFF || "1") !== "0";
   const actType = envelope?.action?.type;
   // SUMMON/END_TURN/TALENT_START/ABILITY_TARGET: full state — evita peer
@@ -202,7 +208,7 @@ export function attachPeerStateDiff(room, envelope, seat, projectFn, recordFn = 
     out = {
       ...envelope,
       authoritativeState: projected,
-      stateDiff: { seq, full: true, reason: forceReason },
+      stateDiff: { seq, full: true, reason: forceReason, stateHash },
     };
     room._peerProj[seat] = projected;
     room._peerProjSeq[seat] = seq;
@@ -232,6 +238,7 @@ export function attachPeerStateDiff(room, envelope, seat, projectFn, recordFn = 
           seq,
           full: false,
           patches,
+          stateHash,
         },
       };
     } else {
@@ -250,7 +257,7 @@ export function attachPeerStateDiff(room, envelope, seat, projectFn, recordFn = 
       out = {
         ...envelope,
         authoritativeState: projected,
-        stateDiff: { seq, full: true, reason: patches.length ? "not_smaller" : "empty" },
+        stateDiff: { seq, full: true, reason: patches.length ? "not_smaller" : "empty", stateHash },
       };
     }
   } else {
@@ -272,6 +279,7 @@ export function attachPeerStateDiff(room, envelope, seat, projectFn, recordFn = 
         seq,
         full: true,
         reason: !prev ? "no_base" : "seq_gap",
+        stateHash,
       },
     };
   }
@@ -279,4 +287,22 @@ export function attachPeerStateDiff(room, envelope, seat, projectFn, recordFn = 
   room._peerProj[seat] = projected;
   room._peerProjSeq[seat] = seq;
   return out;
+}
+
+/**
+ * Frente 1 (MÉDIA 3, 2026-11-24): após um reinício, as bases de patch
+ * são rederivadas do gameState atual (no actionSeq): todo cliente que
+ * volta recebe o replay completo no join, então a base volta a ser
+ * consistente. O guarda de seq_gap continua como rede de segurança.
+ */
+export function resetPeerProjectionBases(room, projectFn) {
+  if (!room?.gameState?.players?.length || typeof projectFn !== "function") return;
+  room._peerProj = [null, null];
+  room._peerProjSeq = [room.actionSeq | 0, room.actionSeq | 0];
+  for (let seat = 0; seat < 2; seat++) {
+    try {
+      room._peerProj[seat] = projectFn(room.gameState, seat);
+      recordStateHash(room, seat, room.actionSeq | 0, computeStateHash(room._peerProj[seat]));
+    } catch (e) { /* base fica nula -> próximo envelope é full */ }
+  }
 }

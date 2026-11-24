@@ -87,6 +87,41 @@ function validateCommonBounds(prev, next, seat, actionType) {
       if (actDrop > 2) return { ok: false, error: "ACTIONS_SPIKE" };
       if (actDrop < -1) return { ok: false, error: "ACTIONS_REFUND" };
     }
+
+    // Frente 1 (MÉDIA 2, 2026-11-24): nenhuma carta inventada — cada
+    // carta de qualquer pilha do estado seguinte tem de existir no
+    // estado anterior com o mesmo uid E nome. Só o token criado pelo
+    // motor (uid "tok-...") pode nascer, e só no campo. Sem isto, um
+    // merge podia plantar DRAGÃO FALSO no descarte (para voltar de
+    // NECROMANCIA) ou no baralho (para ser comprado depois).
+    const PILES = ["hand", "field", "discard", "deck"];
+    const prevByUid = new Map();
+    for (const pp of prev.players || []) {
+      for (const pile of PILES) {
+        for (const c of pp?.[pile] || []) {
+          if (c?.uid != null) prevByUid.set(String(c.uid), c.name);
+        }
+      }
+    }
+    const invented = [];
+    for (const pp of next.players || []) {
+      for (const pile of PILES) {
+        for (const c of pp?.[pile] || []) {
+          if (!c) continue;
+          const uid = String(c.uid ?? "");
+          if (uid.startsWith("tok-")) {
+            if (pile !== "field") invented.push(`token ${c.name || "?"} fora do campo (${pile})`);
+            continue;
+          }
+          if (!uid || prevByUid.get(uid) !== c.name) {
+            invented.push(`carta inventada: ${c.name || "?"} (${uid || "sem uid"}) em ${pile}`);
+          }
+        }
+      }
+    }
+    if (invented.length) {
+      return { ok: false, error: "INVENTED_CARD", detail: invented.slice(0, 5).join("; ") };
+    }
   }
 
   return { ok: true };

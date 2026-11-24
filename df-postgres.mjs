@@ -45,6 +45,14 @@ export async function initPostgres() {
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 15_000,
     });
+    // Frente 1 (ALTA 3, 2026-11-24): um soluço do banco (conexão parada
+    // derrubada, reinício do Postgres) NÃO pode derrubar o servidor
+    // inteiro com as salas. Sem este listener, o 'error' do pool é
+    // lançado e mata o processo (pg-pool: "Unhandled 'error' event").
+    // O pool recria a conexão sozinho na próxima query.
+    pool.on("error", (err) => {
+      console.error("[postgres] pool error (cliente ocioso):", err?.message || err);
+    });
     await pool.query(SCHEMA);
     // O schema de analytics usa getPgPool(), que exige `enabled` — marcar
     // aqui, com o pool criado e o schema base aplicado. Antes, `enabled`
@@ -103,8 +111,13 @@ export async function saveMatchHistory(payload) {
     turnNumber = null,
   } = payload;
 
-  const client = await pool.connect();
+  // Frente 1 (ALTA 3, 2026-11-24): o pool.connect() ficava FORA do try —
+  // um soluço do banco aqui derrubava quem chamava (e, sem o
+  // pool.on('error'), o processo inteiro). Sem conexão, devolve null
+  // (o histórico é best-effort; a partida não depende dele).
+  let client = null;
   try {
+    client = await pool.connect();
     await client.query("BEGIN");
     const ins = await client.query(
       `INSERT INTO df_matches
@@ -137,11 +150,13 @@ export async function saveMatchHistory(payload) {
     await client.query("COMMIT");
     return matchId;
   } catch (e) {
-    await client.query("ROLLBACK");
+    if (client) {
+      try { await client.query("ROLLBACK"); } catch (e2) { /* sem conexão */ }
+    }
     console.warn("[postgres] save failed:", e.message);
     return null;
   } finally {
-    client.release();
+    client?.release();
   }
 }
 

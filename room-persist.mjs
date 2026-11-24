@@ -5,6 +5,8 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+// Frente 1 (MÉDIA 3): contexto reativo persistível (pergunta aberta).
+import { serializeReactiveContext } from "./df-reactive-persist.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "data");
@@ -30,6 +32,9 @@ function serializeRoom(room) {
     arenaScenarioId: room.arenaScenarioId || null,
     seatTokens: room.seatTokens || [null, null],
     aiControlled: room.aiControlled || [false, false],
+    // Frente 1 (MÉDIA 3): pergunta reativa aberta / Proteção Divina
+    // temporária — sem isto um reinício apagava a pergunta.
+    reactiveCtx: serializeReactiveContext(room),
   };
 }
 

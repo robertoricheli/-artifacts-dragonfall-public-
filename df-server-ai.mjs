@@ -431,7 +431,9 @@ export function pickAndApplyAiAction(room, seat) {
   // status/bolhas), então o tick e os follow-ups (onEnter, talento)
   // funcionam sem mudar nada.
   try {
-    const planned = planPlannerAction(state, seat);
+    // Frente 2 (item 4): a trava da Desafiante é por sala — passa o ctx
+    // da sala para plan() (ver df-ai-planner.mjs).
+    const planned = planPlannerAction(state, seat, (room._aiPlannerCtx ??= {}));
     const engineAction = plannerActionToEngine(state, seat, planned);
     if (engineAction) {
       let plannerOk = true;

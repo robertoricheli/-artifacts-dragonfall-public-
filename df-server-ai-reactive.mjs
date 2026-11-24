@@ -20,6 +20,12 @@
  * modo Jogador vs IA (que resolve tudo no cliente).
  */
 import { bootDragonfallEngine } from "./lib/df-node-boot.mjs";
+// Frente 2 (item 3): a decisão reativa da substituta é do planejador da
+// 1.51.99 (react()) — o mesmo cérebro que já decide as jogadas dela
+// (df-server-ai.mjs). O arquivo já é carregado no boot por
+// df-server-ai.mjs; sem ele o servidor nem sobe — não há fallback de
+// import aqui, só de decisão (ver plannerAnswerForQuery).
+import { react as plannerReact } from "./df-ai-planner.mjs";
 
 /** Tipos de pergunta reativa → tipo de resposta correspondente. */
 export const REACTIVE_QUERY_TO_ANSWER = Object.freeze({
@@ -107,6 +113,55 @@ function findDefender(state, seat, action) {
 }
 
 /**
+ * Frente 2 (item 3): ameaça do planejador (df-ai-planner.mjs react())
+ * para uma pergunta reativa. Devolve true/false, ou null quando não dá
+ * para montar a ameaça (sem alvo, sem carta) — o chamador cai nas
+ * heurísticas antigas abaixo, intactas. Os tipos de ameaça são os do
+ * react(): attack (att/def), protect (target_uid, amount 1 — as
+ * reduções que geram pergunta são de 1 Poder), cancel_ult (user_pi),
+ * exaustao (card com onEnter), contramagica (card do talento).
+ */
+function plannerAnswerForQuery(room, action, askerSeat, defSeat) {
+  try {
+    const state = room?.gameState;
+    if (!state?.players?.[defSeat]) return null;
+    let threat = null;
+    if (action.type === "REACTIVE_BLOCK_QUERY") {
+      const att = state.players?.[askerSeat]?.field?.[action.attackerIdx];
+      const def = state.players?.[defSeat]?.field?.[action.defenderIdx];
+      if (!att || !def) return null;
+      threat = { kind: "attack", att, def };
+    } else if (action.type === "REACTIVE_PROTECTION_QUERY") {
+      threat = { kind: "protect", target_uid: action.defenderUid ?? -1, amount: 1 };
+    } else if (action.type === "REACTIVE_CANCEL_QUERY") {
+      threat = { kind: "cancel_ult", user_pi: askerSeat };
+    } else if (action.type === "REACTIVE_EXHAUSTION_QUERY") {
+      const caster = state.players?.[action.casterIdx ?? askerSeat]?.field?.[action.fieldIdx];
+      let card = caster || null;
+      if (!card && action.championName) {
+        // Ritual: o campeão ainda está na mão (fieldIdx -1).
+        card = (state.players?.[askerSeat]?.hand || [])
+          .find((c) => c && c.name === action.championName) || null;
+      }
+      if (!card?.onEnter) return null;
+      threat = { kind: "exaustao", card };
+    } else if (action.type === "REACTIVE_COUNTER_QUERY") {
+      const { DfData } = bootDragonfallEngine();
+      const card = (DfData?.cardDefs || [])
+        .find((c) => c && !c.hidden && c.name === action.talentName);
+      if (!card) return null;
+      threat = { kind: "contramagica", card };
+    } else {
+      return null;
+    }
+    return !!plannerReact(state, defSeat, threat);
+  } catch (e) {
+    console.warn("[DF ai-reactive] planner react", e?.message || e);
+    return null;
+  }
+}
+
+/**
  * Decide a resposta da IA a uma pergunta reativa.
  * @returns {null | { type: string, payload: object }} `null` quando não se
  * aplica (assento não é IA, tipo desconhecido ou pergunta para outro assento).
@@ -133,7 +188,12 @@ export function buildAiReactiveAnswer(room, action, askerSeat, opts = {}) {
   // senão o atacante espera o timeout inteiro. Assento apenas offline (sem IA
   // ainda) nunca usa carta: não há decisor.
   if (aiSeat && talent && handHasTalent(state, defSeat, talent)) {
-    if (type === "REACTIVE_BLOCK_QUERY") {
+    // Frente 2 (item 3): primeiro o planejador (react()); sem ameaça
+    // montável ou com throw, as heurísticas antigas abaixo decidem.
+    const planned = plannerAnswerForQuery(room, action, askerSeat, defSeat);
+    if (planned != null) {
+      use = planned;
+    } else if (type === "REACTIVE_BLOCK_QUERY") {
       const attacker = state.players?.[askerSeat]?.field?.[action.attackerIdx];
       const defender = state.players?.[defSeat]?.field?.[action.defenderIdx];
       use = aiShouldReactiveBlock(attacker, defender);

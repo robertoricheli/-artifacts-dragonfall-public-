@@ -276,7 +276,9 @@ function _hookReady(state, pi) {
 }
 
 // (Livro 03 §12a) A Desafiante invocada sozinha NESTE turno — a trava
-// vive no módulo, como as `static var` do GDScript (turno + uid).
+// é o par (turno + uid); o ONDE ela vive é o ctx por sala de plan()
+// (Frente 2, item 4) — aqui ficam só as variáveis de trabalho, nunca
+// o estado de uma sala específica.
 let _livroDesafianteTurn = -1;
 let _livroDesafianteUid = null;
 /** Clone do estado para o feixe: cloneState (JSON) + Sets restaurados. */
@@ -303,7 +305,29 @@ function attackCost(att, def) {
 // ------------------------------------------------------------------
 // plan() / evaluate2()
 // ------------------------------------------------------------------
-export function plan(state, seat = state.currentPlayer) {
+// Frente 2 (item 4): a trava da Desafiante (_livroDesafianteTurn/Uid)
+// vivia no módulo e vazava entre salas (mesmo turno + mesmo uid de
+// carta). O ctx é por sala — o servidor passa room._aiPlannerCtx em
+// plan() — e é carregado/salvo em volta de cada chamada (plan() é
+// síncrono, então não há intercalação dentro da chamada). Sem ctx, o
+// comportamento antigo (módulo) é mantido: os testes de paridade não
+// passam ctx e não mudam.
+export function plan(state, seat = state.currentPlayer, plannerCtx = null) {
+  if (plannerCtx) {
+    _livroDesafianteTurn = plannerCtx.desafianteTurn ?? -1;
+    _livroDesafianteUid = plannerCtx.desafianteUid ?? null;
+  }
+  try {
+    return _planInner(state, seat);
+  } finally {
+    if (plannerCtx) {
+      plannerCtx.desafianteTurn = _livroDesafianteTurn;
+      plannerCtx.desafianteUid = _livroDesafianteUid;
+    }
+  }
+}
+
+function _planInner(state, seat = state.currentPlayer) {
   const pi = seat;
   if (state.winner !== null && state.winner !== undefined && state.winner !== -1) {
     return { type: "end_turn" };

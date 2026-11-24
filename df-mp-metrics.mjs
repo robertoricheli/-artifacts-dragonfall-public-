@@ -12,6 +12,7 @@ let rejectCount = 0;
 let actionCount = 0;
 let presentationCount = 0;
 let gapFillTotal = 0;
+let stateDesyncTotal = 0;
 let stateDiffPatchCount = 0;
 let stateDiffFullCount = 0;
 let stateDiffSavedBytes = 0;
@@ -92,6 +93,21 @@ export function recordGapFill(meta = {}) {
     fromSeq: meta.fromSeq != null ? (meta.fromSeq | 0) : null,
     actionSeq: meta.actionSeq != null ? (meta.actionSeq | 0) : null,
     gap: meta.gap != null ? (meta.gap | 0) : null,
+  });
+}
+
+/** Frente 1 (ALTA 2): o cliente devolveu um hash de estado que
+ * diverge do hash do servidor para o mesmo seq (ou seq fora do
+ * histórico). O servidor registra e força o resync. */
+export function recordStateDesync(meta = {}) {
+  stateDesyncTotal += 1;
+  logMp("state_desync", {
+    room: meta.roomCode || null,
+    seat: meta.seat,
+    seq: meta.seq != null ? (meta.seq | 0) : null,
+    clientHash: meta.clientHash || null,
+    serverHash: meta.serverHash || null,
+    known: meta.known === true,
   });
 }
 
@@ -177,6 +193,7 @@ export function getActionStats() {
     disconnects1m: disconnectTimes.length,
     gapFills1m: gapFillTimes.length,
     gapFillsTotal: gapFillTotal,
+    stateDesyncsTotal: stateDesyncTotal,
     rejectsTotal: rejectCount,
     actionsTotal: actionCount,
     presentationsTotal: presentationCount,
