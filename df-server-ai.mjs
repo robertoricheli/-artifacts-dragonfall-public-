@@ -19,6 +19,7 @@ import {
   pickDecisiveAttack,
   championSummonCost,
 } from "./df-ai-hard-brain.mjs";
+import { plan as planPlannerAction } from "./df-ai-planner.mjs";
 
 const AI_GRACE_MS = 8000;
 /** Ritmo pedido pelo autor: ~2,5s entre ações da IA no disconnect (paridade vs-IA + VFX no cliente). */
@@ -365,6 +366,51 @@ function discardStuckTalent(room, seat) {
 /**
  * Escolhe e aplica a próxima ação do turno (fases talent → ult_early → main → ult_end → end).
  */
+// (1.51.99) Converte a ação do planejador (summon/talent/attack/
+// ultimate/draw/end_turn, com hand_idx/att_idx/def_idx) na ação do
+// motor (SUMMON/TALENT_*/ATTACK_RESOLVE/ULTIMATE_*/DRAW_CARD/
+// END_TURN). Devolve null quando não há conversão válida — o
+// chamador cai no cérebro antigo. A Ultimate sem ultAction (a Tina
+// sem alvo concreto) resolve com o pick do cérebro, como o
+// applyPlannerAction do porte.
+function plannerActionToEngine(state, seat, planned) {
+  if (!planned || typeof planned.type !== "string") return null;
+  switch (planned.type) {
+    case "summon": {
+      const hi = planned.hand_idx ?? planned.handIdx;
+      if (typeof hi !== "number" || hi < 0) return null;
+      return { type: "SUMMON", playerId: seat, handIdx: hi };
+    }
+    case "talent": {
+      if (planned.talentPlay && typeof planned.talentPlay.type === "string") {
+        return { ...planned.talentPlay, playerId: seat };
+      }
+      const hi = planned.hand_idx ?? planned.handIdx;
+      if (typeof hi !== "number" || hi < 0) return null;
+      return { type: "TALENT_START", playerId: seat, handIdx: hi };
+    }
+    case "attack": {
+      const ai = planned.att_idx ?? planned.attackerIdx;
+      const di = planned.def_idx ?? planned.defenderIdx;
+      if (typeof ai !== "number" || typeof di !== "number") return null;
+      return { type: "ATTACK_RESOLVE", playerId: seat, attackerIdx: ai, defenderIdx: di };
+    }
+    case "ultimate": {
+      const ult = planned.ultAction
+        || pickUltimate(state, seat, false)
+        || pickUltimate(state, seat, true);
+      if (!ult || typeof ult.type !== "string") return null;
+      return { ...ult, playerId: seat };
+    }
+    case "draw":
+      return { type: "DRAW_CARD", playerId: seat };
+    case "end_turn":
+      return { type: "END_TURN", playerId: seat };
+    default:
+      return null;
+  }
+}
+
 export function pickAndApplyAiAction(room, seat) {
   ensureAiFlags(room);
   const state = room.gameState;
@@ -374,6 +420,83 @@ export function pickAndApplyAiAction(room, seat) {
   // D-N07: o estado carrega o Set da guarda BOLHAS/PESADELO (o cérebro
   // veta a 2ª aplicação no turno; marcado no gatilho, nos follow-ups).
   state.aiBolhasPesadeloUsed = room.aiBolhasPesadeloUsed || new Set();
+
+  // (1.51.99) PLANEJADOR como IA substituta: plan() decide a próxima
+  // ação do turno (invocar, talento, ataque, Ultimate, comprar ou
+  // passar). Qualquer falha — throw, ação nula, conversão impossível,
+  // custo sem ações, ritual sem sacrifício, aplicação rejeitada —
+  // cai na máquina antiga abaixo, INTACTA. A substituta nunca pode
+  // travar a partida. O caminho de aplicação é o mesmo do loop
+  // antigo (pergunta reativa + applyAuthoritativeAction + marcas de
+  // status/bolhas), então o tick e os follow-ups (onEnter, talento)
+  // funcionam sem mudar nada.
+  try {
+    const planned = planPlannerAction(state, seat);
+    const engineAction = plannerActionToEngine(state, seat, planned);
+    if (engineAction) {
+      let plannerOk = true;
+      // Não invoca campeão pago sem ações (mesma regra do loop antigo).
+      if (engineAction.type === "SUMMON") {
+        const card = state.players[seat]?.hand?.[engineAction.handIdx];
+        const acts = state.players[seat]?.actions ?? 0;
+        const ritual = !!card?.summonRitual;
+        const cost = championSummonCost(card);
+        if (!card || (!ritual && acts < cost)) plannerOk = false;
+      }
+      // C-B22: a IA invoca ritual como o humano — ação livre + sacrifício.
+      if (plannerOk && engineAction.type === "SUMMON") {
+        const card = state.players[seat]?.hand?.[engineAction.handIdx];
+        if (card?.summonRitual && !engineAction.freeAction) {
+          const { DfRules } = bootDragonfallEngine();
+          const sacs = DfRules?.listRitualSacrificeIndices?.(state, seat, card.summonRitual) || [];
+          if (!sacs.length) plannerOk = false;
+          else {
+            const sacIdx = sacs[0];
+            const sac = state.players[seat].field[sacIdx];
+            engineAction.freeAction = true;
+            engineAction.sacrificeIdx = sacIdx;
+            engineAction.sacrificeUid = sac?.uid ?? null;
+          }
+        }
+      }
+      if (plannerOk) {
+        const talentMeta = engineAction._talentEffect ? { ...engineAction } : null;
+        const cleanAction = { ...engineAction };
+        delete cleanAction._score;
+        delete cleanAction._talentEffect;
+        delete cleanAction._target;
+        delete cleanAction.card;
+        const susp = maybeSuspendAiAction(room, seat, cleanAction, talentMeta);
+        if (susp.suspend) {
+          return {
+            action: cleanAction,
+            result: {
+              ok: true, suspended: true,
+              suspendKind: susp.spec.kind, suspendSpec: susp.spec,
+              committed: false,
+            },
+            talentMeta,
+            phase: "planner",
+          };
+        }
+        const beforePlanner = room.gameState;
+        const res = applyAuthoritativeAction(room, seat, cleanAction, null, { serverAi: true });
+        if (res.suspended) {
+          return { action: cleanAction, result: res, talentMeta, phase: "planner" };
+        }
+        if (res.ok) {
+          markAiStatusedFromResult(room, seat, beforePlanner, res.state, cleanAction);
+          markAiBolhasPesadeloFromEvents(room, res.events);
+          return { action: cleanAction, result: res, talentMeta, phase: "planner" };
+        }
+        console.warn("[server-ai] planner reject", cleanAction.type, res?.error || "");
+        // Aplicação rejeitada: cai na máquina antiga abaixo.
+      }
+    }
+  } catch (e) {
+    console.warn("[server-ai] planner falhou, fallback antigo:", e?.message || e);
+  }
+
   // S2-M13 passo 1: ataque vencedor ANTES DE TUDO (offline: _win_attack
   // vai antes de invocar/talento/Ultimate — invocar primeiro seria perder
   // a vitória que já estava na mão). Desvio do snippet da proposta: o

@@ -9,6 +9,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { createHash } from "node:crypto";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = fs.existsSync(path.join(HERE, "artifacts", "dragonfall"))
@@ -48,4 +49,19 @@ export function readGameVersion() {
   }
 
   return "1.35.0";
+}
+
+/**
+ * Hash md5 do cerebro da IA substituta (df-ai-planner.mjs, 1.51.99).
+ * Exposto no /health como `aiPlanner` para provar qual cerebro esta
+ * no ar. null quando o arquivo nao existe (deploy anterior a 1.51.99).
+ */
+export function readAiPlannerHash() {
+  try {
+    const p = path.join(HERE, "df-ai-planner.mjs");
+    if (!fs.existsSync(p)) return null;
+    return createHash("md5").update(fs.readFileSync(p)).digest("hex");
+  } catch (_) {
+    return null;
+  }
 }

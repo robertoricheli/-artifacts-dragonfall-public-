@@ -126,7 +126,7 @@ import {
   shardHealth,
 } from "./df-shard-affinity.mjs";
 import { createRateLimiter } from "./rate-limit.mjs";
-import { readGameVersion } from "./df-game-version.mjs";
+import { readGameVersion, readAiPlannerHash } from "./df-game-version.mjs";
 import { createInitialMatchState } from "./df-match-init.mjs";
 import { registerAuthRoutes } from "./df-auth.mjs";
 import { logMailStatusOnBoot, isMailConfigured } from "./df-auth-mail.mjs";
@@ -165,6 +165,7 @@ const PORT = Number(process.env.PORT) || 8787;
 const corsOriginRaw = process.env.CORS_ORIGIN || "*";
 const corsAllowList = corsOriginRaw.split(",").map((s) => s.trim()).filter(Boolean);
 const GAME_VERSION = readGameVersion();
+const AI_PLANNER_HASH = readAiPlannerHash();
 const TURN_TIMEOUT_MS = Number(process.env.DF_TURN_TIMEOUT_MS) || 70000;
 
 const actionRateLimit = createRateLimiter({ maxPerWindow: 28, windowMs: 1000 });
@@ -227,6 +228,7 @@ app.get("/health", (_req, res) => {
     motorOk: !!motor.motorOk,
     motorError: motor.error || null,
     gameVersion: GAME_VERSION,
+    aiPlanner: AI_PLANNER_HASH,
     rooms: listRoomsCount(),
     roomsByStatus: listRoomsByStatus(),
     activeMatches: listActiveMatchCount(),
