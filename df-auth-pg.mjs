@@ -47,6 +47,9 @@ ALTER TABLE df_players ADD COLUMN IF NOT EXISTS battle_bg TEXT;
 -- consulta/administração e NÃO são a fonte do rank exibido.
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS diamonds INT NOT NULL DEFAULT 0;
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS profile_bg TEXT;
+-- País do jogador (1.51.103 item 2, frente F2): ISO 3166-1 alpha-3
+-- maiúsculo ("BRA"); NULL = não escolhido. Contas antigas ficam NULL.
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS country VARCHAR(3);
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS rank_tier TEXT;
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS rank_level INT;
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS rank_best_tier TEXT;
@@ -129,6 +132,7 @@ function rowToPlayer(row) {
     rankBestTier: row.rank_best_tier ?? null,
     rankBestLevel: row.rank_best_level ?? null,
     placementDone: !!row.placement_done,
+    country: row.country ?? null,
     placementWins: row.placement_wins ?? 0,
     profileRevision: Number(row.profile_revision ?? 0),
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
@@ -176,6 +180,7 @@ function playerToRow(p) {
     p.rankBestLevel ?? null,
     !!p.placementDone,
     p.placementWins ?? 0,
+    p.country ?? null,
   ];
 }
 
@@ -223,8 +228,8 @@ export async function pgInsertPlayer(player) {
        redeemed_codes, dev_unlock_all, language, ach_stats, ach_claimed, ach_showcase,
        avatar_color, avatar_frame, battle_bg,
        diamonds, profile_bg, rank_tier, rank_level, rank_best_tier, rank_best_level,
-       placement_done, placement_wins)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15::timestamptz,$16::jsonb,$17,$18::jsonb,$19,$20::jsonb,$21::jsonb,$22::jsonb,$23,$24,$25::jsonb,$26::jsonb,$27::jsonb,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)`,
+       placement_done, placement_wins, country)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15::timestamptz,$16::jsonb,$17,$18::jsonb,$19,$20::jsonb,$21::jsonb,$22::jsonb,$23,$24,$25::jsonb,$26::jsonb,$27::jsonb,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39)`,
     vals,
   );
   return pgGetPlayerById(player.id);
@@ -264,7 +269,7 @@ export async function pgUpdatePlayer(player, { expectedRevision } = {}) {
         avatar_color = $27, avatar_frame = $28, battle_bg = $29,
         diamonds = $30, profile_bg = $31, rank_tier = $32, rank_level = $33,
         rank_best_tier = $34, rank_best_level = $35, placement_done = $36,
-        placement_wins = $37,
+        placement_wins = $37, country = $38,
         updated_at = NOW()
        WHERE id = $1`,
       [
@@ -305,6 +310,7 @@ export async function pgUpdatePlayer(player, { expectedRevision } = {}) {
         player.rankBestLevel ?? null,
         !!player.placementDone,
         player.placementWins ?? 0,
+        player.country ?? null,
       ],
     );
     await client.query("COMMIT");

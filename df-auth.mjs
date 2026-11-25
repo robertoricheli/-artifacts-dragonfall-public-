@@ -285,6 +285,262 @@ const HERO_IDS = new Set([
 /** Idiomas da interface (DfI18n.LANGS no cliente). */
 const LANGUAGE_IDS = new Set(["en", "pt", "es", "de", "ja", "zh"]);
 
+/** País da conta (1.51.103 item 2, frente F2): ISO 3166-1 alpha-3
+ *  maiúsculo. Lista completa (249 códigos) gerada de pycountry;
+ *  os nomes em português vivem no cliente (scripts/countries.gd).
+ *  null = o jogador não escolheu nenhum país. */
+const COUNTRY_ALPHA3 = new Set([
+  "ABW",
+  "AFG",
+  "AGO",
+  "AIA",
+  "ALA",
+  "ALB",
+  "AND",
+  "ARE",
+  "ARG",
+  "ARM",
+  "ASM",
+  "ATA",
+  "ATF",
+  "ATG",
+  "AUS",
+  "AUT",
+  "AZE",
+  "BDI",
+  "BEL",
+  "BEN",
+  "BES",
+  "BFA",
+  "BGD",
+  "BGR",
+  "BHR",
+  "BHS",
+  "BIH",
+  "BLM",
+  "BLR",
+  "BLZ",
+  "BMU",
+  "BOL",
+  "BRA",
+  "BRB",
+  "BRN",
+  "BTN",
+  "BVT",
+  "BWA",
+  "CAF",
+  "CAN",
+  "CCK",
+  "CHE",
+  "CHL",
+  "CHN",
+  "CIV",
+  "CMR",
+  "COD",
+  "COG",
+  "COK",
+  "COL",
+  "COM",
+  "CPV",
+  "CRI",
+  "CUB",
+  "CUW",
+  "CXR",
+  "CYM",
+  "CYP",
+  "CZE",
+  "DEU",
+  "DJI",
+  "DMA",
+  "DNK",
+  "DOM",
+  "DZA",
+  "ECU",
+  "EGY",
+  "ERI",
+  "ESH",
+  "ESP",
+  "EST",
+  "ETH",
+  "FIN",
+  "FJI",
+  "FLK",
+  "FRA",
+  "FRO",
+  "FSM",
+  "GAB",
+  "GBR",
+  "GEO",
+  "GGY",
+  "GHA",
+  "GIB",
+  "GIN",
+  "GLP",
+  "GMB",
+  "GNB",
+  "GNQ",
+  "GRC",
+  "GRD",
+  "GRL",
+  "GTM",
+  "GUF",
+  "GUM",
+  "GUY",
+  "HKG",
+  "HMD",
+  "HND",
+  "HRV",
+  "HTI",
+  "HUN",
+  "IDN",
+  "IMN",
+  "IND",
+  "IOT",
+  "IRL",
+  "IRN",
+  "IRQ",
+  "ISL",
+  "ISR",
+  "ITA",
+  "JAM",
+  "JEY",
+  "JOR",
+  "JPN",
+  "KAZ",
+  "KEN",
+  "KGZ",
+  "KHM",
+  "KIR",
+  "KNA",
+  "KOR",
+  "KWT",
+  "LAO",
+  "LBN",
+  "LBR",
+  "LBY",
+  "LCA",
+  "LIE",
+  "LKA",
+  "LSO",
+  "LTU",
+  "LUX",
+  "LVA",
+  "MAC",
+  "MAF",
+  "MAR",
+  "MCO",
+  "MDA",
+  "MDG",
+  "MDV",
+  "MEX",
+  "MHL",
+  "MKD",
+  "MLI",
+  "MLT",
+  "MMR",
+  "MNE",
+  "MNG",
+  "MNP",
+  "MOZ",
+  "MRT",
+  "MSR",
+  "MTQ",
+  "MUS",
+  "MWI",
+  "MYS",
+  "MYT",
+  "NAM",
+  "NCL",
+  "NER",
+  "NFK",
+  "NGA",
+  "NIC",
+  "NIU",
+  "NLD",
+  "NOR",
+  "NPL",
+  "NRU",
+  "NZL",
+  "OMN",
+  "PAK",
+  "PAN",
+  "PCN",
+  "PER",
+  "PHL",
+  "PLW",
+  "PNG",
+  "POL",
+  "PRI",
+  "PRK",
+  "PRT",
+  "PRY",
+  "PSE",
+  "PYF",
+  "QAT",
+  "REU",
+  "ROU",
+  "RUS",
+  "RWA",
+  "SAU",
+  "SDN",
+  "SEN",
+  "SGP",
+  "SGS",
+  "SHN",
+  "SJM",
+  "SLB",
+  "SLE",
+  "SLV",
+  "SMR",
+  "SOM",
+  "SPM",
+  "SRB",
+  "SSD",
+  "STP",
+  "SUR",
+  "SVK",
+  "SVN",
+  "SWE",
+  "SWZ",
+  "SXM",
+  "SYC",
+  "SYR",
+  "TCA",
+  "TCD",
+  "TGO",
+  "THA",
+  "TJK",
+  "TKL",
+  "TKM",
+  "TLS",
+  "TON",
+  "TTO",
+  "TUN",
+  "TUR",
+  "TUV",
+  "TWN",
+  "TZA",
+  "UGA",
+  "UKR",
+  "UMI",
+  "URY",
+  "USA",
+  "UZB",
+  "VAT",
+  "VCT",
+  "VEN",
+  "VGB",
+  "VIR",
+  "VNM",
+  "VUT",
+  "WLF",
+  "WSM",
+  "YEM",
+  "ZAF",
+  "ZMB",
+  "ZWE",
+]);
+
 const HUB_BG_IDS = new Set([
   "reino-encantado",
   "frente-de-batalha",
@@ -393,6 +649,7 @@ function playerPublic(p) {
     diamonds: Math.max(0, p.diamonds | 0),
     profileBg: p.profileBg || null,
     language: LANGUAGE_IDS.has(p.language) ? p.language : null,
+    country: typeof p.country === "string" && COUNTRY_ALPHA3.has(p.country.toUpperCase()) ? p.country.toUpperCase() : null,
     customDecks: Array.isArray(p.customDecks) ? p.customDecks : null,
     profileRevision: Number(p.profileRevision ?? 0),
     updatedAt: p.updatedAt || null,
@@ -947,6 +1204,47 @@ function normalizeCustomDecks(raw, ownedCards) {
   });
   if (unowned.length) return { ok: false, error: "UNOWNED_CARD", unowned };
   return { ok: true, decks };
+}
+
+
+/** País da conta (1.51.103 item 2, frente F2).
+ *  POST /auth/country {country: "BRA"} — grava a escolha do jogador
+ *  (sempre prevalece sobre a sugestão do aparelho). {country: null}
+ *  ou "" limpa a escolha (volta a null). Qualquer outro valor dá
+ *  400 BAD_COUNTRY e nada muda. O cliente NUNCA envia a sugestão
+ *  sozinho: só o que o jogador escolheu (ou limpou) chega aqui. */
+function normalizeCountry(v) {
+  if (v == null) return { ok: true, country: null };
+  if (typeof v !== "string") return { ok: false, error: "BAD_COUNTRY" };
+  const c = v.trim().toUpperCase();
+  if (c === "") return { ok: true, country: null };
+  if (!COUNTRY_ALPHA3.has(c)) return { ok: false, error: "BAD_COUNTRY" };
+  return { ok: true, country: c };
+}
+
+async function authCountry(req, body) {
+  const limited = allowAuthedAttempt(req);
+  if (limited) return limited;
+  const authed = await authFromHeader(req);
+  if (!authed) return { status: 401, data: { ok: false, error: "UNAUTHORIZED" } };
+  const player = await withCollection(authed);
+  const norm = normalizeCountry(body?.country);
+  if (!norm.ok) {
+    return { status: 400, data: { ok: false, error: norm.error } };
+  }
+  player.country = norm.country;
+  const currentRev = Number(player.profileRevision ?? 0);
+  const r = await persistPlayer(player, { expectedRevision: currentRev });
+  if (!r.ok) {
+    if (r.error === "PROFILE_CONFLICT") {
+      return {
+        status: 409,
+        data: { ok: false, error: "PROFILE_CONFLICT", player: playerPublic(r.player) },
+      };
+    }
+    return { status: 500, data: { ok: false, error: r.error || "SAVE_FAILED" } };
+  }
+  return { status: 200, data: { ok: true, player: playerPublic(r.player) } };
 }
 
 async function authProfile(req, body) {
@@ -1552,6 +1850,7 @@ export async function handleAuthHttp(req, res) {
   else if (req.method === "POST" && pathname === "/auth/change-password") result = await authChangePassword(fakeReq, body);
   else if (req.method === "GET" && pathname === "/auth/me") result = await authMe(fakeReq);
   else if (req.method === "PATCH" && pathname === "/auth/profile") result = await authProfile(fakeReq, body);
+  else if (req.method === "POST" && pathname === "/auth/country") result = await authCountry(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/match-xp") result = await authAwardMatchXp(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/profile/import") result = await authProfileImport(fakeReq, body);
   else if (req.method === "POST" && pathname === "/auth/market") result = await authMarket(fakeReq);
@@ -1615,6 +1914,11 @@ export function registerAuthRoutes(app) {
 
   app.patch("/auth/profile", async (req, res) => {
     const r = await authProfile(req, req.body || {});
+    res.status(r.status).json(r.data);
+  });
+
+  app.post("/auth/country", async (req, res) => {
+    const r = await authCountry(req, req.body || {});
     res.status(r.status).json(r.data);
   });
 

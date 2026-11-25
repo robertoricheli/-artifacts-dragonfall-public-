@@ -347,6 +347,9 @@ export function roomPublicView(room, yourSeat = null, opts = {}) {
         avatarHeroId: (room.playerAvatars || [null, null])[0] || null,
         level: (room.playerLevels || [0, 0])[0] || 0,
         avatarFrame: (room.playerFrames || [null, null])[0] || null,
+        // (F9, 1.51.103 item 3) país, para a bandeirinha na tela de
+        // Partida Encontrada; sem ele, null e o cliente esconde.
+        country: (room.playerCountries || [null, null])[0] || null,
         ready: room.ready[0],
         isYou: yourSeat === 0,
       },
@@ -358,6 +361,7 @@ export function roomPublicView(room, yourSeat = null, opts = {}) {
         avatarHeroId: (room.playerAvatars || [null, null])[1] || null,
         level: (room.playerLevels || [0, 0])[1] || 0,
         avatarFrame: (room.playerFrames || [null, null])[1] || null,
+        country: (room.playerCountries || [null, null])[1] || null,
         ready: room.ready[1],
         isYou: yourSeat === 1,
       },
@@ -450,6 +454,13 @@ export function importPersistedRoom(data) {
     arenaScenarioId: data.arenaScenarioId || null,
     ranked: !!data.ranked,
     rankedPlayerIds: data.rankedPlayerIds || null,
+    // (F9, 1.51.103 item 2/3) sala restaurada volta a contar para a
+    // presença (roomPlayerIds) e para a bandeirinha (roomPublicView).
+    // O rooms.json guarda a sala inteira, então estes campos existem
+    // lá; o df_live_rooms (Postgres) não os persiste — nesse caminho
+    // continuam null, como antes.
+    playerIds: data.playerIds || null,
+    playerCountries: data.playerCountries || null,
     seatTokens: data.seatTokens || [null, null],
     // (1.51.95 item 5) restaurada ganha olhos novos: sem isto o lastSeen
     // [0,0] herdado + createdAt antigo fariam a regra de partida
@@ -480,4 +491,20 @@ export function importPersistedRoom(data) {
 
 export function listPlayingRooms() {
   return [...rooms.values()].filter((r) => r.status === "playing");
+}
+
+/**
+ * PlayerIds em sala que conta como "ocupado" (F4, presença): lobby ou
+ * playing. Sala "ended" NÃO conta — a partida acabou. Junta playerIds
+ * (partida com amigo / casual) e rankedPlayerIds (ranqueada).
+ */
+export function roomPlayerIds() {
+  const out = new Set();
+  for (const room of rooms.values()) {
+    if (room.status !== "lobby" && room.status !== "playing") continue;
+    for (const ids of [room.playerIds, room.rankedPlayerIds]) {
+      if (Array.isArray(ids)) for (const id of ids) if (id) out.add(String(id));
+    }
+  }
+  return out;
 }

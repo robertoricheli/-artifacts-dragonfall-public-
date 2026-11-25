@@ -31,6 +31,7 @@ import {
   listPlayingRooms,
   touchLastSeen,
   pruneOldRooms,
+  roomPlayerIds,
 } from "./rooms.mjs";
 import {
   addToQueue,
@@ -39,6 +40,7 @@ import {
   requeueFront,
   isInQueue,
   queueSize,
+  queuedPlayerIds,
 } from "./matchmaking.mjs";
 import {
   initRankedMatchmaking,
@@ -48,7 +50,7 @@ import {
   isInRankedQueue,
   getMatchmakingMode,
 } from "./bullmq-matchmaking.mjs";
-import { rankedQueueSize, requeueRankedFront } from "./matchmaking-ranked.mjs";
+import { rankedQueueSize, requeueRankedFront, queuedRankedPlayerIds } from "./matchmaking-ranked.mjs";
 import {
   getMmr,
   getRankedProfile,
@@ -137,9 +139,19 @@ import { registerAuthRoutes } from "./df-auth.mjs";
 import {
   initFriendsSchema,
   loadBlockCache,
+  isFollowing,
   register_friends_routes,
   register_friends_socket,
 } from "./df-friends.mjs";
+// (F9, 1.51.103) correio (F1), chat + presença (F4), jogadores (F3).
+import { register_mail_routes, initMailSchema } from "./df-mail.mjs";
+import { register_chat_routes, initChatSchema, setFollowChecker } from "./df-chat.mjs";
+import {
+  register_presence_routes,
+  createPresenceService,
+  makePresenceSources,
+} from "./df-presence.mjs";
+import { register_players_routes, setPresenceProvider } from "./df-players.mjs";
 import { logMailStatusOnBoot, isMailConfigured } from "./df-auth-mail.mjs";
 import {
   markSeatDisconnectedForAi,
@@ -226,6 +238,20 @@ app.use(express.json({ limit: "48kb" }));
 registerAuthRoutes(app);
 // Frente 6 (Perfil, 2026-11-25): amigos / histórico / visita.
 register_friends_routes(app);
+// (F9, 1.51.103) correio (F1), chat + presença (F4), jogadores (F3).
+// As fontes de presença são funções, lidas a cada consulta: o mapa
+// socketPlayer (declarado abaixo) só é lido quando chega um pedido,
+// depois do boot — nunca na hora do registro.
+register_mail_routes(app);
+register_chat_routes(app);
+const presenceService = createPresenceService(makePresenceSources({
+  connected: () => new Set(socketPlayer.values()),
+  queued: () => new Set([...queuedPlayerIds(), ...queuedRankedPlayerIds()]),
+  inMatch: () => roomPlayerIds(),
+}));
+register_presence_routes(app, { service: presenceService });
+register_players_routes(app, { presenceSources: presenceService.sources });
+setPresenceProvider((playerId) => presenceService.presenceFor(playerId));
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
@@ -715,6 +741,8 @@ function pairRankedSockets(io, entry0, entry1) {
   room.playerAvatars = [entry0.avatarHeroId || null, entry1.avatarHeroId || null];
   room.playerLevels = [entry0.level || 0, entry1.level || 0];
   room.playerFrames = [entry0.avatarFrame || null, entry1.avatarFrame || null];
+  // (F9, 1.51.103 item 3) país, para a bandeirinha na Partida Encontrada.
+  room.playerCountries = [entry0.country || null, entry1.country || null];
   room.winPoints = 15;
   room.sockets[0] = sid0;
   room.sockets[1] = sid1;
@@ -893,6 +921,8 @@ async function createFriendRoom(fromId, toId) {
   room.playerAvatars = [p0.avatarHeroId || null, p1.avatarHeroId || null];
   room.playerLevels = [levelFromXp(p0.xpTotal || 0), levelFromXp(p1.xpTotal || 0)];
   room.playerFrames = [p0.avatarFrame || null, p1.avatarFrame || null];
+  // (F9, 1.51.103 item 3) país, para a bandeirinha na Partida Encontrada.
+  room.playerCountries = [p0.country || null, p1.country || null];
   touchLastSeen(room, 0);
   touchLastSeen(room, 1);
   ensureSeatTokens(room);
@@ -1005,6 +1035,8 @@ function pairQueueSockets(io) {
     room.playerAvatars = [e0.avatarHeroId || null, e1.avatarHeroId || null];
     room.playerLevels = [e0.level || 0, e1.level || 0];
     room.playerFrames = [e0.avatarFrame || null, e1.avatarFrame || null];
+    // (F9, 1.51.103 item 3) país, para a bandeirinha na Partida Encontrada.
+    room.playerCountries = [e0.country || null, e1.country || null];
     ensureSeatTokens(room);
     socketRoom.set(sid0, room.code);
     socketRoom.set(sid1, room.code);
@@ -1827,6 +1859,9 @@ io.on("connection", (socket) => {
             avatarHeroId: account.avatarHeroId || null,
             level: levelFromXp(account.xpTotal || 0),
             avatarFrame: account.avatarFrame || null,
+            // (F9, 1.51.103 item 3) país, para a bandeirinha na tela
+            // de Partida Encontrada (roomPublicView).
+            country: account.country || null,
           };
         }
       } catch (e) { /* keep schema playerId */ }
@@ -1901,6 +1936,9 @@ io.on("connection", (socket) => {
             avatarHeroId: account.avatarHeroId || null,
             level: levelFromXp(account.xpTotal || 0),
             avatarFrame: account.avatarFrame || null,
+            // (F9, 1.51.103 item 3) país, para a bandeirinha na tela
+            // de Partida Encontrada (roomPublicView).
+            country: account.country || null,
           };
         }
       } catch (e) { /* anônimo */ }
@@ -2405,9 +2443,21 @@ io.on("connection", (socket) => {
 // playerIdForSocket lê o mapa socketPlayer (o `authenticate` já faz
 // socket.join(`player:${id}`), por onde o convite chega na hora);
 // createFriendRoom é a sala de amigo definida acima.
+// (F9, 1.51.103 item 5) trava da F4 é o helper VIVO: o canReceiveInvite
+// do df-presence.mjs, com as fontes do boot (presenceService). O
+// df-friends.mjs espera {allowed, reason} — o helper devolve
+// {ok, status, error}, por isso o adaptador. Sem isto (só se o
+// adaptador lançar), vale a checagem local por socket dele.
 register_friends_socket(io, {
   playerIdForSocket: (socket) => socketPlayer.get(socket.id) ?? null,
   createFriendRoom,
+  canReceiveInvite: (playerId) => {
+    const gate = presenceService.canReceiveInvite(playerId);
+    return {
+      allowed: gate.ok,
+      reason: gate.ok ? null : gate.status === "busy" ? "busy" : "offline",
+    };
+  },
 });
 
 /**
@@ -2467,6 +2517,16 @@ await initRankStore();
 // do initPostgres/initAuthStore: o pool já existe aqui.
 await initFriendsSchema();
 await loadBlockCache();
+// (F9, 1.51.103) esquema do correio (F1) e do chat (F4). O registro
+// das rotas já foi feito acima; o esquema precisa do pool (initPostgres).
+await initMailSchema();
+await initChatSchema();
+// (F9, 1.51.103) sem Postgres o chat leria o próprio memFollows vazio
+// (df-chat.mjs) e o mútuo nunca existiria: liga o verificador à fonte
+// real de "seguir" (df-friends.mjs). Com Postgres o df-chat.mjs já lê
+// df_follows direto — nada muda lá (e o listConversations dele segue
+// listando todos os pares mútuos, com ou sem mensagem).
+if (!isPostgresEnabled()) setFollowChecker((a, b) => isFollowing(a, b));
 startSessionPruneScheduler();
 
 // Restaura salas de PG (preferência) além do rooms.json.

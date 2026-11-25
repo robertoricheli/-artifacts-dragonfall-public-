@@ -8,7 +8,7 @@ import { isPairExcluded, exclusionKeyForPlayer } from "./df-pair-exclusion.mjs";
 // (alimentado por loadBlockCache() no boot e atualizado em block()).
 import { isBlockedSync } from "./df-friends.mjs";
 
-/** @type {{ socketId: string, playerId: string | null, joinedAt: number, displayName: string | null, avatarHeroId: string | null, level: number, avatarFrame: string | null }[]} */
+/** @type {{ socketId: string, playerId: string | null, joinedAt: number, displayName: string | null, avatarHeroId: string | null, level: number, avatarFrame: string | null, country: string | null }[]} */
 const queue = [];
 
 export function removeFromQueue(socketId) {
@@ -35,6 +35,7 @@ export function addToQueue(socketId, displayName = null, profile = null, playerI
   // (1.51.75) avatar e nível do perfil, capturados no join_queue —
   // o pareamento os copia para a sala e o roomPublicView os emite.
   // (1.51.80) moldura do avatar: mesmo caminho, para a Partida Encontrada.
+  // (F9, 1.51.103 item 3) país: mesmo caminho, para a bandeirinha.
   // (1.51.86) playerId da conta (quando houver): chave da exclusão
   // pós-recusa — sem ele, a chave é o socket id.
   queue.push({
@@ -45,6 +46,7 @@ export function addToQueue(socketId, displayName = null, profile = null, playerI
     avatarHeroId: profile?.avatarHeroId || null,
     level: profile?.level || 0,
     avatarFrame: profile?.avatarFrame || null,
+    country: profile?.country || null,
   });
   return { ok: true, size: queue.length };
 }
@@ -112,4 +114,9 @@ export function requeueFront(entries) {
 
 export function queueSize() {
   return queue.length;
+}
+
+/** PlayerIds em fila casual (para a presença da F4 — só "busy"). */
+export function queuedPlayerIds() {
+  return new Set(queue.map((e) => e.playerId).filter(Boolean));
 }

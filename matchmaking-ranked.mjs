@@ -4,7 +4,7 @@
 import { getMmr } from "./df-ranked-store.mjs";
 import { isPairExcluded, exclusionKeyForPlayer } from "./df-pair-exclusion.mjs";
 
-/** @type {{ socketId: string, playerId: string, mmr: number, joinedAt: number, avatarHeroId: string | null, level: number, avatarFrame: string | null }[]} */
+/** @type {{ socketId: string, playerId: string, mmr: number, joinedAt: number, avatarHeroId: string | null, level: number, avatarFrame: string | null, country: string | null }[]} */
 const queue = [];
 
 export function removeFromRankedQueue(socketId) {
@@ -31,6 +31,7 @@ export function addToRankedQueue(socketId, playerId, profile = null) {
   const mmr = getMmr(playerId);
   // (1.51.75) avatar e nível do perfil, capturados no join_ranked_queue.
   // (1.51.80) moldura do avatar: mesmo caminho, para a Partida Encontrada.
+  // (F9, 1.51.103 item 3) país: mesmo caminho, para a bandeirinha.
   queue.push({
     socketId,
     playerId: String(playerId),
@@ -39,6 +40,7 @@ export function addToRankedQueue(socketId, playerId, profile = null) {
     avatarHeroId: profile?.avatarHeroId || null,
     level: profile?.level || 0,
     avatarFrame: profile?.avatarFrame || null,
+    country: profile?.country || null,
   });
   queue.sort((a, b) => a.joinedAt - b.joinedAt);
   return { ok: true, mmr, position: queue.length };
@@ -50,6 +52,11 @@ export function isInRankedQueue(socketId) {
 
 export function rankedQueueSize() {
   return queue.length;
+}
+
+/** PlayerIds em fila ranked (para a presença da F4 — só "busy"). */
+export function queuedRankedPlayerIds() {
+  return new Set(queue.map((e) => e.playerId).filter(Boolean));
 }
 
 function mmrWindow(waitMs) {
