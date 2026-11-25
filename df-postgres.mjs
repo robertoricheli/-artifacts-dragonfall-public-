@@ -161,8 +161,12 @@ export async function saveMatchHistory(payload) {
         startedAt ? new Date(startedAt).toISOString() : null,
         durationMs != null ? Math.max(0, Number(durationMs) | 0) : null,
         turnNumber != null ? Math.max(0, Number(turnNumber) | 0) : null,
-        scores?.[0] != null ? Math.max(0, Number(scores[0]) | 0) : null,
-        scores?.[1] != null ? Math.max(0, Number(scores[1]) | 0) : null,
+        // (Frente 4, 1.51.102 item 7) placar ausente e 0, nunca NULL:
+        // o cliente quebrava com int(null) no historico. Defesa em
+        // profundidade junto com df-match-history.mjs; linhas antigas com
+        // NULL nao sao reescritas - o /auth/history coalesce na leitura.
+        scores?.[0] != null ? Math.max(0, Number(scores[0]) | 0) : 0,
+        scores?.[1] != null ? Math.max(0, Number(scores[1]) | 0) : 0,
         !!friendMatch,
       ],
     );

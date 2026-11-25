@@ -1588,6 +1588,55 @@ export function listTalentPlays(state, seat) {
  * Ultimate jogável (heurística vs-IA, sem peeks).
  * @param {boolean} forceEndOfTurn — iceWitch/pirate só no fim.
  */
+// (1.51.102 item 2) Espelho de `AIBrain._ult_target_killable_by_attack`
+// (ai_brain.gd:313) — mesma regra do planejador (`_ultTargetKillableByAttack`
+// em df-ai-planner.mjs), com os meios locais deste cérebro puro (sem import
+// do motor): o ataque disponível AGORA = aliado não-tapado, sem congelar e
+// sem enfeitiçar, com ações para o custo (attackActionCost, como
+// canAttackAfterGrito); o abate = combatOutcomeOverpower (Sobrepujar no
+// empate, como o offline). O alvo é o mais forte do pool do motor por tipo
+// (no Veneno, o mais forte do campo; no Incinerar, o mais forte sem Barreira
+// e sem queimadura; no Vampirismo, o mais forte P2+; no Fogo e Gelo e no
+// Cometa, o mais forte do campo). O abate conta mesmo mútuo (P2 x P2).
+// Só as 7 Ultimates da 1.51.102 passam por aqui; os outros tipos não mudam.
+function ultTargetKillableByAttack(state, seat, ultType) {
+  const foes = foesExcludingCharmed(state, seat);
+  if (!foes.length) return false;
+  const pw = (t) => t.c.currentPower ?? t.c.power ?? 0;
+  const strongest = (pool) => pool.reduce((best, t) => (!best || pw(t) > pw(best) ? t : best), null);
+  let target = null;
+  switch (ultType) {
+    case "targetEnemy": case "targetEnemyFreeze": case "poison":
+    case "fireAndIce": case "cometStarfall":
+      target = strongest(foes);
+      break;
+    case "incinerate": {
+      const clean = foes.filter((t) => !t.c.barrier && !t.c.barrierPermanent
+        && !(t.c.barrierTurns > 0) && !t.c.burning && !(t.c.burningTurns > 0));
+      if (!clean.length) return false;
+      target = strongest(clean);
+      break;
+    }
+    case "vampirism": {
+      const elig = foes.filter((t) => pw(t) >= 2);
+      if (!elig.length) return false;
+      target = strongest(elig);
+      break;
+    }
+    default:
+      return false;
+  }
+  if (!target || target.c.shielded || target.c.charme) return false;
+  const pl = state.players[seat];
+  const actions = pl?.actions ?? 0;
+  for (const a of (pl?.field || [])) {
+    if (!a || a.tapped || a.frozen || a.charme) continue;
+    if (actions < attackActionCost(a, target.c)) continue;
+    if (combatOutcomeOverpower(a, target.c).killD) return true;
+  }
+  return false;
+}
+
 export function pickUltimate(state, seat, forceEndOfTurn = false) {
   const pl = state.players[seat];
   if (!pl) return null;
@@ -1633,6 +1682,8 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     if (ultType === "targetEnemy" && gatePool[0].pw > 1) return null;
     // CONGELAR (offline): só no mais forte P>=2 NÃO-congelado.
     if (ultType === "targetEnemyFreeze" && (gatePool[0].pw < 2 || gatePool[0].frozen)) return null;
+    // (1.51.102 item 2) o alvo já morre atacando — guarda a Ultimate.
+    if (ultTargetKillableByAttack(state, seat, ultType)) return null;
     return { ...base, targetP: pickPool[0].p, targetI: pickPool[0].i };
   }
   if (ultType === "targetAllyShield") {
@@ -1658,6 +1709,8 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     }
     if (!pool.length) return null;
     pool.sort((a, b) => b.pw - a.pw);
+    // (1.51.102 item 2) o alvo já morre atacando — guarda a Ultimate.
+    if (ultTargetKillableByAttack(state, seat, ultType)) return null;
     return { ...base, targetP: pool[0].p, targetI: pool[0].i };
   }
   if (ultType === "targetAlly" || ultType === "targetAllyFreeAttack") {
@@ -1705,6 +1758,8 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
       && !(c.charme && c.charmeOriginalOwner === seat));
     if (!foes.length) return null;
     if (foes.length === 1 && (foes[0].currentPower ?? foes[0].power ?? 0) === 1) return null;
+    // (1.51.102 item 2) o alvo já morre atacando — guarda a Ultimate.
+    if (ultTargetKillableByAttack(state, seat, ultType)) return null;
     return { ...base, targetP: null, targetI: null };
   }
   if (ultType === "banish") {
@@ -1815,6 +1870,8 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
       && !(c.charme && c.charmeOriginalOwner === seat));
     const foeP1 = foes.filter((c) => (c.currentPower ?? c.power ?? 0) <= 1).length;
     if (!(foeP1 > myP1 && foes.length > (pl.field || []).length)) return null;
+    // (1.51.102 item 2) o alvo já morre atacando — guarda a Ultimate.
+    if (ultTargetKillableByAttack(state, seat, ultType)) return null;
     return { ...base, targetP: null, targetI: null };
   }
   if (ultType === "hook") {
@@ -1850,6 +1907,8 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
       .filter((t) => (t.c.currentPower ?? t.c.power ?? 0) >= 2 && !t.c.poisoned);
     if (!foes.length) return null;
     foes.sort((a, b) => (b.c.currentPower ?? b.c.power ?? 0) - (a.c.currentPower ?? a.c.power ?? 0));
+    // (1.51.102 item 2) o alvo já morre atacando — guarda a Ultimate.
+    if (ultTargetKillableByAttack(state, seat, ultType)) return null;
     return { ...base, targetP: foes[0].p, targetI: foes[0].i };
   }
   if (ultType === "vampirism") {
@@ -1862,6 +1921,8 @@ export function pickUltimate(state, seat, forceEndOfTurn = false) {
     // com TARGET_REQUIRED — espelha o auto_pick_uid offline: o mais
     // forte P2+ entre os adversários, menos o próprio enfeitiçado.
     foes.sort((a, b) => (b.c.currentPower ?? b.c.power ?? 0) - (a.c.currentPower ?? a.c.power ?? 0));
+    // (1.51.102 item 2) o alvo já morre atacando — guarda a Ultimate.
+    if (ultTargetKillableByAttack(state, seat, ultType)) return null;
     return { ...base, targetP: foes[0].p, targetI: foes[0].i };
   }
   if (ultType === "scareReturn") {

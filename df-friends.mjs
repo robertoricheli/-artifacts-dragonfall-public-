@@ -385,8 +385,13 @@ export function register_friends_routes(app, _ctx = {}) {
       const oppSeat = 1 - mySeat;
       const oppId = oppSeat === 0 ? row.player_0_id : row.player_1_id;
       const opp = oppId ? await safeGetPlayer(oppId) : null;
-      const score0 = row.score_0 ?? null;
-      const score1 = row.score_1 ?? null;
+      // (Frente 4, 1.51.102 item 7) linhas ANTIGAS podem ter score NULL
+      // (gravado antes da normalização em recordMatchEnd/saveMatchHistory):
+      // o cliente quebrava com int(null). Coalesce SÓ na leitura — o
+      // banco não é reescrito e o sentido do histórico não muda (0 = sem
+      // ponto registrado). Registros novos já chegam com 0.
+      const score0 = row.score_0 ?? 0;
+      const score1 = row.score_1 ?? 0;
       entries.push({
         matchId: row.id,
         roomCode: row.room_code,

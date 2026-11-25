@@ -1470,11 +1470,18 @@ function reduceChampionPower(champ, amount, opts = {}) {
     // ownerP/currentP conhecidos, a condição é central — nenhum call site
     // precisa lembrar dela; preserveWallBuff continua como override
     // explícito (ex.: reduções do próprio turno listadas abaixo).
+    // 1.51.102 item 5b: "turno do dono" é o turno de quem INVOCUOU —
+    // enfeitiçado, o invocador é o dono original (charmeOriginalOwner);
+    // sem Enfeitiço, é o dono do campo — igual a antes.
+    const wallOwnerP = (champ.charme && Number.isInteger(champ.charmeOriginalOwner) && champ.charmeOriginalOwner >= 0)
+        ? champ.charmeOriginalOwner : opts.ownerP;
+    const outsideWallOwnerTurn = wallOwnerP != null && opts.currentP != null && opts.currentP !== wallOwnerP;
+    // (FÚRIA frágil abaixo continua no turno do dono do CAMPO — sem mudança.)
     const outsideOwnTurn = opts.ownerP != null && opts.currentP != null
         && opts.currentP !== opts.ownerP;
     const knownTurn = opts.ownerP != null && opts.currentP != null;
     let dissolvedWall = false;
-    if (!opts.preserveWallBuff && champ.wallBuff && powerLost && (!knownTurn || outsideOwnTurn)) {
+    if (!opts.preserveWallBuff && champ.wallBuff && powerLost && (!knownTurn || outsideWallOwnerTurn)) {
         champ.wallBuff = false;
         champ.wallBuffApplied = false;
         champ.wallBuffSnapshot = null;
@@ -1498,48 +1505,60 @@ function reduceChampionPower(champ, amount, opts = {}) {
         blockedByBarrier: false,
     };
 }
-/** Início do turno do dono da Muralha: remove o +1 temporário (só quem tem wallBuff). */
-function expireWallBonusOnTurnStart(state, pIdx) {
-    const p = state.players[pIdx];
-    if (!p?.wallActive)
-        return;
-    (p.field || []).forEach((c) => {
-        if (c && c.wallBuff && c.wallBuffApplied) {
-            c.currentPower = Math.max(0, (c.currentPower ?? 0) - 1);
-            c.wallBuffApplied = false;
-            c.wallBuffSnapshot = null;
-        }
-    });
-    syncWallActive(p);
+/** 1.51.102 item 5b: a Muralha segue o turno de quem INVOCUOU o campeão —
+ * enfeitiçado, o invocador é o dono original (charmeOriginalOwner); sem
+ * Enfeitiço, é o dono do campo. Espelho do offline (_recalc_constants). */
+function wallSummonerP(c, fieldOwnerP) {
+    if (c?.charme && Number.isInteger(c.charmeOriginalOwner) && c.charmeOriginalOwner >= 0)
+        return c.charmeOriginalOwner;
+    return fieldOwnerP;
 }
-/** Fim do turno do dono da Muralha: +1 Poder fora do turno (aliados com wallBuff + muralhaNativa que regeneram). */
+/** Início do turno de quem invocou a Muralha: remove o +1 temporário (só quem tem wallBuff). */
+function expireWallBonusOnTurnStart(state, pIdx) {
+    const count = state.playersCount ?? state.players?.length ?? 0;
+    for (let ep = 0; ep < count; ep++) {
+        const p = state.players[ep];
+        (p?.field || []).forEach((c) => {
+            // 1.51.102 item 5b: o enfeitiçado expira no turno do INVOCADOR,
+            // não no do campo onde está (o campo dele pode ser o outro).
+            if (c && c.wallBuff && c.wallBuffApplied && wallSummonerP(c, ep) === pIdx) {
+                c.currentPower = Math.max(0, (c.currentPower ?? 0) - 1);
+                c.wallBuffApplied = false;
+                c.wallBuffSnapshot = null;
+            }
+        });
+        syncWallActive(p);
+    }
+}
+/** Fim do turno de quem invocou a Muralha: +1 Poder fora do turno (aliados com wallBuff + muralhaNativa que regeneram). */
 function applyWallBonusOnTurnEnd(state, endingPIdx) {
-    const endingP = state.players[endingPIdx];
-    if (!endingP)
-        return;
+    const count = state.playersCount ?? state.players?.length ?? 0;
     // Muralha nativa: regenera wallBuff para campeões com constante muralha
-    // A-N4 (offline _recalc_constants): enfeitiçado NÃO regenera o +1 —
-    // o Charme tira o bônus na hora (caso `charme`) e ele só volta quando
-    // o Charme acaba (o recalc do offline só re-adiciona com charm_turns<=0).
-    (endingP.field || []).forEach((c) => {
-        if (!c)
-            return;
-        if (hasMuralhaNativa(c) && !c.wallBuff && !c.charme) {
-            c.wallBuff = true;
-            c.wallBuffApplied = false;
-            c.wallBuffSnapshot = null;
-        }
-    });
-    syncWallActive(endingP);
-    if (!endingP.wallActive)
-        return;
-    (endingP.field || []).forEach((c) => {
-        if (c && c.wallBuff && !c.wallBuffApplied) {
-            c.currentPower = (c.currentPower ?? 0) + 1;
-            c.wallBuffApplied = true;
-            c.wallBuffSnapshot = c.currentPower;
-        }
-    });
+    // 1.51.102 item 5b: o "dono" da Muralha é quem INVOCUOU o campeão —
+    // enfeitiçado, o invocador é o dono original (charmeOriginalOwner):
+    // fora do turno do invocador, o enfeitiçado fica com a Muralha ativa.
+    // Sem Enfeitiço, o invocador é o dono do campo — igual a antes.
+    for (let ep = 0; ep < count; ep++) {
+        (state.players[ep]?.field || []).forEach((c) => {
+            if (!c)
+                return;
+            if (hasMuralhaNativa(c) && !c.wallBuff && wallSummonerP(c, ep) === endingPIdx) {
+                c.wallBuff = true;
+                c.wallBuffApplied = false;
+                c.wallBuffSnapshot = null;
+            }
+        });
+        syncWallActive(state.players[ep]);
+    }
+    for (let ep = 0; ep < count; ep++) {
+        (state.players[ep]?.field || []).forEach((c) => {
+            if (c && c.wallBuff && !c.wallBuffApplied && wallSummonerP(c, ep) === endingPIdx) {
+                c.currentPower = (c.currentPower ?? 0) + 1;
+                c.wallBuffApplied = true;
+                c.wallBuffSnapshot = c.currentPower;
+            }
+        });
+    }
 }
 /**
  * Aplica contadores de manutenção mutáveis no estado (cópia ou ao vivo).

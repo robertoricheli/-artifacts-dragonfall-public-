@@ -1556,18 +1556,12 @@ function applyOnEnterImpl(state, casterIdx, fieldIdx, resolution = {}) {
             target.charme = true;
             target.charmeTurns = 2;
             target.charmeOriginalOwner = tp;
-            // A-N4 (offline _recalc_constants): o enfeitiçado perde o +1 da
-            // Muralha NA HORA — o bônus só volta quando o Charme acaba
-            // (applyWallBonusOnTurnEnd não regenera enquanto charme).
-            if (target.wallBuff) {
-                if (target.wallBuffApplied)
-                    target.currentPower = Math.max(0, (target.currentPower ?? 0) - 1);
-                target.wallBuff = false;
-                target.wallBuffApplied = false;
-                target.wallBuffSnapshot = 0;
-                if (R()?.syncWallActive)
-                    R().syncWallActive(state.players[tp]);
-            }
+            // 1.51.102 item 5b: o Charme NÃO tira o +1 da Muralha — a
+            // Muralha segue o turno de quem INVOCUOU (o enfeitiçado fica
+            // com ela ativa fora do turno do invocador, que é sempre o
+            // caso aqui: o turno é do charmer, nunca do invocador). O
+            // applyWallBonusOnTurnEnd / expireWallBonusOnTurnStart
+            // governam o bônus a partir daqui (por invocador).
             // C-M05 (offline _transferir_charme): o roubado chega CANSADO.
             target.tapped = true;
             myField.push(target);

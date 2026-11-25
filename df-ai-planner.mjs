@@ -1828,6 +1828,56 @@ function _isLateGame(state) {
  * livro — vetos de fim de jogo, Barreira no Vampirismo, mão cheia
  * na Conjuração e no Amedrontar — moram aqui, no planejador, porque
  * o cérebro antigo (ai_brain.gd) não pode mudar nesta frente. */
+
+// (1.51.102 item 2) Espelho de `AIBrain._ult_target_killable_by_attack`
+// (ai_brain.gd:313): a Ultimate de dano NÃO sai num campeão que um
+// ataque já destruiria neste turno — a IA ataca com o aliado e guarda
+// a Ultimate para outro campeão ou para depois. O alvo é o mais forte
+// do pool do motor por tipo (no Veneno, o mais forte do campo; no
+// Incinerar, o mais forte sem Barreira e sem queimadura; no
+// Vampirismo, o mais forte P2+; no Fogo e Gelo e no Cometa, o mais
+// forte do campo). O abate conta mesmo mútuo (P2 x P2, o caso da
+// Frosty) e só vale com o ataque disponível AGORA (canAttackOk +
+// combatKill). Só as 7 Ultimates da 1.51.102 passam por aqui; os
+// outros tipos não mudam. O portão é reavaliado a cada ação: depois
+// que o ataque mata o alvo, a Ultimate volta a valer sobre o que
+// sobrou (área) ou fica guardada (alvo único sem mais alvo).
+function _ultTargetKillableByAttack(state, pi, ut) {
+  const foes = foesOf(state, pi);
+  if (!foes.length) return false;
+  let target = null;
+  switch (ut) {
+    case "targetEnemy": case "targetEnemyFreeze": case "poison":
+    case "fireAndIce": case "cometStarfall":
+      target = _strongestIn(foes);
+      break;
+    case "incinerate": {
+      const effClean = foes.filter((c) => !hasBarrier(c) && burnTurns(c) === 0 && !c.burning);
+      if (!effClean.length) return false;
+      target = _strongestIn(effClean);
+      break;
+    }
+    case "vampirism": {
+      const elig = foes.filter((c) => powerOf(c) >= 2);
+      if (!elig.length) return false;
+      target = _strongestIn(elig);
+      break;
+    }
+    default:
+      return false;
+  }
+  if (!target) return false;
+  const field = state.players[1 - pi]?.field || [];
+  const di = field.indexOf(target);
+  if (di < 0) return false;
+  const mine = state.players[pi]?.field || [];
+  for (let ai = 0; ai < mine.length; ai++) {
+    if (!canAttackOk(state, pi, ai, di)) continue;
+    if (combatKill(mine[ai], target)) return true;
+  }
+  return false;
+}
+
 function _ultimateAllowed(state, pi) {
   const p = state.players[pi] || {};
   const foes = foesOf(state, pi);
@@ -2140,9 +2190,16 @@ function _candidateActions(state, pi) {
     }
   }
   void foes;
-  const ult = _ultimateAllowed(state, pi)
+  // (1.51.102 item 2) A Ultimate de dano NÃO sai num campeão que um
+  // ataque já destruiria neste turno — o portão mora em
+  // `_ultTargetKillableByAttack` e é reavaliado a cada ação. NÃO vai
+  // para dentro de `_ultimateAllowed`: ele continua significando "a
+  // Ultimate vale neste estado" (usado por `_rapidezChain` e por
+  // `_instantExtraBlocked`/Energizar).
+  let ult = _ultimateAllowed(state, pi)
     ? (pickUltimate(state, pi, false) || pickUltimate(state, pi, true))
     : null;
+  if (ult && _ultTargetKillableByAttack(state, pi, heroUltType(p))) ult = null;
   if (ult) out.push({ type: "ultimate", ultAction: ult });
   // (Correção 1.51.97) Comprar é o último recurso, como no
   // cérebro antigo: enquanto houver jogada (invocar, talento,
@@ -2170,6 +2227,16 @@ function _candidateActions(state, pi) {
       if (String(card2?.category || "") !== "champion") continue;
       if (String(card2?.abilityType || "") !== "instant" || String(card2?.onEnter || "") === "") continue;
       if (!summonIdxs.has(i)) continue;
+      // (1.51.102 itens 1 e 3) o corpo do desespero NÃO vale para
+      // instantânea sem pré-condição: a regra geral da 1.51.96
+      // (item 9) veta invocar sem alvo válido nem como último
+      // recurso — sem estes dois portões, este ramo invocava a
+      // MÁSCARA DA MORTE sem descarte e o IMITAR sem aliado para
+      // copiar só pelo corpo (os mesmos portões do caminho normal,
+      // acima; espelho de ai_planner.gd:1424-1437).
+      const oe2 = String(card2?.onEnter || "");
+      if (!onEnterUsable(state, pi, oe2, championSummonCost(card2))) continue;
+      if (_instantExtraBlocked(state, pi, card2, i)) continue;
       out.push({ type: "summon", hand_idx: i });
     }
   }

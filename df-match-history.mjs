@@ -96,9 +96,17 @@ export async function recordMatchEnd(room, state, gameVersion) {
   const durationMs = startedAt ? Math.max(0, endedAt - startedAt) : null;
   const turnNumber = state.turnNumber ?? null;
   const playerIds = await resolveMatchPlayerIds(room);
+  // (Frente 4, 1.51.102 item 7) vp ausente (state sem players[i].vp) virava
+  // null, era gravado NULL no Postgres e devolvido null no /auth/history,
+  // onde o cliente quebrava com int(null) e o historico travava. Placar
+  // ausente e 0 (o perdedor sem ponto nenhum tambem e 0) - nunca null.
+  const numScore = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(0, n | 0) : 0;
+  };
   const scores = [
-    state.players?.[0]?.vp ?? null,
-    state.players?.[1]?.vp ?? null,
+    numScore(state.players?.[0]?.vp),
+    numScore(state.players?.[1]?.vp),
   ];
   const payload = {
     roomCode: room.code,
