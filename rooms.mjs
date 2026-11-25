@@ -330,6 +330,9 @@ export function roomPublicView(room, yourSeat = null, opts = {}) {
     code: room.code,
     status: room.status,
     winPoints: room.winPoints,
+    // Frente 3 (Perfil): partida com amigo — o cliente marca a batalha
+    // como de amigo (não vale rank, não entra como ranqueada).
+    friendMatch: !!room.friend_match,
     players: [
       {
         seat: 0,

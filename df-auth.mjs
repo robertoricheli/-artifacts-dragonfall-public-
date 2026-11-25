@@ -128,7 +128,9 @@ function ensureCollection(player) {
 /** Campos de conquista + retroativo (uma vez por conta). Devolve true se mudou. */
 async function ensureAchievements(player) {
   let changed = ensureAchievementState(player);
-  if (!player.achStats.backfilled) {
+  // (Perfil do Jogador, 2026-11-25) o segundo termo cobre contas cujo
+  // backfill antigo já rodou: sem ele, pvpMatches começaria em 0.
+  if (!player.achStats.backfilled || !player.achStats.pvpMatchesBackfilled) {
     const counts = await countPlayerMatchHistory(player.id);
     if (counts) {
       player.achStats = applyBackfill(player.achStats, counts);
@@ -388,6 +390,8 @@ function playerPublic(p) {
     avatarColor: p.avatarColor || null,
     avatarFrame: p.avatarFrame || null,
     battleBg: p.battleBg || null,
+    diamonds: Math.max(0, p.diamonds | 0),
+    profileBg: p.profileBg || null,
     language: LANGUAGE_IDS.has(p.language) ? p.language : null,
     customDecks: Array.isArray(p.customDecks) ? p.customDecks : null,
     profileRevision: Number(p.profileRevision ?? 0),
@@ -545,6 +549,8 @@ async function authRegister(req, body) {
     avatarColor: null,
     avatarFrame: null,
     battleBg: null,
+    diamonds: 0,
+    profileBg: null,
     language: null,
     customDecks: null,
     xpTotal: 0,
@@ -719,6 +725,8 @@ async function authGoogle(req, body) {
     avatarColor: null,
     avatarFrame: null,
     battleBg: null,
+    diamonds: 0,
+    profileBg: null,
     language: null,
     customDecks: null,
     xpTotal: 0,
@@ -976,7 +984,8 @@ async function authProfile(req, body) {
 
   // Customização por conta (1.51.70): cor/moldura do avatar e fundo de
   // batalha. Valores inválidos são ignorados (normCustomField → null).
-  for (const [bodyKey, playerKey] of [["avatarColor", "avatarColor"], ["avatarFrame", "avatarFrame"], ["battleBg", "battleBg"]]) {
+  // Fundo do perfil (2026-11-25): mesmo padrão — string com o índice 0..5.
+  for (const [bodyKey, playerKey] of [["avatarColor", "avatarColor"], ["avatarFrame", "avatarFrame"], ["battleBg", "battleBg"], ["profileBg", "profileBg"]]) {
     if (body[bodyKey] != null) {
       const v = normCustomField(body[bodyKey]);
       if (v != null) player[playerKey] = v;
@@ -1186,9 +1195,10 @@ async function authProfileImport(req, body) {
   }
   // Cosméticos (1.51.70): cor/moldura do avatar e fundo de batalha —
   // mesma validação do PATCH (normCustomField): inválido ignorado,
-  // ausente/null não apaga o que já existe.
+  // ausente/null não apaga o que já existe. Fundo do perfil (2026-11-25)
+  // segue o mesmo padrão.
   const customFields = {};
-  for (const key of ["avatarColor", "avatarFrame", "battleBg"]) {
+  for (const key of ["avatarColor", "avatarFrame", "battleBg", "profileBg"]) {
     const v = normCustomField(body?.[key]);
     if (v != null) customFields[key] = v;
   }
@@ -1446,6 +1456,9 @@ async function authRedeem(req, body) {
     }
     player.redeemedCodes = res.redeemedCodes;
     player.coins = res.coins;
+    // Diamantes (Perfil do Jogador, 2026-11-25): só quando a recompensa
+    // traz diamantes (res.diamonds ausente = código sem eles, saldo intacto).
+    if (res.diamonds != null) player.diamonds = res.diamonds;
     if (res.devUnlockAll) {
       player.xpTotal = res.xpTotal;
       player.claimedLevels = res.claimedLevels;

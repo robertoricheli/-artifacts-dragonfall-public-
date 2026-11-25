@@ -40,10 +40,19 @@ ALTER TABLE df_players ADD COLUMN IF NOT EXISTS ach_showcase JSONB;
 -- batalha. Contas antigas ficam NULL (ausente) até o primeiro PATCH.
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS avatar_color TEXT;
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS avatar_frame TEXT;
--- Molduras (1.51.85): as 3 molduras (1, 2, 3) voltaram — a 1.51.82 forcava
--- todo mundo p/ '2' no boot (UPDATE removido aqui). O que ja esta guardado
--- fica como esta; so o legado 0 vira '2' na leitura (normalizeAvatarFrame).
 ALTER TABLE df_players ADD COLUMN IF NOT EXISTS battle_bg TEXT;
+-- Perfil do Jogador (2026-11-25): diamantes e fundo do perfil. O rank
+-- da temporada vive em df_rank_players (df-rank.mjs) e é exposto no
+-- /auth/me via rankPublic(); as colunas rank_* abaixo existem para
+-- consulta/administração e NÃO são a fonte do rank exibido.
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS diamonds INT NOT NULL DEFAULT 0;
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS profile_bg TEXT;
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS rank_tier TEXT;
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS rank_level INT;
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS rank_best_tier TEXT;
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS rank_best_level INT;
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS placement_done BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE df_players ADD COLUMN IF NOT EXISTS placement_wins INT NOT NULL DEFAULT 0;
 -- Migração 2026-11-12-01 (Fase 1 multiplayer — login com Google).
 -- Testada na cópia local do backup antes do deploy; reversível (ver
 -- migrations/2026-11-12-01-google-auth.sql). Contas existentes ficam
@@ -82,20 +91,6 @@ CREATE INDEX IF NOT EXISTS df_password_resets_player ON df_password_resets (play
 CREATE INDEX IF NOT EXISTS df_password_resets_expires ON df_password_resets (expires_at);
 `;
 
-// Moldura do avatar (1.51.85): as 3 molduras (1, 2, 3) voltaram — a
-// decisao da 1.51.82 (forcar tudo p/ "2") foi revogada. Aceita "1"/"2"/"3"
-// (e os numeros 1/2/3). Legado 0/"0" (cliente antigo) vira "2".
-// Ausente/invalido/vazio -> "2" (padrao). O servidor NUNCA envia "0".
-const AVATAR_FRAME_DEFAULT = "2";
-const AVATAR_FRAME_VALID = new Set(["1", "2", "3"]);
-export function normalizeAvatarFrame(value) {
-  if (value == null) return AVATAR_FRAME_DEFAULT;
-  const key = String(value).trim();
-  if (key === "") return AVATAR_FRAME_DEFAULT;
-  if (AVATAR_FRAME_VALID.has(key)) return key;
-  return AVATAR_FRAME_DEFAULT;
-}
-
 function rowToPlayer(row) {
   if (!row) return null;
   return {
@@ -125,8 +120,16 @@ function rowToPlayer(row) {
     achClaimed: row.ach_claimed ?? null,
     achShowcase: row.ach_showcase ?? null,
     avatarColor: row.avatar_color ?? null,
-    avatarFrame: normalizeAvatarFrame(row.avatar_frame),
+    avatarFrame: row.avatar_frame ?? null,
     battleBg: row.battle_bg ?? null,
+    diamonds: row.diamonds ?? 0,
+    profileBg: row.profile_bg ?? null,
+    rankTier: row.rank_tier ?? null,
+    rankLevel: row.rank_level ?? null,
+    rankBestTier: row.rank_best_tier ?? null,
+    rankBestLevel: row.rank_best_level ?? null,
+    placementDone: !!row.placement_done,
+    placementWins: row.placement_wins ?? 0,
     profileRevision: Number(row.profile_revision ?? 0),
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
@@ -163,8 +166,16 @@ function playerToRow(p) {
     p.achClaimed != null ? JSON.stringify(p.achClaimed) : null,
     p.achShowcase != null ? JSON.stringify(p.achShowcase) : null,
     p.avatarColor ?? null,
-    normalizeAvatarFrame(p.avatarFrame),
+    p.avatarFrame ?? null,
     p.battleBg ?? null,
+    p.diamonds ?? 0,
+    p.profileBg ?? null,
+    p.rankTier ?? null,
+    p.rankLevel ?? null,
+    p.rankBestTier ?? null,
+    p.rankBestLevel ?? null,
+    !!p.placementDone,
+    p.placementWins ?? 0,
   ];
 }
 
@@ -210,8 +221,10 @@ export async function pgInsertPlayer(player) {
        avatar_hero_id, hub_background_id, custom_decks, xp_total, profile_revision, created_at,
        owned_cards, coins, market_state, collection_epoch, owned_heroes, journey_claimed,
        redeemed_codes, dev_unlock_all, language, ach_stats, ach_claimed, ach_showcase,
-       avatar_color, avatar_frame, battle_bg)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15::timestamptz,$16::jsonb,$17,$18::jsonb,$19,$20::jsonb,$21::jsonb,$22::jsonb,$23,$24,$25::jsonb,$26::jsonb,$27::jsonb,$28,$29,$30)`,
+       avatar_color, avatar_frame, battle_bg,
+       diamonds, profile_bg, rank_tier, rank_level, rank_best_tier, rank_best_level,
+       placement_done, placement_wins)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15::timestamptz,$16::jsonb,$17,$18::jsonb,$19,$20::jsonb,$21::jsonb,$22::jsonb,$23,$24,$25::jsonb,$26::jsonb,$27::jsonb,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)`,
     vals,
   );
   return pgGetPlayerById(player.id);
@@ -249,6 +262,9 @@ export async function pgUpdatePlayer(player, { expectedRevision } = {}) {
         language = $21, ach_stats = $22::jsonb, ach_claimed = $23::jsonb, ach_showcase = $24::jsonb,
         google_sub = $25, provider = $26,
         avatar_color = $27, avatar_frame = $28, battle_bg = $29,
+        diamonds = $30, profile_bg = $31, rank_tier = $32, rank_level = $33,
+        rank_best_tier = $34, rank_best_level = $35, placement_done = $36,
+        placement_wins = $37,
         updated_at = NOW()
        WHERE id = $1`,
       [
@@ -279,8 +295,16 @@ export async function pgUpdatePlayer(player, { expectedRevision } = {}) {
         player.googleSub ?? null,
         player.provider ?? "email",
         player.avatarColor ?? null,
-        normalizeAvatarFrame(player.avatarFrame),
+        player.avatarFrame ?? null,
         player.battleBg ?? null,
+        player.diamonds ?? 0,
+        player.profileBg ?? null,
+        player.rankTier ?? null,
+        player.rankLevel ?? null,
+        player.rankBestTier ?? null,
+        player.rankBestLevel ?? null,
+        !!player.placementDone,
+        player.placementWins ?? 0,
       ],
     );
     await client.query("COMMIT");

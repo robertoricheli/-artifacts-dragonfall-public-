@@ -132,6 +132,14 @@ import { createRateLimiter } from "./rate-limit.mjs";
 import { readGameVersion, readAiPlannerHash } from "./df-game-version.mjs";
 import { createInitialMatchState } from "./df-match-init.mjs";
 import { registerAuthRoutes } from "./df-auth.mjs";
+// Frente 6 (Perfil do Jogador, 2026-11-25) — integração de amigos:
+// rotas HTTP + convites por socket + esquema/bloqueios.
+import {
+  initFriendsSchema,
+  loadBlockCache,
+  register_friends_routes,
+  register_friends_socket,
+} from "./df-friends.mjs";
 import { logMailStatusOnBoot, isMailConfigured } from "./df-auth-mail.mjs";
 import {
   markSeatDisconnectedForAi,
@@ -216,6 +224,8 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: "48kb" }));
 registerAuthRoutes(app);
+// Frente 6 (Perfil, 2026-11-25): amigos / histórico / visita.
+register_friends_routes(app);
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
@@ -763,41 +773,159 @@ function rankMatchKey(room) {
   return `${room.code}:${room.createdAt || 0}`;
 }
 
-/** Rank da temporada: fim normal da partida rankeada (vitória/derrota). */
+/**
+ * Rank da temporada por NÍVEIS (Perfil do Jogador, 2026-11-25): TODA
+ * partida online pela fila normal conta como ranqueada — fila casual E
+ * fila ranqueada — EXCETO partida com amigo (room.friend_match = true,
+ * marcada pela integração de amigos; aceita também room.friendMatch).
+ * Os ids vêm de room.rankedPlayerIds (fila ranqueada), room.playerIds
+ * (partida com amigo — excluída acima) ou do socket autenticado
+ * (socketPlayer, fila casual). Anônimo (sem conta) não conta.
+ */
+function rankRoomPlayerIds(room) {
+  if (Array.isArray(room?.rankedPlayerIds) && room.rankedPlayerIds.some(Boolean)) return room.rankedPlayerIds;
+  if (Array.isArray(room?.playerIds) && room.playerIds.some(Boolean)) return room.playerIds;
+  const socks = room?.sockets || [];
+  return [0, 1].map((s) => (socks[s] ? socketPlayer.get(socks[s]) || null : null));
+}
+
+/** Partida com amigo nunca conta para o ranking nem para a colocação. */
+function isFriendMatchRoom(room) {
+  return !!(room?.friend_match || room?.friendMatch);
+}
+
+/** Rank da temporada: fim normal da partida (vitória/derrota). */
 function maybeRecordRankSeason(room, state) {
-  if (!room?.ranked || room.rankSeasonRecorded || state?.winner == null) return;
+  if (!room || room.rankSeasonRecorded || state?.winner == null) return;
+  if (isFriendMatchRoom(room)) return;
   room.rankSeasonRecorded = true;
   const w = state.winner | 0;
-  const ids = room.rankedPlayerIds || [];
+  const ids = rankRoomPlayerIds(room);
+  if (!ids[0] || !ids[1] || ids[0] === ids[1]) return;
   void recordRankedSeasonMatch(rankMatchKey(room), [
-    { id: ids[0] || null, outcome: w === 0 ? "win" : "loss" },
-    { id: ids[1] || null, outcome: w === 1 ? "win" : "loss" },
+    { id: ids[0], outcome: w === 0 ? "win" : "loss" },
+    { id: ids[1], outcome: w === 1 ? "win" : "loss" },
   ]).catch((e) => logMp("rank_record_err", { error: e?.message || String(e) }));
 }
 
 /** Rank da temporada: quem abandona/desconecta (IA assume) perde; quem fica vence na hora. */
 function recordRankAbandon(room, seat) {
-  if (!room?.ranked || room.rankSeasonRecorded || room.gameState?.winner != null) return;
+  if (!room || room.rankSeasonRecorded || room.gameState?.winner != null) return;
   if (seat !== 0 && seat !== 1) return;
+  if (isFriendMatchRoom(room)) return;
   room.rankSeasonRecorded = true;
-  const ids = room.rankedPlayerIds || [];
+  const ids = rankRoomPlayerIds(room);
+  // No abandono o socket de quem saiu já foi apagado (socketPlayer e
+  // room.sockets): o id dele pode estar ausente — registra-se o que
+  // existe (o registro ignora entradas sem id).
   void recordRankedSeasonMatch(rankMatchKey(room), [
     { id: ids[0] || null, outcome: seat === 0 ? "loss" : "win" },
     { id: ids[1] || null, outcome: seat === 1 ? "loss" : "win" },
   ]).catch((e) => logMp("rank_record_err", { error: e?.message || String(e) }));
 }
 
+/**
+ * MMR DORMENTE (decisão dela, 2026-11-25): o MMR não dita mais
+ * pareamento nem progressão — o registro de fim de partida vive em
+ * maybeRecordRankSeason/recordRankAbandon (modelo de níveis). O código
+ * de MMR (df-ranked-store.mjs) NÃO foi apagado; esta função só mantém
+ * a guarda de execução única e não emite mais ranked_result (o cliente
+ * Godot não escuta esse evento).
+ */
 function maybeRecordRankedResult(room, state) {
-  if (!room?.ranked || room.rankedRecorded || state?.winner == null) return null;
-  const wSeat = state.winner;
-  const lSeat = wSeat === 0 ? 1 : 0;
-  const winnerId = room.rankedPlayerIds?.[wSeat];
-  const loserId = room.rankedPlayerIds?.[lSeat];
-  if (!winnerId || !loserId) return null;
+  if (!room || room.rankedRecorded || state?.winner == null) return null;
   room.rankedRecorded = true;
-  const result = recordRankedMatch(winnerId, loserId);
-  emitRoom(room, "ranked_result", result);
-  return result;
+  return null;
+}
+
+/**
+ * Frente 6 (Perfil do Jogador, 2026-11-25) — sala de partida com amigo.
+ * Mesmos passos do pareamento casual (createRoomOrThrow + sockets +
+ * seat tokens + match_found aos dois, com o aceite normal de 20 s),
+ * marcando a sala com room.friend_match = true, room.ranked = false e
+ * room.playerIds = [fromId, toId]. A sala NUNCA conta para o ranking
+ * (isFriendMatchRoom) e nunca chama POST /auth/match-xp no cliente.
+ * rankedPlayerIds NÃO é preenchido de propósito (o abandono de amigo
+ * também não registra rank).
+ */
+function socketIdForPlayer(playerId) {
+  // Um jogador pode ter 2 sockets (o persistente de convites + o da
+  // fila/batalha): prefere um socket sem sala viva e fora da fila.
+  let fallback = null;
+  for (const [sid, pid] of socketPlayer.entries()) {
+    if (pid !== playerId) continue;
+    if (!io.sockets.sockets.get(sid)) continue;
+    const code = socketRoom.get(sid);
+    if (code && getRoom(code)) continue;
+    if (isInQueue(sid)) {
+      fallback ??= sid;
+      continue;
+    }
+    return sid;
+  }
+  return fallback;
+}
+
+async function createFriendRoom(fromId, toId) {
+  if (!fromId || !toId || fromId === toId) return { ok: false, error: "INVALID_PLAYERS" };
+  if (!isGameRole()) return { ok: false, error: "WRONG_SHARD" };
+  const [p0, p1] = await Promise.all([getPlayerById(fromId), getPlayerById(toId)]);
+  if (!p0 || !p1) return { ok: false, error: "PLAYER_NOT_FOUND" };
+  const sid0 = socketIdForPlayer(fromId);
+  const sid1 = socketIdForPlayer(toId);
+  if (!sid0 || !sid1) return { ok: false, error: "PLAYER_OFFLINE" };
+  let room;
+  try {
+    room = createRoomOrThrow(createRoomOptsForLocalShard());
+  } catch (e) {
+    return { ok: false, error: e?.code || e?.message || "SERVER_BUSY" };
+  }
+  void rememberRoomShard(room.code);
+  room.friend_match = true;
+  room.ranked = false;
+  room.playerIds = [fromId, toId];
+  room.winPoints = 15;
+  room.sockets[0] = sid0;
+  room.sockets[1] = sid1;
+  // Nomes/avatar/nível/moldura da conta, para a tela de Partida
+  // Encontrada — mesmo caminho do pareamento casual.
+  room.playerNames = [p0.displayName || null, p1.displayName || null];
+  room.playerAvatars = [p0.avatarHeroId || null, p1.avatarHeroId || null];
+  room.playerLevels = [levelFromXp(p0.xpTotal || 0), levelFromXp(p1.xpTotal || 0)];
+  room.playerFrames = [p0.avatarFrame || null, p1.avatarFrame || null];
+  touchLastSeen(room, 0);
+  touchLastSeen(room, 1);
+  ensureSeatTokens(room);
+  socketRoom.set(sid0, room.code);
+  socketRoom.set(sid1, room.code);
+  // Tira os dois da fila casual (se estavam buscando): um jogador não
+  // pode estar numa sala de amigo e na fila ao mesmo tempo.
+  removeFromQueue(sid0);
+  removeFromQueue(sid1);
+  const s0 = io.sockets.sockets.get(sid0);
+  const s1 = io.sockets.sockets.get(sid1);
+  s0?.join(room.code);
+  s1?.join(room.code);
+  // Aceite normal de 20 s (1.51.86): sem os dois aceites, dissolve.
+  armMatchAccept(
+    room,
+    exclusionKeyForPlayer(fromId, sid0),
+    exclusionKeyForPlayer(toId, sid1),
+  );
+  io.to(sid0).emit("match_found", {
+    ...roomPublicView(room, 0),
+    seat: 0,
+    seatToken: seatTokenFor(room, 0),
+    shardId: shardIdForRoom(room.code),
+  });
+  io.to(sid1).emit("match_found", {
+    ...roomPublicView(room, 1),
+    seat: 1,
+    seatToken: seatTokenFor(room, 1),
+    shardId: shardIdForRoom(room.code),
+  });
+  broadcastRoomState(room);
+  return { ok: true, roomCode: room.code };
 }
 
 function pairQueueSockets(io) {
@@ -856,6 +984,12 @@ function pairQueueSockets(io) {
     }
     void rememberRoomShard(room.code);
     room.winPoints = 15;
+    // Frente 6 (Perfil, 2026-11-25): o pareamento normal preenche os
+    // ids dos dois jogadores — rankedPlayerIds alimenta o registro de
+    // abandono (recordRankAbandon) e playerIds alimenta o histórico
+    // (resolveMatchPlayerIds) sem resolver por nome.
+    room.rankedPlayerIds = [e0.playerId, e1.playerId];
+    room.playerIds = [e0.playerId, e1.playerId];
     room.sockets[0] = sid0;
     room.sockets[1] = sid1;
     // (1.51.95 item 5) o pareamento marca a última vez visto: sem isto a
@@ -2267,6 +2401,15 @@ io.on("connection", (socket) => {
   });
 });
 
+// Frente 6 (Perfil, 2026-11-25): convites de amigo em tempo real.
+// playerIdForSocket lê o mapa socketPlayer (o `authenticate` já faz
+// socket.join(`player:${id}`), por onde o convite chega na hora);
+// createFriendRoom é a sala de amigo definida acima.
+register_friends_socket(io, {
+  playerIdForSocket: (socket) => socketPlayer.get(socket.id) ?? null,
+  createFriendRoom,
+});
+
 /**
  * Login em 1 dispositivo só (1.51.70, item 7): quando um aparelho loga numa
  * conta, os sockets antigos da conta recebem `session_revoked` (o emit
@@ -2319,6 +2462,11 @@ await initLiveRoomsSchema();
 await initRankedStoreSchema();
 await initAuthStore();
 await initRankStore();
+// Frente 6 (Perfil, 2026-11-25): esquema de amigos (df_follows /
+// df_blocks / df_reports) + cache de bloqueios do pareamento. Depois
+// do initPostgres/initAuthStore: o pool já existe aqui.
+await initFriendsSchema();
+await loadBlockCache();
 startSessionPruneScheduler();
 
 // Restaura salas de PG (preferência) além do rooms.json.

@@ -27,9 +27,22 @@ export const DEV_COINS = 10000;
 export const DEV_LEVEL = 62;
 
 export const REDEEM_REWARDS = Object.freeze({
-  "promo-2026": Object.freeze({ type: "coins", coins: PROMO_COINS }),
-  "dev-all": Object.freeze({ type: "dev", coins: DEV_COINS, level: DEV_LEVEL }),
+  "promo-2026": Object.freeze({ type: "coins", coins: PROMO_COINS, diamonds: 0 }),
+  "dev-all": Object.freeze({ type: "dev", coins: DEV_COINS, level: DEV_LEVEL, diamonds: 0 }),
 });
+
+/** Tabela de recompensas ativa: `DF_REDEEM_TEST_REWARDS` (JSON {codeId: {type, coins, diamonds, level}}) só para testes. */
+export function activeRedeemRewards(env = process.env) {
+  const raw = env?.DF_REDEEM_TEST_REWARDS;
+  if (raw) {
+    try {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) return obj;
+    } catch (_) { /* recompensas de teste inválidas → nenhuma entrada */ }
+    return {};
+  }
+  return REDEEM_REWARDS;
+}
 
 export function normalizeCode(raw) {
   return String(raw ?? "").normalize("NFC").trim().toLowerCase();
@@ -77,13 +90,13 @@ function union(base, extra) {
   return out;
 }
 
-export function rewardDescription(codeId) {
-  const r = REDEEM_REWARDS[codeId];
+export function rewardDescription(codeId, rewards = activeRedeemRewards()) {
+  const r = rewards[codeId];
   if (!r) return null;
   if (r.type === "dev") {
-    return { type: "dev", coins: r.coins, level: r.level, allCards: true, allHeroes: true };
+    return { type: "dev", coins: r.coins | 0, diamonds: r.diamonds | 0, level: r.level, allCards: true, allHeroes: true };
   }
-  return { type: "coins", coins: r.coins };
+  return { type: "coins", coins: r.coins | 0, diamonds: r.diamonds | 0 };
 }
 
 /**
@@ -93,15 +106,20 @@ export function rewardDescription(codeId) {
  * @param {{ playableCards: string[], heroIds: string[], devXpTotal: number, journeyMaxLevel: number }} ctx
  */
 export function redeemForPlayer(player, codeId, ctx) {
-  const reward = REDEEM_REWARDS[codeId];
+  const reward = activeRedeemRewards()[codeId];
   if (!reward) return { ok: false, error: "INVALID_CODE" };
   const redeemed = Array.isArray(player?.redeemedCodes) ? player.redeemedCodes : [];
   if (redeemed.includes(codeId)) return { ok: false, error: "ALREADY_REDEEMED" };
 
   const next = {
     redeemedCodes: [...redeemed, codeId],
-    coins: Math.max(0, player.coins | 0) + reward.coins,
+    coins: Math.max(0, player.coins | 0) + (reward.coins | 0),
   };
+  // Diamantes (Perfil do Jogador, 2026-11-25): só quando a recompensa
+  // traz diamantes — o saldo existente nunca é zerado por um código sem eles.
+  if ((reward.diamonds | 0) > 0) {
+    next.diamonds = Math.max(0, player.diamonds | 0) + (reward.diamonds | 0);
+  }
   if (reward.type === "dev") {
     next.xpTotal = Math.max(player.xpTotal | 0, ctx.devXpTotal | 0);
     next.claimedLevels = Array.from({ length: ctx.journeyMaxLevel | 0 }, (_, i) => i + 1);

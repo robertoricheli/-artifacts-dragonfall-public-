@@ -113,7 +113,7 @@ export function recordMatchXpEvent(player, body) {
  * Sem Postgres → zeros (dev local). Erro de consulta → null (tenta de novo depois).
  */
 export async function countPlayerMatchHistory(playerId) {
-  if (!analyticsPgEnabled()) return { matches: 0, aiWins: 0, pvpWins: 0 };
+  if (!analyticsPgEnabled()) return { matches: 0, aiWins: 0, pvpWins: 0, pvpMatches: 0 };
   try {
     return await pgCountPlayerMatches(playerId);
   } catch (e) {

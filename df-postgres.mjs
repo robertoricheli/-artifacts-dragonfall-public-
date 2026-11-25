@@ -17,8 +17,21 @@ CREATE TABLE IF NOT EXISTS df_matches (
   player_0_id VARCHAR(64),
   player_1_id VARCHAR(64),
   action_seq INT NOT NULL DEFAULT 0,
-  game_version VARCHAR(24)
+  game_version VARCHAR(24),
+  -- Frente 3 (Perfil, 2026-11-25): placar final (PV) dos dois lados e
+  -- se foi partida com amigo (nunca vale rank). Colunas acrescentadas
+  -- tambem via ALTER abaixo, para bancos ja criados.
+  score_0 INT,
+  score_1 INT,
+  friend_match BOOLEAN NOT NULL DEFAULT FALSE
 );
+-- Bancos criados antes da Frente 3 nao tem as colunas novas: o CREATE
+-- acima nao as acrescenta, entao o ALTER garante (idempotente).
+ALTER TABLE df_matches ADD COLUMN IF NOT EXISTS score_0 INT;
+ALTER TABLE df_matches ADD COLUMN IF NOT EXISTS score_1 INT;
+ALTER TABLE df_matches ADD COLUMN IF NOT EXISTS friend_match BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS df_matches_player0 ON df_matches (player_0_id, ended_at DESC);
+CREATE INDEX IF NOT EXISTS df_matches_player1 ON df_matches (player_1_id, ended_at DESC);
 CREATE INDEX IF NOT EXISTS df_matches_ended_at ON df_matches (ended_at DESC);
 CREATE INDEX IF NOT EXISTS df_matches_room_ended ON df_matches (room_code, ended_at DESC);
 CREATE TABLE IF NOT EXISTS df_replays (
@@ -91,8 +104,14 @@ export function getPgPool() {
 }
 
 /**
+ * Frente 3 (Perfil, 2026-11-25): payload aceita playerIds (ids dos
+ * dois jogadores tambem em partida casual), scores ([pv0, pv1]) e
+ * friendMatch. Devolve { id, prunedIds }: a retencao apaga as partidas
+ * alem das 10 mais recentes de cada jogador (df_matches + df_replays
+ * via ON DELETE CASCADE); os ids apagados vao em prunedIds para o
+ * JSONL tambem ser podado pelo chamador.
  * @param {object} payload
- * @returns {Promise<number|null>} match id
+ * @returns {Promise<{id:number,prunedIds:number[]}|null>}
  */
 export async function saveMatchHistory(payload) {
   if (!enabled || !pool) return null;
@@ -102,6 +121,9 @@ export async function saveMatchHistory(payload) {
     heroIds = [null, null],
     ranked = false,
     rankedPlayerIds = [null, null],
+    playerIds = null,
+    scores = [null, null],
+    friendMatch = false,
     actionSeq = 0,
     gameVersion = null,
     eventLog = [],
@@ -122,8 +144,9 @@ export async function saveMatchHistory(payload) {
     const ins = await client.query(
       `INSERT INTO df_matches
         (room_code, winner_seat, hero_0, hero_1, ranked, player_0_id, player_1_id,
-         action_seq, game_version, started_at, duration_ms, turn_number)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::timestamptz,$11,$12)
+         action_seq, game_version, started_at, duration_ms, turn_number,
+         score_0, score_1, friend_match)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::timestamptz,$11,$12,$13,$14,$15)
        RETURNING id`,
       [
         roomCode,
@@ -131,13 +154,16 @@ export async function saveMatchHistory(payload) {
         heroIds[0],
         heroIds[1],
         !!ranked,
-        rankedPlayerIds[0],
-        rankedPlayerIds[1],
+        (playerIds || rankedPlayerIds)[0],
+        (playerIds || rankedPlayerIds)[1],
         actionSeq,
         gameVersion,
         startedAt ? new Date(startedAt).toISOString() : null,
         durationMs != null ? Math.max(0, Number(durationMs) | 0) : null,
         turnNumber != null ? Math.max(0, Number(turnNumber) | 0) : null,
+        scores?.[0] != null ? Math.max(0, Number(scores[0]) | 0) : null,
+        scores?.[1] != null ? Math.max(0, Number(scores[1]) | 0) : null,
+        !!friendMatch,
       ],
     );
     const matchId = ins.rows[0]?.id;
@@ -148,7 +174,25 @@ export async function saveMatchHistory(payload) {
       );
     }
     await client.query("COMMIT");
-    return matchId;
+    // Retencao (Frente 3): so as 10 ultimas partidas por jogador.
+    const prunedIds = [];
+    const ids = (playerIds || rankedPlayerIds || []).filter(Boolean);
+    for (const pid of [...new Set(ids.map(String))]) {
+      try {
+        const del = await pool.query(
+          `DELETE FROM df_matches WHERE id IN (
+             SELECT id FROM df_matches
+             WHERE player_0_id = $1 OR player_1_id = $1
+             ORDER BY ended_at DESC, id DESC OFFSET 10
+           ) RETURNING id`,
+          [pid],
+        );
+        for (const r of del.rows) prunedIds.push(Number(r.id));
+      } catch (e) {
+        console.warn("[postgres] retention failed:", e.message);
+      }
+    }
+    return { id: matchId, prunedIds };
   } catch (e) {
     if (client) {
       try { await client.query("ROLLBACK"); } catch (e2) { /* sem conexão */ }
@@ -173,6 +217,27 @@ export async function getReplayByRoomCode(roomCode) {
     [String(roomCode).trim().toUpperCase()],
   );
   return res.rows[0] || null;
+}
+
+/**
+ * Frente 3: ultimas `limit` partidas de um jogador (qualquer tipo:
+ * ranqueada, casual ou com amigo), da mais recente para a mais antiga.
+ * Sem Postgres -> [] (o historico e best-effort).
+ */
+export async function getPlayerHistory(playerId, limit = 10) {
+  if (!enabled || !pool || !playerId) return [];
+  const lim = Math.max(1, Math.min(50, Number(limit) || 10));
+  const res = await pool.query(
+    `SELECT id, room_code, ended_at, winner_seat, hero_0, hero_1, ranked,
+            player_0_id, player_1_id, action_seq, game_version,
+            score_0, score_1, friend_match, started_at, duration_ms, turn_number
+     FROM df_matches
+     WHERE player_0_id = $1 OR player_1_id = $1
+     ORDER BY ended_at DESC, id DESC
+     LIMIT $2`,
+    [String(playerId), lim],
+  );
+  return res.rows;
 }
 
 export async function shutdownPostgres() {

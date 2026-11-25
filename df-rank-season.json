@@ -1,5 +1,5 @@
 {
   "seasons": [
-    { "id": 1, "endsAt": null }
+    { "id": 1, "startsAt": "2026-11-25", "endsAt": null }
   ]
 }

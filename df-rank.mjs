@@ -1,8 +1,29 @@
 /**
- * Dragonfall — Rank por temporada (Rankeado Online). Autoridade: o servidor.
- * Estatísticas da temporada por conta, faixas por % de vitórias, Top 200 e recompensas
- * de fim de temporada. Postgres quando disponível; JSON local como fallback.
- * Espelho de faixas no cliente: artifacts/dragonfall/js/df-rank-data.js (paridade testada).
+ * Dragonfall — Rank por temporada (níveis). Autoridade: o servidor.
+ * Progressão por NÍVEIS (decisão dela, 2026-11-25, projeto Perfil do
+ * Jogador): divisões none < bronze < prata < ouro < diamante < platina
+ * < desafiante < mítico, cada uma com 5 níveis. Vitória sobe 1 nível,
+ * derrota desce 1; nível 5 + vitória = próxima divisão no nível 1;
+ * nível 1 + derrota = divisão anterior no nível 5; bronze 1 + derrota
+ * fica em bronze 1 (piso). O maior rank já alcançado (bestTier/bestLevel)
+ * é guardado e nunca desce.
+ *
+ * Colocação (melhor de dez, OCULTA do jogador, vale para TODOS — inclusive
+ * quem já joga): as 10 primeiras partidas ranqueadas da temporada contam
+ * vitórias; enquanto placementDone=false o rank exibido é "sem rank".
+ * Depois da 10ª, o rank inicial vem do mapa placementRank(). Quem já tinha
+ * partidas ranqueadas antes desta versão faz a colocação nas PRÓXIMAS 10
+ * partidas (não retroativo); os contadores da temporada não são zerados.
+ *
+ * O modelo ANTIGO (faixas por % de vitórias, MIN_MATCHES para exibir o
+ * tier) foi SUBSTITUÍDO: a % não dita mais o rank. O MMR continua onde
+ * sempre esteve (df-ranked-store.mjs) e NÃO dita pareamento nem
+ * progressão — o código dele fica dormente, sem ser apagado.
+ * Reaproveitado do sistema antigo: tabelas df_rank_players/df_rank_meta,
+ * registro de temporada (season/matches/wins/losses/bestTier/pending),
+ * endpoints GET /auth/rank e POST /auth/rank/claim e o Top 200 (por
+ * vitórias da temporada). Postgres quando disponível; JSON local como
+ * fallback.
  */
 import fs from "fs";
 import path from "path";
@@ -14,18 +35,25 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA_PATH = process.env.DF_RANK_DATA_PATH || path.join(HERE, "data", "rank.json");
 const SEASON_CONFIG_PATH = process.env.DF_RANK_SEASON_CONFIG || path.join(HERE, "df-rank-season.json");
 
+/** Mínimo de partidas da temporada para entrar no Top 200 (não limita mais o rank exibido). */
 export const MIN_MATCHES = 15;
 export const TOP_SIZE = 200;
 export const TOP_COINS = 50;
-/** Faixas em ordem crescente: % mínima de vitórias na temporada e Moedas no fim dela. */
+/** Níveis por divisão (decisão dela: 5 níveis, nunca "estrelas"). */
+export const LEVELS_PER_TIER = 5;
+/** Partidas da colocação (melhor de dez). */
+export const PLACEMENT_MATCHES = 10;
+/** Divisões em ordem crescente; índice 0 = sem rank. */
+export const TIER_IDS = Object.freeze(["none", "bronze", "prata", "ouro", "diamante", "platina", "desafiante", "mitico"]);
+/** Moedas de fim de temporada por divisão (mesmos valores do modelo antigo). */
 export const RANK_TIERS = Object.freeze([
-  { id: "bronze", min: 25, coins: 10 },
-  { id: "silver", min: 50, coins: 20 },
-  { id: "gold", min: 60, coins: 30 },
-  { id: "diamond", min: 65, coins: 40 },
-  { id: "platinum", min: 70, coins: 50 },
-  { id: "challenger", min: 80, coins: 60 },
-  { id: "mythic", min: 90, coins: 70 },
+  { id: "bronze", coins: 10 },
+  { id: "prata", coins: 20 },
+  { id: "ouro", coins: 30 },
+  { id: "diamante", coins: 40 },
+  { id: "platina", coins: 50 },
+  { id: "desafiante", coins: 60 },
+  { id: "mitico", coins: 70 },
 ].map((t) => Object.freeze(t)));
 
 /** Chaves de partida já contadas ficam guardadas por 2 dias (reinício do servidor no meio da partida). */
@@ -47,22 +75,72 @@ CREATE TABLE IF NOT EXISTS df_rank_meta (
 
 /* ================= Regras puras ================= */
 
-/** null = ainda não jogou 15 partidas; 0 = Sem Rank; 1..7 = Bronze..Mítico. */
-export function tierFor(matches, wins) {
-  const m = Math.max(0, matches | 0);
-  const w = Math.max(0, wins | 0);
-  if (m < MIN_MATCHES) return null;
-  let tier = 0;
-  RANK_TIERS.forEach((t, i) => { if (w * 100 >= t.min * m) tier = i + 1; });
-  return tier;
+/** Índice da divisão (0 = none .. 7 = mítico). Desconhecido vira 0. */
+export function tierIndex(tier) {
+  if (typeof tier === "number") return Math.min(TIER_IDS.length - 1, Math.max(0, tier | 0));
+  const i = TIER_IDS.indexOf(String(tier || ""));
+  return i >= 0 ? i : 0;
 }
 
+/** Índice numérico (0..7, compatível com o modelo antigo e com as conquistas) → id da divisão. null = sem valor. */
 export function tierId(tier) {
   if (tier == null) return null;
-  return tier > 0 ? RANK_TIERS[tier - 1]?.id || null : "none";
+  return TIER_IDS[tierIndex(tier)] || null;
 }
 
-/** % de vitórias para exibição (arredondada para baixo: nunca mostra uma faixa que não alcançou). */
+function clampLevel(v) {
+  return Math.min(LEVELS_PER_TIER, Math.max(1, Number(v) | 0 || 1));
+}
+
+/**
+ * Mapa da colocação (decisão dela, 2026-11-25 — interpolação linear
+ * entre os pontos que ela deu: 10 vitórias = prata 5; 3 = bronze 3;
+ * 5 = bronze 5; 6 = prata 1).
+ *   0-1 vitórias = bronze 1; 2 = bronze 2; 3 = bronze 3; 4 = bronze 4;
+ *   5 = bronze 5; 6 = prata 1; 7 = prata 2; 8 = prata 3; 9 = prata 4;
+ *   10 = prata 5.
+ */
+export function placementRank(wins) {
+  const w = Math.min(PLACEMENT_MATCHES, Math.max(0, Number(wins) | 0));
+  const table = [
+    ["bronze", 1], ["bronze", 1], ["bronze", 2], ["bronze", 3], ["bronze", 4], ["bronze", 5],
+    ["prata", 1], ["prata", 2], ["prata", 3], ["prata", 4], ["prata", 5],
+  ];
+  const [tier, level] = table[w];
+  return { tier, level };
+}
+
+/**
+ * Um passo de progressão por NÍVEIS. outcome = "win" | "loss" | "tie".
+ * Empate não move o rank. "none" não anda (só a colocação define o rank).
+ * Mítico 5 + vitória fica no topo; bronze 1 + derrota fica no piso.
+ */
+export function stepLevel(tier, level, outcome) {
+  let t = tierIndex(tier);
+  let l = clampLevel(level);
+  if (t === 0) return { tier: "none", level: 1 };
+  if (outcome === "win") {
+    if (l < LEVELS_PER_TIER) l += 1;
+    else if (t < TIER_IDS.length - 1) { t += 1; l = 1; }
+  } else if (outcome === "loss") {
+    if (l > 1) l -= 1;
+    else if (t > 1) { t -= 1; l = LEVELS_PER_TIER; }
+  }
+  return { tier: TIER_IDS[t], level: l };
+}
+
+/** Compara dois ranks ({tier, level}): -1 (a < b), 0 (iguais), 1 (a > b). */
+export function compareRank(a, b) {
+  const ta = tierIndex(a?.tier);
+  const tb = tierIndex(b?.tier);
+  if (ta !== tb) return ta < tb ? -1 : 1;
+  const la = clampLevel(a?.level);
+  const lb = clampLevel(b?.level);
+  if (la === lb) return 0;
+  return la < lb ? -1 : 1;
+}
+
+/** % de vitórias para exibição (arredondada para baixo). */
 export function winPct(wins, matches) {
   const m = Math.max(0, matches | 0);
   return m ? Math.floor((Math.max(0, wins | 0) * 100) / m) : 0;
@@ -107,7 +185,9 @@ function normalizePending(list) {
   if (!Array.isArray(list)) return [];
   return list.filter((p) => p && typeof p === "object").map((p) => ({
     season: nonNeg(p.season),
-    tier: p.tier == null ? null : nonNeg(p.tier),
+    // tier histórico: número no modelo antigo, id no modelo de níveis.
+    tier: p.tier == null ? null : p.tier,
+    level: p.level == null ? null : clampLevel(p.level),
     pos: p.pos == null ? null : nonNeg(p.pos),
     matches: nonNeg(p.matches),
     wins: nonNeg(p.wins),
@@ -118,6 +198,37 @@ function normalizePending(list) {
 
 function normalizeRecord(id, raw) {
   const r = raw && typeof raw === "object" ? raw : {};
+  // Maior rank já alcançado: aceita o formato novo (string) e o antigo
+  // (número 0..7, mesma ordem de divisões) — nunca desce.
+  let bestTier = "none";
+  let bestLevel = 1;
+  if (typeof r.bestTier === "string" && TIER_IDS.includes(r.bestTier)) {
+    bestTier = r.bestTier;
+    bestLevel = clampLevel(r.bestLevel);
+  } else if (typeof r.bestTier === "number") {
+    bestTier = tierId(r.bestTier) || "none";
+    bestLevel = 1;
+  }
+  // Rank atual: só vale depois da colocação. Registros do modelo antigo
+  // (sem tier/placement) recomeçam a colocação nas próximas 10 partidas.
+  let tier = "none";
+  let level = 1;
+  if (typeof r.tier === "string" && TIER_IDS.includes(r.tier)) {
+    tier = r.tier;
+    level = clampLevel(r.level);
+  }
+  let placementDone = !!r.placementDone;
+  let placementWins = Math.min(nonNeg(r.placementWins), PLACEMENT_MATCHES);
+  let placementMatches = Math.min(nonNeg(r.placementMatches), PLACEMENT_MATCHES);
+  if (placementDone && tier === "none") {
+    placementDone = false;
+    placementWins = 0;
+    placementMatches = 0;
+  }
+  if (!placementDone) {
+    tier = "none";
+    level = 1;
+  }
   return {
     id: String(id),
     season: nonNeg(r.season) || meta.season,
@@ -128,7 +239,13 @@ function normalizeRecord(id, raw) {
     reachedAt: Math.max(0, Number(r.reachedAt) || 0),
     totalMatches: nonNeg(r.totalMatches),
     totalWins: nonNeg(r.totalWins),
-    bestTier: Math.min(RANK_TIERS.length, nonNeg(r.bestTier)),
+    tier,
+    level,
+    bestTier,
+    bestLevel,
+    placementDone,
+    placementWins,
+    placementMatches,
     display: normalizeDisplay(r.display),
     pending: normalizePending(r.pending),
   };
@@ -285,9 +402,15 @@ function endsAtFor(season) {
   return Number.isFinite(t) ? t : null;
 }
 
+/** Início declarado da temporada (df-rank-season.json; null quando ausente). */
+function startsAtFor(season) {
+  const entry = readSeasonConfig().find((s) => Number(s?.id) === season);
+  return typeof entry?.startsAt === "string" && entry.startsAt ? entry.startsAt : null;
+}
+
 export function seasonPublic(now = Date.now()) {
   ensureLoaded();
-  return { id: meta.season, startedAt: meta.startedAt || null, endsAt: endsAtFor(meta.season), now };
+  return { id: meta.season, startedAt: meta.startedAt || null, startsAt: startsAtFor(meta.season), endsAt: endsAtFor(meta.season), now };
 }
 
 function rollSeason(rec) {
@@ -298,6 +421,12 @@ function rollSeason(rec) {
   rec.losses = 0;
   rec.ties = 0;
   rec.reachedAt = 0;
+  // Temporada nova = colocação nova; o MAIOR rank (best) nunca desce.
+  rec.tier = "none";
+  rec.level = 1;
+  rec.placementDone = false;
+  rec.placementWins = 0;
+  rec.placementMatches = 0;
 }
 
 function qualifiedSorted() {
@@ -316,12 +445,11 @@ function closeSeason(season, now) {
   let rewarded = 0;
   for (const rec of players.values()) {
     if (rec.season !== season) continue;
-    const tier = tierFor(rec.matches, rec.wins);
     const pos = posById.get(rec.id) || null;
-    const rankCoins = tier ? RANK_TIERS[tier - 1].coins : 0;
+    const rankCoins = rec.tier !== "none" ? (RANK_TIERS[tierIndex(rec.tier) - 1]?.coins || 0) : 0;
     const topCoins = pos && pos <= TOP_SIZE ? TOP_COINS : 0;
     if (rankCoins + topCoins > 0) {
-      rec.pending.push({ season, tier, pos, matches: rec.matches, wins: rec.wins, rankCoins, topCoins });
+      rec.pending.push({ season, tier: rec.tier, level: rec.level, pos, matches: rec.matches, wins: rec.wins, rankCoins, topCoins });
       rewarded++;
     }
     rec.season = season + 1;
@@ -330,6 +458,11 @@ function closeSeason(season, now) {
     rec.losses = 0;
     rec.ties = 0;
     rec.reachedAt = 0;
+    rec.tier = "none";
+    rec.level = 1;
+    rec.placementDone = false;
+    rec.placementWins = 0;
+    rec.placementMatches = 0;
     savePlayer(rec);
   }
   meta.closed.push({ season, at: now, rewarded });
@@ -389,10 +522,28 @@ export function recordOutcome(id, outcome, { now = Date.now(), display = null } 
   } else {
     rec.ties += 1;
   }
+  if (!rec.placementDone) {
+    // Colocação: as 10 primeiras partidas ranqueadas da temporada.
+    rec.placementMatches += 1;
+    if (outcome === "win") rec.placementWins += 1;
+    if (rec.placementMatches >= PLACEMENT_MATCHES) {
+      rec.placementDone = true;
+      const start = placementRank(rec.placementWins);
+      rec.tier = start.tier;
+      rec.level = start.level;
+    }
+  } else {
+    const next = stepLevel(rec.tier, rec.level, outcome);
+    rec.tier = next.tier;
+    rec.level = next.level;
+  }
   const disp = normalizeDisplay(display);
   if (disp) rec.display = disp;
-  const tier = tierFor(rec.matches, rec.wins);
-  if (tier && tier > rec.bestTier) rec.bestTier = tier;
+  // O maior rank nunca desce.
+  if (compareRank({ tier: rec.tier, level: rec.level }, { tier: rec.bestTier, level: rec.bestLevel }) > 0) {
+    rec.bestTier = rec.tier;
+    rec.bestLevel = rec.level;
+  }
   players.set(key, rec);
   topCache = null;
   savePlayer(rec);
@@ -442,10 +593,10 @@ export function positionOf(id) {
   return i >= 0 ? i + 1 : null;
 }
 
-/** Melhor faixa já alcançada (Medalhas das Conquistas). */
+/** Melhor divisão já alcançada, como número 0..7 (Medalhas das Conquistas — df-achievements.mjs lê número). */
 export function bestTierOf(id) {
   ensureLoaded();
-  return players.get(String(id || ""))?.bestTier || 0;
+  return tierIndex(players.get(String(id || ""))?.bestTier || "none");
 }
 
 export function rankPublic(id, now = Date.now()) {
@@ -455,24 +606,35 @@ export function rankPublic(id, now = Date.now()) {
   const cur = rec && rec.season === meta.season ? rec : null;
   const matches = cur?.matches || 0;
   const wins = cur?.wins || 0;
-  const tier = tierFor(matches, wins);
+  const tier = cur?.tier || "none";
+  const level = cur?.level || 1;
   const pending = rec ? rec.pending.map((p) => ({ ...p })) : [];
   return {
     season: meta.season,
+    startsAt: startsAtFor(meta.season),
     endsAt: endsAtFor(meta.season),
     minMatches: MIN_MATCHES,
+    // aliases que a Frente 3 (visita ao perfil) já lê:
     matches,
     wins,
     losses: cur?.losses || 0,
     ties: cur?.ties || 0,
+    // contrato do /auth/me (projeto Perfil do Jogador):
+    seasonMatches: matches,
+    seasonWins: wins,
+    seasonLosses: cur?.losses || 0,
     winPct: winPct(wins, matches),
     tier,
-    tierId: tierId(tier),
-    pos: tier == null ? null : positionOf(id),
+    tierId: tier,
+    level,
+    bestTier: rec?.bestTier || "none",
+    bestLevel: rec?.bestLevel || 1,
+    placementDone: cur ? !!cur.placementDone : false,
+    placementWins: cur?.placementWins || 0,
+    pos: tier === "none" ? null : positionOf(id),
     totalMatches: rec?.totalMatches || 0,
     totalWins: rec?.totalWins || 0,
     totalPct: winPct(rec?.totalWins || 0, rec?.totalMatches || 0),
-    bestTier: rec?.bestTier || 0,
     pending,
     pendingCoins: pending.reduce((s, p) => s + p.rankCoins + p.topCoins, 0),
   };
@@ -482,20 +644,20 @@ export function rankPublic(id, now = Date.now()) {
 export function topPublic(limit = TOP_SIZE, now = Date.now()) {
   ensureLoaded();
   tickSeason(now);
-  return qualifiedSorted().slice(0, Math.max(0, limit | 0)).map((r, i) => {
-    const tier = tierFor(r.matches, r.wins);
-    return {
-      pos: i + 1,
-      name: r.display?.name || null,
-      avatarHeroId: r.display?.avatarHeroId || null,
-      level: r.display?.level || 1,
-      wins: r.wins,
-      matches: r.matches,
-      winPct: winPct(r.wins, r.matches),
-      tier,
-      tierId: tierId(tier),
-    };
-  });
+  return qualifiedSorted().slice(0, Math.max(0, limit | 0)).map((r, i) => ({
+    pos: i + 1,
+    name: r.display?.name || null,
+    avatarHeroId: r.display?.avatarHeroId || null,
+    level: r.display?.level || 1,
+    wins: r.wins,
+    matches: r.matches,
+    winPct: winPct(r.wins, r.matches),
+    tier: r.tier,
+    tierId: r.tier,
+    level: r.level,
+    bestTier: r.bestTier,
+    bestLevel: r.bestLevel,
+  }));
 }
 
 /* ================= Resgate ================= */

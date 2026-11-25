@@ -37,7 +37,7 @@ export const SHOWCASE_MAX = 5;
 export const MATCH_LIMITS = Object.freeze({ maxVp: 30, maxKills: 40 });
 export const BIG_WIN_MARGIN = 10;
 
-const STAT_KEYS = ["matches", "aiWins", "pvpWins", "streak", "bestStreak", "champKills", "bigWins", "coinsSpent"];
+const STAT_KEYS = ["matches", "aiWins", "pvpWins", "pvpMatches", "streak", "bestStreak", "champKills", "bigWins", "coinsSpent"];
 
 export function getAchievement(id) {
   return BY_ID.get(String(id)) || null;
@@ -48,6 +48,9 @@ export function normalizeStats(raw) {
   const s = {};
   for (const k of STAT_KEYS) s[k] = Math.max(0, Number(raw?.[k]) | 0);
   s.backfilled = !!raw?.backfilled;
+  // (Perfil do Jogador, 2026-11-25) uma segunda vez, só para semear o
+  // pvpMatches do histórico em contas cujo backfill antigo já rodou.
+  s.pvpMatchesBackfilled = !!raw?.pvpMatchesBackfilled;
   return s;
 }
 
@@ -138,6 +141,9 @@ export function applyMatchToStats(stats, m) {
   s.matches += 1;
   if (win && isPvp) s.pvpWins += 1;
   if (win && !isPvp) s.aiWins += 1;
+  // (Perfil do Jogador, 2026-11-25) toda partida PvP conta, ganhe ou perca:
+  // é o denominador da taxa geral da tela (pvpWins / pvpMatches).
+  if (isPvp) s.pvpMatches += 1;
   if (win) {
     s.streak += 1;
     s.bestStreak = Math.max(s.bestStreak, s.streak);
@@ -162,13 +168,24 @@ export function addCoinsSpent(stats, amount) {
 /** Retroativo (uma vez por conta): partidas e vitórias do histórico do servidor. */
 export function applyBackfill(stats, counts) {
   const s = normalizeStats(stats);
-  if (s.backfilled) return s;
-  if (counts) {
-    s.matches = Math.max(s.matches, Math.max(0, Number(counts.matches) | 0));
-    s.aiWins = Math.max(s.aiWins, Math.max(0, Number(counts.aiWins) | 0));
-    s.pvpWins = Math.max(s.pvpWins, Math.max(0, Number(counts.pvpWins) | 0));
+  if (!s.backfilled) {
+    if (counts) {
+      s.matches = Math.max(s.matches, Math.max(0, Number(counts.matches) | 0));
+      s.aiWins = Math.max(s.aiWins, Math.max(0, Number(counts.aiWins) | 0));
+      s.pvpWins = Math.max(s.pvpWins, Math.max(0, Number(counts.pvpWins) | 0));
+    }
+    s.backfilled = true;
   }
-  s.backfilled = true;
+  // (Perfil do Jogador, 2026-11-25) partidas PvP do histórico, para a taxa
+  // geral da tela (pvpWins / pvpMatches). Vale também para contas cujo
+  // backfill antigo já rodou: sem ele, pvpMatches começaria em 0 enquanto
+  // pvpWins já é vitalício — e a taxa explodiria na primeira partida nova.
+  // Math.max: o valor ao vivo (que inclui abandonos, fora do histórico)
+  // nunca é rebaixado pela semente.
+  if (!s.pvpMatchesBackfilled && counts && Number(counts.pvpMatches) >= 0) {
+    s.pvpMatches = Math.max(s.pvpMatches, Math.max(0, Number(counts.pvpMatches) | 0));
+    s.pvpMatchesBackfilled = true;
+  }
   return s;
 }
 

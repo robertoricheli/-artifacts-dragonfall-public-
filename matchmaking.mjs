@@ -3,6 +3,10 @@
  */
 import { MAX_QUEUE } from "./df-mp-limits.mjs";
 import { isPairExcluded, exclusionKeyForPlayer } from "./df-pair-exclusion.mjs";
+// Frente 3 (Perfil, 2026-11-25): jogador bloqueado NUNCA mais é pareado
+// com quem bloqueou — checagem síncrona no cache de df-friends.mjs
+// (alimentado por loadBlockCache() no boot e atualizado em block()).
+import { isBlockedSync } from "./df-friends.mjs";
 
 /** @type {{ socketId: string, playerId: string | null, joinedAt: number, displayName: string | null, avatarHeroId: string | null, level: number, avatarFrame: string | null }[]} */
 const queue = [];
@@ -73,6 +77,8 @@ export function takePair() {
       // si — nem o mesmo playerId, nem o mesmo socket.
       if (a.socketId === b.socketId) continue;
       if (a.playerId && b.playerId && a.playerId === b.playerId) continue;
+      // Frente 3 (Perfil): bloqueio mútuo — o par nunca se forma.
+      if (isBlockedSync(a.playerId, b.playerId)) continue;
       if (
         isPairExcluded(
           exclusionKeyForPlayer(a.playerId, a.socketId),
