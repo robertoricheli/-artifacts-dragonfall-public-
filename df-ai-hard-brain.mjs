@@ -1599,9 +1599,20 @@ export function listTalentPlays(state, seat) {
 // e sem queimadura; no Vampirismo, o mais forte P2+; no Fogo e Gelo e no
 // Cometa, o mais forte do campo). O abate conta mesmo mútuo (P2 x P2).
 // Só as 7 Ultimates da 1.51.102 passam por aqui; os outros tipos não mudam.
-function ultTargetKillableByAttack(state, seat, ultType) {
+// (1.51.102 item 2, FRENTE 1b) Espelho de `AIBrain._ult_kill_attack`
+// (ai_brain.gd:360): o ataque que destrói AGORA o alvo da Ultimate de
+// dano — ou null quando nenhum atacante o destrói neste estado. O
+// abate conta mesmo mútuo (P2 x P2, o caso da Frosty) e só vale com o
+// ataque disponível AGORA (não-tapado, sem congelar e sem enfeitiçar,
+// com ações para o custo, sem Proteção no alvo). Pontuação = a mesma
+// de `scoreAttackAction` para abates (limpo 100, mútuo 40, +PV, +P1,
+// -custo*3) — SEM o veto de CAMPO ao mútuo e SEM o +30 de MITIGAÇÃO.
+// Desempate: menor Poder do atacante, depois menor índice. Com
+// skipStatused=true, o alvo statusado pela própria IA neste turno
+// não conta (o `_best_attack` também não o destrói).
+export function ultKillAttack(state, seat, ultType, skipStatused = true) {
   const foes = foesExcludingCharmed(state, seat);
-  if (!foes.length) return false;
+  if (!foes.length) return null;
   const pw = (t) => t.c.currentPower ?? t.c.power ?? 0;
   const strongest = (pool) => pool.reduce((best, t) => (!best || pw(t) > pw(best) ? t : best), null);
   let target = null;
@@ -1613,28 +1624,60 @@ function ultTargetKillableByAttack(state, seat, ultType) {
     case "incinerate": {
       const clean = foes.filter((t) => !t.c.barrier && !t.c.barrierPermanent
         && !(t.c.barrierTurns > 0) && !t.c.burning && !(t.c.burningTurns > 0));
-      if (!clean.length) return false;
+      if (!clean.length) return null;
       target = strongest(clean);
       break;
     }
     case "vampirism": {
       const elig = foes.filter((t) => pw(t) >= 2);
-      if (!elig.length) return false;
+      if (!elig.length) return null;
       target = strongest(elig);
       break;
     }
     default:
-      return false;
+      return null;
   }
-  if (!target || target.c.shielded || target.c.charme) return false;
+  if (!target || target.c.shielded || target.c.charme) return null;
+  if (skipStatused && (state.aiStatusedUids || new Set()).has(target.c.uid)) return null;
   const pl = state.players[seat];
   const actions = pl?.actions ?? 0;
-  for (const a of (pl?.field || [])) {
+  const dp = pw(target);
+  let best = null;
+  let bestScore = -9999;
+  let bestPa = 9999;
+  for (let ai = 0; ai < (pl?.field || []).length; ai++) {
+    const a = pl.field[ai];
     if (!a || a.tapped || a.frozen || a.charme) continue;
-    if (actions < attackActionCost(a, target.c)) continue;
-    if (combatOutcomeOverpower(a, target.c).killD) return true;
+    const cost = attackActionCost(a, target.c);
+    if (actions < cost) continue;
+    const { killD, killA } = combatOutcomeOverpower(a, target.c);
+    if (!killD) continue;
+    const ap = a.currentPower ?? a.power ?? 0;
+    const vpGain = noVpOnDestroy(target.c) ? 0
+      : ((a.constantEffect === "recompensaDupla" && !a.silenced) ? 2 : 1);
+    let score;
+    if (!killA) score = 100 + vpGain * 10 + dp * 2;
+    else score = 40 + vpGain * 10 + (dp - ap) * 2;
+    if (ap === 1) score += 15;
+    if (dp === 1) score += 15;
+    score -= cost * 3;
+    if (score > bestScore || (score === bestScore && ap < bestPa)) {
+      bestScore = score;
+      bestPa = ap;
+      best = { type: "ATTACK_RESOLVE", playerId: seat, attackerIdx: ai,
+        defenderPlayerId: target.p, defenderIdx: target.i,
+        att_idx: ai, def_idx: target.i };
+    }
   }
-  return false;
+  return best;
+}
+
+function ultTargetKillableByAttack(state, seat, ultType) {
+  // (1.51.102 item 2, FRENTE 1b) Sem mudar o comportamento: o portão
+  // da F1 é "existe ataque que mata o alvo AGORA". O `false` é
+  // essencial — o portão NÃO pula alvo statusado; só o passo de
+  // ORDEM pula.
+  return ultKillAttack(state, seat, ultType, false) !== null;
 }
 
 export function pickUltimate(state, seat, forceEndOfTurn = false) {
@@ -2123,6 +2166,7 @@ export const DfAiHardBrain = {
   pickOnEnterResolution,
   listTalentPlays,
   pickUltimate,
+  ultKillAttack,
   pickNextAction,
   MAX_FIELD,
   MAX_HAND,

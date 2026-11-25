@@ -432,6 +432,21 @@ function _planInner(state, seat = state.currentPlayer) {
       }
     }
   }
+  // (1.51.102 item 2, FRENTE 1b) ATAQUE ANTES DA ULTIMATE — espelho de
+  // ai_planner.gd:144-162. Quando o alvo da Ultimate de dano já morre
+  // atacando AGORA, o ataque sai PRIMEIRO — antes de invocar ou jogar
+  // talento — e a Ultimate fica guardada. Fica depois da sonda (a
+  // invocação que mata ou abre o abate continua primeiro) e do atalho
+  // de talento (Grito/INVESTIDA/Técnicas/Corromper selados continuam
+  // primeiro). O Cometa reavalia depois do ataque, como antes — NADA
+  // deste passo vai para dentro de `_ultimateAllowed`.
+  const utp = heroUltType(state.players[pi] || {});
+  if (_canUseUltimate(state, pi) && _ultimateAllowed(state, pi)) {
+    const ultAtk = _ultKillAttack(state, pi, utp);
+    if (ultAtk && _livroAttackAllowed(state, pi, ultAtk.att_idx ?? -1, ultAtk.def_idx ?? -1, atkCtx)) {
+      return ultAtk;
+    }
+  }
   const first = _beamSearch(state, pi);
   if (!first || !first.type || first.type === "end_turn") {
     // (Correção 1.51.97) O feixe só passa a vez quando nada
@@ -1842,9 +1857,17 @@ function _isLateGame(state) {
 // outros tipos não mudam. O portão é reavaliado a cada ação: depois
 // que o ataque mata o alvo, a Ultimate volta a valer sobre o que
 // sobrou (área) ou fica guardada (alvo único sem mais alvo).
-function _ultTargetKillableByAttack(state, pi, ut) {
+// (1.51.102 item 2, FRENTE 1b) Espelho de `AIBrain._ult_kill_attack`
+// (ai_brain.gd:360): o ataque que destrói AGORA o alvo da Ultimate de
+// dano — ou null quando nenhum atacante o destrói neste estado. Mesma
+// seleção de alvo do portão da F1 e mesma pontuação (limpo 100, mútuo
+// 40, +PV, +P1, -custo*3), SEM o veto de CAMPO ao mútuo e SEM o +30
+// de MITIGAÇÃO. Desempate: menor Poder do atacante, depois menor
+// índice. Com skipStatused=true, o alvo statusado pela própria IA
+// neste turno não conta.
+function _ultKillAttack(state, pi, ut, skipStatused = true) {
   const foes = foesOf(state, pi);
-  if (!foes.length) return false;
+  if (!foes.length) return null;
   let target = null;
   switch (ut) {
     case "targetEnemy": case "targetEnemyFreeze": case "poison":
@@ -1853,29 +1876,59 @@ function _ultTargetKillableByAttack(state, pi, ut) {
       break;
     case "incinerate": {
       const effClean = foes.filter((c) => !hasBarrier(c) && burnTurns(c) === 0 && !c.burning);
-      if (!effClean.length) return false;
+      if (!effClean.length) return null;
       target = _strongestIn(effClean);
       break;
     }
     case "vampirism": {
       const elig = foes.filter((c) => powerOf(c) >= 2);
-      if (!elig.length) return false;
+      if (!elig.length) return null;
       target = _strongestIn(elig);
       break;
     }
     default:
-      return false;
+      return null;
   }
-  if (!target) return false;
+  if (!target) return null;
+  if (skipStatused && statusedSet(state).has(target?.uid)) return null;
   const field = state.players[1 - pi]?.field || [];
   const di = field.indexOf(target);
-  if (di < 0) return false;
+  if (di < 0) return null;
   const mine = state.players[pi]?.field || [];
+  const dp = powerOf(target);
+  let best = null;
+  let bestScore = -9999;
+  let bestPa = 9999;
   for (let ai = 0; ai < mine.length; ai++) {
-    if (!canAttackOk(state, pi, ai, di)) continue;
-    if (combatKill(mine[ai], target)) return true;
+    const att = mine[ai];
+    const chk = DfRules.canAttack(state, pi, ai, 1 - pi, di);
+    if (!chk?.ok) continue;
+    const out = DfRules.combatOutcome(att, target);
+    if (!out?.killD) continue;
+    const pa = powerOf(att);
+    const vpGain = noVpOnDestroy(target) ? 0
+      : ((!att?.silenced && (att?.constantEffect === "recompensaDupla" || att?.abilityName === "Recompensa Dupla")) ? 2 : 1);
+    let score;
+    if (!out.killA) score = 100 + vpGain * 10 + dp * 2;
+    else score = 40 + vpGain * 10 + (dp - pa) * 2;
+    if (pa === 1) score += 15;
+    if (dp === 1) score += 15;
+    score -= (chk.actionCost ?? attackCost(att, target)) * 3;
+    if (score > bestScore || (score === bestScore && pa < bestPa)) {
+      bestScore = score;
+      bestPa = pa;
+      best = { type: "attack", att_idx: ai, def_idx: di };
+    }
   }
-  return false;
+  return best;
+}
+
+function _ultTargetKillableByAttack(state, pi, ut) {
+  // (1.51.102 item 2, FRENTE 1b) Sem mudar o comportamento: o portão
+  // da F1 é "existe ataque que mata o alvo AGORA". O `false` é
+  // essencial — o portão NÃO pula alvo statusado; só o passo de
+  // ORDEM pula.
+  return _ultKillAttack(state, pi, ut, false) !== null;
 }
 
 function _ultimateAllowed(state, pi) {
@@ -2760,7 +2813,7 @@ function _beamSearch(state, pi) {
 // ------------------------------------------------------------------
 import {
   pickWinAttack, pickDecisiveAttack, pickBestSummon, pickBestAttack,
-  pickDraw, pickNextAction, aiMode, pickTalentByMode,
+  pickDraw, pickNextAction, aiMode, pickTalentByMode, ultKillAttack,
   championSummonCost as _championSummonCost,
 } from "./df-ai-hard-brain.mjs";
 
@@ -2791,6 +2844,15 @@ function _legacyFallback(state, seat) {
     ? _championSummonCost(state.players[seat]?.hand?.[summonPeek.handIdx]) : 0;
   const decAtk = pickDecisiveAttack(state, seat, summonPeekCost);
   if (decAtk) return toPlanner(decAtk);
+  // (1.51.102 item 2, FRENTE 1b) ATAQUE ANTES DA ULTIMATE — espelho de
+  // ai_brain.gd:98-113 (passo 0.6 do _legacy_next_action). Mesma
+  // condição do passo da Ultimate abaixo (que já soma o portão):
+  // quando a Ultimate não valeria de todo, nada muda.
+  const ultTypeLeg = heroUltType(state.players[seat] || {});
+  if (_canUseUltimate(state, seat) && _ultDamageWorthIt(state, seat, ultTypeLeg)) {
+    const ultAtkLeg = ultKillAttack(state, seat, ultTypeLeg);
+    if (ultAtkLeg) return toPlanner({ type: "ATTACK_RESOLVE", attackerIdx: ultAtkLeg.att_idx, defenderIdx: ultAtkLeg.def_idx, playerId: seat });
+  }
   let phase = "summon";
   let floor = 5;
   const tried = new Set();
