@@ -286,7 +286,12 @@ export function register_chat_routes(app, opts = {}) {
     const peerId = normId(req.params?.peerId);
     if (!peerId) return res.status(400).json({ ok: false, error: "MISSING_PLAYER" });
     const r = await listMessages(me.id, peerId);
-    res.status(r.ok ? 200 : 403).json(r);
+    // (F13, 1.51.103 problema 3) o cliente rotula as mensagens
+    // próprias como "Você" a partir de myId (chat_screen.gd lê
+    // r.myId no refresh) — sem ele, _my_id fica "" e o
+    // format_message rotula tudo com o nome do outro. O id devolvido
+    // é o do solicitante (quem pediu a conversa).
+    res.status(r.ok ? 200 : 403).json(r.ok ? { ...r, myId: me.id } : r);
   });
 
   app.post("/auth/chat/:peerId", async (req, res) => {
