@@ -3,6 +3,10 @@
  */
 import { getMmr } from "./df-ranked-store.mjs";
 import { isPairExcluded, exclusionKeyForPlayer } from "./df-pair-exclusion.mjs";
+// (F6, 1.51.104 itens 7 e 9) o ranked NÃO checava bloqueio (só o casual
+// checava, desde a Frente 3) nem denúncia: o par bloqueado/denunciado
+// nunca se forma — mesma checagem síncrona por cache do df-friends.mjs.
+import { isBlockedSync, isReportedSync } from "./df-friends.mjs";
 
 /** @type {{ socketId: string, playerId: string, mmr: number, joinedAt: number, avatarHeroId: string | null, level: number, avatarFrame: string | null, country: string | null }[]} */
 const queue = [];
@@ -77,6 +81,10 @@ export function takeRankedPair() {
       // com ele mesmo — nem o mesmo playerId, nem o mesmo socket.
       if (a.socketId === b.socketId) continue;
       if (a.playerId && b.playerId && a.playerId === b.playerId) continue;
+      // (F6, 1.51.104 itens 7 e 9) bloqueio ou denúncia na janela de
+      // 2 dias: o par nunca se forma — pula e tenta o próximo da fila.
+      if (isBlockedSync(a.playerId, b.playerId)) continue;
+      if (isReportedSync(a.playerId, b.playerId)) continue;
       if (Math.abs(a.mmr - b.mmr) <= window) {
         // (1.51.86) par excluído pós-recusa: pula e tenta o próximo.
         // A chave é a formatada (u:<conta> / s:<socket>), igual ao
@@ -100,6 +108,10 @@ export function takeRankedPair() {
     // mesmo (o guarda do add já barra, isto é a rede de segurança).
     if (queue[0].socketId === queue[1].socketId) return null;
     if (queue[0].playerId && queue[0].playerId === queue[1].playerId) return null;
+    // (F6, 1.51.104 itens 7 e 9) nem o fallback fura bloqueio ou
+    // denúncia na janela de 2 dias.
+    if (isBlockedSync(queue[0].playerId, queue[1].playerId)) return null;
+    if (isReportedSync(queue[0].playerId, queue[1].playerId)) return null;
     // (1.51.86) nem o fallback fura a exclusão de 30 s (mesma chave
     // formatada da busca por MMR acima).
     if (

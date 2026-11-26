@@ -40,6 +40,24 @@
  *   30 s, banner atualizado no convidado. Depois de uma RECUSA, o
  *   mesmo jogador não pode ser convidado de novo por 1 minuto
  *   (INVITE_COOLDOWN); convidar OUTRO jogador continua valendo.
+ * - (F6, 1.51.104 item 7) bloquear/desbloquear/listar: POST
+ *   /auth/friends/unblock, GET /auth/friends/blocked; bloquear
+ *   cancela os convites do par; bloqueado não visita o perfil de
+ *   quem bloqueou (403 BLOCKED); o ranked também pula par bloqueado.
+ * - (F6, 1.51.104 item 9) denúncia: janela de 2 dias (REPORT_WINDOW_MS)
+ *   no pareamento (casual + ranked, cache síncrono) e no convite
+ *   (REPORTED_COOLDOWN, só o denunciado não pode convidar o
+ *   denunciante); a visita ao perfil continua aberta para o denunciado.
+ * - (F6, 1.51.104 item 12) quem aceitou convite e está configurando
+ *   baralho/herói conta como ocupado (friendChoicePlayerIds, lido
+ *   nas fontes de presença do index.mjs). A configuração SOZINHA
+ *   (escolha online / configuração offline, sem convite) é ocupada
+ *   pelo sinal do cliente `presence_activity {activity:"setup"|"idle"}`
+ *   no socket persistente (especificação da F5, 1.51.104): o servidor
+ *   guarda em setupBusy (setupBusyPlayerIds, mesma fonte de presença),
+ *   com teto de 120 s e limpeza na desconexão — sem sinal do cliente
+ *   não há como o servidor saber a tela (o cliente ainda precisa
+ *   EMITIR o sinal ao entrar/sair da escolha; ver RELATORIO.md da F6).
  * - (F8, 1.51.103 item 9c, trava da F4) antes de criar o convite,
  *   canReceiveInvite(playerId): falso para offline/ocupado — o
  *   convite nem é criado (PLAYER_OFFLINE / PLAYER_BUSY /
@@ -69,7 +87,11 @@ export const FRIEND_CHOICE_TIMEOUT_MS = 120_000;
  *  direção recusada (quem recusou pode convidar de volta). */
 export const FRIEND_DECLINE_COOLDOWN_MS = 60_000;
 export const HISTORY_LIMIT = 10;
-export const REPORT_REASONS = Object.freeze(["trapaça", "mau comportamento"]);
+export const REPORT_REASONS = Object.freeze(["trapaça", "mau comportamento", "outro"]);
+// (F6, 1.51.104 item 7) texto livre da denúncia ("outro"): no máximo
+// 500 caracteres; acima disso o servidor recusa com TEXT_TOO_LONG
+// (não corta em silêncio — o motivo não pode perder o fim).
+export const REPORT_TEXT_MAX_LEN = 500;
 
 const FRIENDS_SCHEMA = `
 CREATE TABLE IF NOT EXISTS df_follows (
@@ -91,6 +113,8 @@ CREATE TABLE IF NOT EXISTS df_reports (
   reporter_id VARCHAR(64) NOT NULL,
   reported_id VARCHAR(64) NOT NULL,
   reason VARCHAR(32) NOT NULL,
+  -- (F6, 1.51.104 item 7) texto livre da denúncia ("outro").
+  details TEXT,
   match_id VARCHAR(64),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -121,6 +145,9 @@ export async function initFriendsSchema() {
   const pool = pg();
   if (!pool) return { enabled: false, mode: "memory" };
   await pool.query(FRIENDS_SCHEMA);
+  // (F6, 1.51.104 item 7) df_reports já existe em bancos antigos sem
+  // a coluna details — CREATE TABLE IF NOT EXISTS não a adiciona.
+  await pool.query(`ALTER TABLE df_reports ADD COLUMN IF NOT EXISTS details TEXT`);
   return { enabled: true, mode: "postgres" };
 }
 
@@ -160,6 +187,92 @@ export async function isBlockedBetween(a, b) {
     return blocked;
   }
   return memBlocks.has(`${a}|${b}`) || memBlocks.has(`${b}|${a}`);
+}
+
+/* ================= Denúncia — janela de 2 dias (F6, 1.51.104 item 9) =================
+ * Um jogador DENUNCIADO não pode aparecer em partidas online para quem o
+ * denunciou por pelo menos DOIS DIAS (a partir da denúncia), nem convidar
+ * quem o denunciou. A denúncia NÃO fecha a visita ao perfil (o denunciado
+ * continua vendo as informações do perfil de quem denunciou) nem o chat.
+ * O pareamento é síncrono: o cache abaixo (par ordenado -> expira em ms)
+ * é alimentado por loadReportCache() no boot e atualizado em reportPlayer().
+ * Re-denunciar renova a janela (vale a denúncia mais recente do par).
+ * O bloqueio é independente: desbloquear NÃO apaga denúncias e denunciar
+ * NÃO bloqueia. */
+export const REPORT_WINDOW_MS = 2 * 24 * 3600 * 1000;
+
+/** @type {Map<string, number>} chave do par -> janela expira em (ms) */
+const reportCache = new Map();
+
+/** Carrega as denúncias ainda dentro da janela de 2 dias para o cache. */
+export async function loadReportCache() {
+  reportCache.clear();
+  const now = Date.now();
+  const pool = pg();
+  if (pool) {
+    const res = await pool.query(
+      `SELECT reporter_id, reported_id, MAX(created_at) AS last_report
+         FROM df_reports GROUP BY reporter_id, reported_id`,
+    );
+    for (const r of res.rows) {
+      const until = new Date(r.last_report).getTime() + REPORT_WINDOW_MS;
+      if (until > now) reportCache.set(pairKey(String(r.reporter_id), String(r.reported_id)), until);
+    }
+  } else {
+    const lastByPair = new Map();
+    for (const rep of memReports) {
+      const k = pairKey(String(rep.reporterId), String(rep.reportedId));
+      const t = new Date(rep.createdAt).getTime();
+      if (!lastByPair.has(k) || t > lastByPair.get(k)) lastByPair.set(k, t);
+    }
+    for (const [k, t] of lastByPair) {
+      const until = t + REPORT_WINDOW_MS;
+      if (until > now) reportCache.set(k, until);
+    }
+  }
+  return { size: reportCache.size };
+}
+
+/** Síncrono, para takePair()/takeRankedPair(): há denúncia na janela entre a e b? */
+export function isReportedSync(a, b) {
+  if (!a || !b || a === b) return false;
+  const k = pairKey(String(a), String(b));
+  const until = reportCache.get(k);
+  if (!until) return false;
+  if (Date.now() >= until) {
+    reportCache.delete(k);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Fonte da verdade (Postgres ou memória): quantos ms faltam para a janela
+ * da denúncia mais recente de `reporterId` contra `reportedId` acabar.
+ * 0 = sem denúncia na janela. Só um sentido: quem denuncia é o reporter.
+ */
+export async function reportCooldownRemainingMs(reporterId, reportedId) {
+  if (!reporterId || !reportedId || reporterId === reportedId) return 0;
+  const pool = pg();
+  let lastMs = 0;
+  if (pool) {
+    const res = await pool.query(
+      `SELECT MAX(created_at) AS last_report FROM df_reports WHERE reporter_id = $1 AND reported_id = $2`,
+      [String(reporterId), String(reportedId)],
+    );
+    if (res.rows[0]?.last_report) lastMs = new Date(res.rows[0].last_report).getTime();
+  } else {
+    for (const rep of memReports) {
+      if (rep.reporterId === reporterId && rep.reportedId === reportedId) {
+        const t = new Date(rep.createdAt).getTime();
+        if (t > lastMs) lastMs = t;
+      }
+    }
+  }
+  if (!lastMs) return 0;
+  const remaining = lastMs + REPORT_WINDOW_MS - Date.now();
+  if (remaining > 0) reportCache.set(pairKey(String(reporterId), String(reportedId)), lastMs + REPORT_WINDOW_MS);
+  return Math.max(0, remaining);
 }
 
 /** Um jogador segue o outro? (F9, 1.51.103) Fonte única de "seguir"
@@ -207,6 +320,10 @@ function miniProfile(p) {
     level: levelFromXp(p.xpTotal || 0),
     avatarHeroId: p.avatarHeroId || null,
     avatarFrame: p.avatarFrame || null,
+    // (F6, 1.51.104 item 7) país, para a bandeirinha em
+    // SEGUINDO/SEGUIDORES e na lista de bloqueados (mesmo campo
+    // de publicProfile/playerCard; null sem país escolhido).
+    country: p.country || null,
   };
 }
 
@@ -308,23 +425,89 @@ export async function blockPlayer(blockerId, blockedId) {
     memFollows.delete(`${blockedId}|${blockerId}`);
   }
   blockCache.add(pairKey(String(blockerId), String(blockedId)));
+  // (F6, 1.51.104 item 7) bloquear cancela os convites pendentes e os
+  // aceitos (em configuração) entre o par — o bloqueado não fica com
+  // um convite vivo de quem o bloqueou. Best-effort: o socket pode
+  // ainda não estar registrado (testes unitários do módulo).
+  try { cancelInvitesBetweenFn?.(blockerId, blockedId); } catch { /* */ }
   return { ok: true, blocked: true };
 }
 
-export async function reportPlayer(reporterId, reportedId, reason, matchId = null) {
+/**
+ * Desbloqueia. Desfaz o bloqueio (pareamento, listas, visita e chat
+ * voltam a valer) — NÃO restaura os "seguir" apagados no bloqueio e
+ * NÃO apaga denúncias (são independentes).
+ */
+export async function unblockPlayer(blockerId, blockedId) {
+  if (blockerId === blockedId) return { ok: false, error: "CANNOT_UNBLOCK_SELF" };
+  const target = await safeGetPlayer(blockedId);
+  if (!target) return { ok: false, error: "PLAYER_NOT_FOUND" };
+  const pool = pg();
+  if (pool) {
+    const res = await pool.query(
+      `DELETE FROM df_blocks WHERE blocker_id = $1 AND blocked_id = $2 RETURNING blocker_id`,
+      [blockerId, blockedId],
+    );
+    // (F6, 1.51.104 item 7) desbloquear quem não está bloqueado não
+    // é "ok": devolve NOT_BLOCKED para o cliente avisar.
+    if (res.rowCount === 0) return { ok: false, error: "NOT_BLOCKED" };
+  } else if (!memBlocks.has(`${blockerId}|${blockedId}`)) {
+    return { ok: false, error: "NOT_BLOCKED" };
+  } else {
+    memBlocks.delete(`${blockerId}|${blockedId}`);
+  }
+  blockCache.delete(pairKey(String(blockerId), String(blockedId)));
+  return { ok: true, blocked: false };
+}
+
+/** Jogadores que `blockerId` bloqueou (ordem: mais recente primeiro).
+ * Cada entrada é um miniProfile + `country` + `blockedAt` (ISO; null
+ * só no modo memória, que não guarda a data). */
+export async function listBlocked(blockerId) {
+  const pool = pg();
+  let rows = [];
+  if (pool) {
+    const res = await pool.query(
+      `SELECT blocked_id, created_at FROM df_blocks WHERE blocker_id = $1 ORDER BY created_at DESC`,
+      [blockerId],
+    );
+    rows = res.rows.map((r) => ({ id: r.blocked_id, blockedAt: r.created_at ? new Date(r.created_at).toISOString() : null }));
+  } else {
+    for (const k of memBlocks) {
+      const [a, b] = k.split("|");
+      if (a === blockerId) rows.push({ id: b, blockedAt: null });
+    }
+  }
+  const out = [];
+  for (const { id, blockedAt } of rows) {
+    const p = await safeGetPlayer(id);
+    if (p) out.push({ ...miniProfile(p), blockedAt });
+  }
+  return out;
+}
+
+export async function reportPlayer(reporterId, reportedId, reason, matchId = null, details = null) {
   if (reporterId === reportedId) return { ok: false, error: "CANNOT_REPORT_SELF" };
   if (!REPORT_REASONS.includes(reason)) return { ok: false, error: "INVALID_REASON" };
+  // (F6, 1.51.104 item 7) "outro" exige o texto livre; qualquer
+  // texto acima de 500 caracteres é recusado (não cortado).
+  const text = typeof details === "string" ? details.trim() : "";
+  if (reason === "outro" && !text) return { ok: false, error: "MISSING_TEXT" };
+  if (text.length > REPORT_TEXT_MAX_LEN) return { ok: false, error: "TEXT_TOO_LONG" };
   const target = await safeGetPlayer(reportedId);
   if (!target) return { ok: false, error: "PLAYER_NOT_FOUND" };
   const pool = pg();
   if (pool) {
     await pool.query(
-      `INSERT INTO df_reports (reporter_id, reported_id, reason, match_id) VALUES ($1, $2, $3, $4)`,
-      [reporterId, reportedId, reason, matchId ? String(matchId) : null],
+      `INSERT INTO df_reports (reporter_id, reported_id, reason, details, match_id) VALUES ($1, $2, $3, $4, $5)`,
+      [reporterId, reportedId, reason, text || null, matchId ? String(matchId) : null],
     );
   } else {
-    memReports.push({ reporterId, reportedId, reason, matchId, createdAt: new Date().toISOString() });
+    memReports.push({ reporterId, reportedId, reason, details: text || null, matchId, createdAt: new Date().toISOString() });
   }
+  // (F6, 1.51.104 item 9) a janela de 2 dias começa AGORA (vale a
+  // denúncia mais recente do par).
+  reportCache.set(pairKey(String(reporterId), String(reportedId)), Date.now() + REPORT_WINDOW_MS);
   return { ok: true, reported: true };
 }
 
@@ -335,6 +518,10 @@ export function publicProfile(p) {
   const season = seasonPublic();
   const seasonMatches = rank?.matches || 0;
   const seasonWins = rank?.wins || 0;
+  // (F6, 1.51.104 item 5) totais de TODAS as temporadas — ver o
+  // bloco "overall" abaixo.
+  const totalMatches = rank?.totalMatches || 0;
+  const totalWins = rank?.totalWins || 0;
   // rank.level (nível dentro da divisão, 1–5) ainda não existe no
   // sistema de rank atual (só tier por % de vitórias): a frente de
   // ranking preenche quando o campo existir. Não inventar número.
@@ -361,6 +548,19 @@ export function publicProfile(p) {
       winRate: seasonMatches > 0 ? seasonWins / seasonMatches : null,
       matches: seasonMatches,
       wins: seasonWins,
+    },
+    // (F6, 1.51.104 item 5 — decisão da F1) estatísticas GERAIS:
+    // os mesmos campos do resumo da temporada, mas do acumulado de
+    // TODAS as temporadas (totalMatches/totalWins do armazém de
+    // rank, que o rollSeason NÃO zera — só season.matches/wins).
+    // Conta toda online sem ser de amigo (casual + ranqueada; a
+    // partida com amigo nunca entra no rank, nem na temporada).
+    // winRate null sem partidas, como no bloco da temporada; o
+    // cliente (visit_data_from_public) já mapeia "overall".
+    overall: {
+      winRate: totalMatches > 0 ? totalWins / totalMatches : null,
+      matches: totalMatches,
+      wins: totalWins,
     },
     rank: { tier: rank?.tierId ?? null, level: rankLevel },
     bestRank: { tier: tierId(bestTierOf(p.id)), level: bestLevel },
@@ -419,14 +619,35 @@ export function register_friends_routes(app, _ctx = {}) {
     res.status(r.ok ? 200 : 400).json(r);
   });
 
+  // (F6, 1.51.104 item 7) desfaz o bloqueio; sem jogador, 400.
+  app.post("/auth/friends/unblock", async (req, res) => {
+    const me = await authed(req, res);
+    if (!me) return;
+    const targetId = normId(req.body?.playerId);
+    if (!targetId) return res.status(400).json({ ok: false, error: "MISSING_PLAYER" });
+    const r = await unblockPlayer(me.id, targetId);
+    res.status(r.ok ? 200 : 400).json(r);
+  });
+
+  // (F6, 1.51.104 item 7) quem eu bloqueei.
+  app.get("/auth/friends/blocked", async (req, res) => {
+    const me = await authed(req, res);
+    if (!me) return;
+    const blocked = await listBlocked(me.id);
+    res.status(200).json({ ok: true, blocked });
+  });
+
   app.post("/auth/friends/report", async (req, res) => {
     const me = await authed(req, res);
     if (!me) return;
     const targetId = normId(req.body?.playerId);
     const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
     const matchId = normId(req.body?.matchId) || normId(req.body?.roomCode);
+    // (F6, 1.51.104 item 7) texto livre da denúncia ("outro") — o
+    // histórico (item 9) e a lista de amigos mandam o motivo aqui.
+    const text = typeof req.body?.text === "string" ? req.body.text : null;
     if (!targetId) return res.status(400).json({ ok: false, error: "MISSING_PLAYER" });
-    const r = await reportPlayer(me.id, targetId, reason, matchId);
+    const r = await reportPlayer(me.id, targetId, reason, matchId, text);
     res.status(r.ok ? 200 : 400).json(r);
   });
 
@@ -474,11 +695,74 @@ export function register_friends_routes(app, _ctx = {}) {
     if (!targetId) return res.status(400).json({ ok: false, error: "MISSING_PLAYER" });
     const p = await safeGetPlayer(targetId);
     if (!p) return res.status(404).json({ ok: false, error: "PLAYER_NOT_FOUND" });
+    // (F6, 1.51.104 item 7) bloqueado NUNCA visita o perfil de quem
+    // bloqueou (e vice-versa: o bloqueio é simétrico na visita).
+    // A DENÚNCIA não fecha a visita (item 9): o denunciado continua
+    // vendo as informações do perfil de quem denunciou.
+    if (await isBlockedBetween(me.id, targetId)) {
+      return res.status(403).json({ ok: false, error: "BLOCKED" });
+    }
     res.status(200).json({ ok: true, player: publicProfile(p) });
   });
 }
 
 /* ================= Socket.IO — convites em tempo real ================= */
+
+/**
+ * (F6, 1.51.104 item 7) registrado por register_friends_socket: cancela
+ * os convites pendentes/aceitos entre dois jogadores (usado pelo bloqueio).
+ * Null até o socket ser registrado (testes unitários do módulo).
+ * @type {((a: string, b: string) => void) | null}
+ */
+let cancelInvitesBetweenFn = null;
+
+/**
+ * (F6, 1.51.104 item 12) jogadores que aceitaram um convite e estão
+ * configurando baralho/herói ("em configuração de partida"): contam como
+ * OCUPADOS na presença e não podem receber outro convite. O index.mjs lê
+ * este conjunto nas fontes de presença.
+ */
+const choiceBusy = new Set();
+
+/** Só leitura: quem está em configuração de partida de amigo agora. */
+export function friendChoicePlayerIds() {
+  return new Set(choiceBusy);
+}
+
+/**
+ * (F6, 1.51.104 item 12, especificação da F5) configuração SOZINHA.
+ * O cliente avisa pelo socket persistente quando entra/sai da escolha
+ * de baralho/herói sem convite (OnlineChoice / ConfigScreen):
+ *   presence_activity {activity: "setup"} -> ocupado
+ *   presence_activity {activity: "idle"}  -> livre de novo
+ * Sem o sinal não há como o servidor saber a tela do jogador. Teto de
+ * 120 s (renovado a cada "setup"): um "ocupado" nunca fica preso se o
+ * cliente cair sem avisar; a desconexão do socket também limpa.
+ * @type {Map<string, { timer: ReturnType<typeof setTimeout> }>}
+ */
+export const SETUP_BUSY_TTL_MS = 120_000;
+const setupBusy = new Map();
+
+/** Só leitura: quem está em configuração sozinho agora. */
+export function setupBusyPlayerIds() {
+  return new Set(setupBusy.keys());
+}
+
+function clearSetupBusy(playerId) {
+  const entry = setupBusy.get(playerId);
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  setupBusy.delete(playerId);
+}
+
+function markSetupBusy(playerId) {
+  clearSetupBusy(playerId);
+  const timer = setTimeout(() => {
+    // Teto de segurança: expirou sem renovação nem "idle".
+    setupBusy.delete(playerId);
+  }, SETUP_BUSY_TTL_MS);
+  setupBusy.set(playerId, { timer });
+}
 
 /**
  * @param {object} io Socket.IO server
@@ -581,6 +865,21 @@ export function register_friends_socket(io, ctx = {}) {
    *  A sala só nasce quando os dois mandam friend_choice_ready. */
   const accepted = new Map();
 
+  /**
+   * (F6, 1.51.104 item 12) socket.id -> playerId, memorizado a cada
+   * evento autenticado. Na desconexão o `socketPlayer` do index.mjs
+   * já foi apagado (o handler dele foi registrado antes deste), então
+   * `playerIdForSocket(socket)` volta null no "disconnect" — sem este
+   * mapa, nem a limpeza do setupBusy nem o cancelamento dos convites
+   * do jogador que caiu aconteceriam na hora (só no timer de 30 s).
+   */
+  const socketOwner = new Map();
+  function pidFor(socket) {
+    const pid = playerIdForSocket(socket);
+    if (pid) socketOwner.set(socket.id, pid);
+    return pid || socketOwner.get(socket.id) || null;
+  }
+
   function expireInvite(invite, reason = "expired") {
     if (!invite) return;
     clearTimeout(invite.timer);
@@ -595,9 +894,27 @@ export function register_friends_socket(io, ctx = {}) {
     if (!acc) return;
     clearTimeout(acc.timer);
     accepted.delete(acc.id);
+    // (F6, 1.51.104 item 12) saiu da configuração: volta a ficar livre.
+    choiceBusy.delete(acc.fromId);
+    choiceBusy.delete(acc.toId);
     io.to(`player:${acc.fromId}`).emit("invite_expired", { inviteId: acc.id, reason });
     io.to(`player:${acc.toId}`).emit("invite_expired", { inviteId: acc.id, reason });
   }
+
+  // (F6, 1.51.104 item 7) cancela pendentes e aceitos entre a e b
+  // (bloqueio). Registrado no módulo para o blockPlayer() chamar.
+  cancelInvitesBetweenFn = (a, b) => {
+    for (const invite of [...pending.values()]) {
+      if ((invite.fromId === a && invite.toId === b) || (invite.fromId === b && invite.toId === a)) {
+        expireInvite(invite, "blocked");
+      }
+    }
+    for (const acc of [...accepted.values()]) {
+      if ((acc.fromId === a && acc.toId === b) || (acc.fromId === b && acc.toId === a)) {
+        expireAccepted(acc, "blocked");
+      }
+    }
+  };
 
   function cancelInvitesOf(playerId, reason = "disconnected") {
     for (const invite of [...pending.values()]) {
@@ -614,7 +931,7 @@ export function register_friends_socket(io, ctx = {}) {
 
   io.on("connection", (socket) => {
     socket.on("invite_friend", async (payload, ack) => {
-      const fromId = playerIdForSocket(socket);
+      const fromId = pidFor(socket);
       if (!fromId) return ack?.({ ok: false, error: "UNAUTHORIZED" });
       const toId = normId(payload?.toPlayerId) || normId(payload?.playerId);
       if (!toId) return ack?.({ ok: false, error: "MISSING_PLAYER" });
@@ -622,6 +939,13 @@ export function register_friends_socket(io, ctx = {}) {
       const target = await safeGetPlayer(toId);
       if (!target) return ack?.({ ok: false, error: "PLAYER_NOT_FOUND" });
       if (await isBlockedBetween(fromId, toId)) return ack?.({ ok: false, error: "BLOCKED" });
+      // (F6, 1.51.104 item 9) quem foi DENUNCIADO pelo convidado não
+      // pode convidá-lo por 2 dias (a partir da denúncia). O sentido
+      // contrário (denunciante convida o denunciado) continua valendo.
+      const reportRemaining = await reportCooldownRemainingMs(toId, fromId);
+      if (reportRemaining > 0) {
+        return ack?.({ ok: false, error: "REPORTED_COOLDOWN", retryAfterMs: reportRemaining });
+      }
       // (F8, 1.51.103 item 9c, trava da F4) jogador offline ou
       // ocupado não recebe convite — nem cria o pendente.
       const presence = await checkCanReceiveInvite(toId);
@@ -677,7 +1001,7 @@ export function register_friends_socket(io, ctx = {}) {
     });
 
     socket.on("invite_response", async (payload, ack) => {
-      const responderId = playerIdForSocket(socket);
+      const responderId = pidFor(socket);
       if (!responderId) return ack?.({ ok: false, error: "UNAUTHORIZED" });
       const inviteId = normId(payload?.inviteId);
       const invite = inviteId ? pending.get(inviteId) : null;
@@ -703,6 +1027,10 @@ export function register_friends_socket(io, ctx = {}) {
       const acc = { id: invite.id, fromId: invite.fromId, toId: invite.toId, ready: new Set(), timer: null };
       acc.timer = setTimeout(() => expireAccepted(acc, "choice_timeout"), FRIEND_CHOICE_TIMEOUT_MS);
       accepted.set(acc.id, acc);
+      // (F6, 1.51.104 item 12) os dois entram em configuração de
+      // partida: ocupados até a sala nascer (ou o aceite expirar).
+      choiceBusy.add(acc.fromId);
+      choiceBusy.add(acc.toId);
       io.to(`player:${invite.fromId}`).emit("invite_accepted", {
         inviteId: invite.id,
         byPlayerId: responderId,
@@ -719,7 +1047,7 @@ export function register_friends_socket(io, ctx = {}) {
     // janela de aceite de 20 s inteira pela frente — os dois já
     // estão olhando para ela. O primeiro pronto só espera.
     socket.on("friend_choice_ready", async (payload, ack) => {
-      const pid = playerIdForSocket(socket);
+      const pid = pidFor(socket);
       if (!pid) return ack?.({ ok: false, error: "UNAUTHORIZED" });
       const inviteId = normId(payload?.inviteId);
       const acc = inviteId ? accepted.get(inviteId) : null;
@@ -729,6 +1057,10 @@ export function register_friends_socket(io, ctx = {}) {
       if (acc.ready.size < 2) return ack?.({ ok: true, waiting: true });
       clearTimeout(acc.timer);
       accepted.delete(acc.id);
+      // (F6, 1.51.104 item 12) a sala nasceu: a ocupação passa a ser
+      // a da sala (inMatch); sai da configuração.
+      choiceBusy.delete(acc.fromId);
+      choiceBusy.delete(acc.toId);
       if (!createFriendRoom) {
         io.to(`player:${acc.fromId}`).emit("invite_failed", { inviteId: acc.id, error: "ROOM_FAILED" });
         io.to(`player:${acc.toId}`).emit("invite_failed", { inviteId: acc.id, error: "ROOM_FAILED" });
@@ -752,7 +1084,7 @@ export function register_friends_socket(io, ctx = {}) {
     // (fechou a espera, voltou ao menu): o outro lado fica sabendo
     // na hora, em vez de esperar os 120 s.
     socket.on("friend_choice_cancel", async (payload, ack) => {
-      const pid = playerIdForSocket(socket);
+      const pid = pidFor(socket);
       if (!pid) return ack?.({ ok: false, error: "UNAUTHORIZED" });
       const inviteId = normId(payload?.inviteId);
       const acc = inviteId ? accepted.get(inviteId) : null;
@@ -761,13 +1093,44 @@ export function register_friends_socket(io, ctx = {}) {
       const peer = pid === acc.fromId ? acc.toId : acc.fromId;
       clearTimeout(acc.timer);
       accepted.delete(acc.id);
+      // (F6, 1.51.104 item 12) cancelou a configuração: volta a ficar livre.
+      choiceBusy.delete(acc.fromId);
+      choiceBusy.delete(acc.toId);
       io.to(`player:${peer}`).emit("invite_expired", { inviteId: acc.id, reason: "cancelled" });
       return ack?.({ ok: true, cancelled: true });
     });
 
+    // (F6, 1.51.104 item 12, especificação da F5) o cliente avisa
+    // quando entra/sai da configuração de baralho/herói SOZINHO
+    // (sem convite): "setup" = ocupado, "idle" = livre. Repetir
+    // "setup" renova o teto de 120 s. Sem isto o servidor não sabe
+    // a tela do jogador — fila/sala não cobrem esse estado.
+    socket.on("presence_activity", (payload, ack) => {
+      const pid = pidFor(socket);
+      if (!pid) return ack?.({ ok: false, error: "UNAUTHORIZED" });
+      const activity = typeof payload?.activity === "string" ? payload.activity.trim() : "";
+      if (activity === "setup") {
+        markSetupBusy(pid);
+        return ack?.({ ok: true, activity, busy: true });
+      }
+      if (activity === "idle") {
+        clearSetupBusy(pid);
+        return ack?.({ ok: true, activity, busy: false });
+      }
+      return ack?.({ ok: false, error: "INVALID_ACTIVITY" });
+    });
+
     socket.on("disconnect", () => {
-      const pid = playerIdForSocket(socket);
-      if (pid) cancelInvitesOf(pid, "disconnected");
+      // pidFor: o socketPlayer do index.mjs já foi apagado aqui (ver
+      // socketOwner acima) — sem ele, a limpeza não aconteceria.
+      const pid = pidFor(socket);
+      socketOwner.delete(socket.id);
+      if (pid) {
+        // (F6, 1.51.104 item 12) caiu sem avisar que saiu da
+        // configuração: o "ocupado" não pode ficar preso.
+        clearSetupBusy(pid);
+        cancelInvitesOf(pid, "disconnected");
+      }
     });
   });
 
@@ -783,6 +1146,9 @@ export function register_friends_socket(io, ctx = {}) {
       for (const acc of accepted.values()) clearTimeout(acc.timer);
       accepted.clear();
       declinedAt.clear();
+      choiceBusy.clear();
+      socketOwner.clear();
+      for (const pid of [...setupBusy.keys()]) clearSetupBusy(pid);
     },
   };
 }
@@ -793,4 +1159,7 @@ export function _resetFriendsMemoryForTests() {
   memBlocks.clear();
   memReports.length = 0;
   blockCache.clear();
+  reportCache.clear();
+  choiceBusy.clear();
+  for (const pid of [...setupBusy.keys()]) clearSetupBusy(pid);
 }

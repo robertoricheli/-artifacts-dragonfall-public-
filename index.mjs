@@ -139,6 +139,10 @@ import { registerAuthRoutes } from "./df-auth.mjs";
 import {
   initFriendsSchema,
   loadBlockCache,
+  loadReportCache,
+  friendChoicePlayerIds,
+  setupBusyPlayerIds,
+  isBlockedBetween,
   isFollowing,
   register_friends_routes,
   register_friends_socket,
@@ -246,10 +250,15 @@ register_mail_routes(app);
 register_chat_routes(app);
 const presenceService = createPresenceService(makePresenceSources({
   connected: () => new Set(socketPlayer.values()),
-  queued: () => new Set([...queuedPlayerIds(), ...queuedRankedPlayerIds()]),
+  // (F6, 1.51.104 item 12) "em configuração de partida" também é
+  // ocupado: quem aceitou um convite de amigo e está escolhendo
+  // baralho/herói (friendChoicePlayerIds) e quem configurou sozinho
+  // e avisou pelo presence_activity (setupBusyPlayerIds) não podem
+  // ser convidados.
+  queued: () => new Set([...queuedPlayerIds(), ...queuedRankedPlayerIds(), ...friendChoicePlayerIds(), ...setupBusyPlayerIds()]),
   inMatch: () => roomPlayerIds(),
 }));
-register_presence_routes(app, { service: presenceService });
+register_presence_routes(app, { service: presenceService, isBlocked: isBlockedBetween });
 register_players_routes(app, { presenceSources: presenceService.sources });
 setPresenceProvider((playerId) => presenceService.presenceFor(playerId));
 app.get("/", (_req, res) => {
@@ -2517,6 +2526,10 @@ await initRankStore();
 // do initPostgres/initAuthStore: o pool já existe aqui.
 await initFriendsSchema();
 await loadBlockCache();
+// (F6, 1.51.104 item 9) cache da janela de 2 dias das denúncias, para
+// o pareamento (casual + ranked) pular o par denunciado sem esperar o
+// Postgres — mesmo padrão do cache de bloqueios acima.
+await loadReportCache();
 // (F9, 1.51.103) esquema do correio (F1) e do chat (F4). O registro
 // das rotas já foi feito acima; o esquema precisa do pool (initPostgres).
 await initMailSchema();
