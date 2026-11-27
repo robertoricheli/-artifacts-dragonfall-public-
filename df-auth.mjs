@@ -71,12 +71,15 @@ import {
   TOP_COINS,
   rankPublic,
   topPublic,
+  topCountryPublic,
+  rewardsPublic,
   seasonPublic,
   bestTierOf,
   touchRankDisplay,
   takePending,
   restorePending,
   setRankDisplayResolver,
+  ensurePlacementResults,
 } from "./df-rank.mjs";
 
 export { initAuthStore, getAuthStoreMode };
@@ -669,13 +672,18 @@ function playerPublic(p) {
   };
 }
 
-/** Nome/avatar/nível exibidos no Top 200 do Rank. */
+/** Nome/avatar/nível/país exibidos no Top 200 do Rank. */
 function rankDisplayInfo(p) {
   if (!p) return null;
   return {
     name: p.displayName || null,
     avatarHeroId: p.avatarHeroId || null,
     level: statsFromTotalXp(p.xpTotal || 0).level,
+    // País guardado na conta (ISO alpha-3, maiúsculo); o Top por país
+    // filtra por ele. null = jogador sem país definido.
+    country: typeof p.country === "string" && COUNTRY_ALPHA3.has(p.country.toUpperCase())
+      ? p.country.toUpperCase()
+      : null,
   };
 }
 
@@ -1172,6 +1180,9 @@ async function authMe(req) {
   const player = await withCollection(authed);
   recordActivitySync(player.id);
   touchRankDisplay(player.id, rankDisplayInfo(player));
+  // 1.51.105: quem está no meio da MD10 sem ordem registrada tenta
+  // reconstruir a ordem pelo histórico antes de responder (best-effort).
+  try { await ensurePlacementResults(player.id); } catch (e) { /* sem histórico: segue com os contadores */ }
   return { status: 200, data: { ok: true, player: playerPublic(player) } };
 }
 
@@ -1244,6 +1255,12 @@ async function authCountry(req, body) {
     }
     return { status: 500, data: { ok: false, error: r.error || "SAVE_FAILED" } };
   }
+  // 1.51.105 (F3b): a troca de país entra no Top na hora — atualiza o
+  // registro de exibição do rank junto com a conta (antes, o
+  // `display.country` do rank só mudava na próxima partida, F3 §3.3a).
+  // O login e o /auth/rank também chamam touchRankDisplay, que agora
+  // compara o país (ver df-rank.mjs).
+  touchRankDisplay(r.player.id, rankDisplayInfo(r.player));
   return { status: 200, data: { ok: true, player: playerPublic(r.player) } };
 }
 
@@ -1672,15 +1689,29 @@ async function authAchievementClaim(req, body) {
 
 const rankIpLimit = createRateLimiter({ maxPerWindow: 60, windowMs: 60_000 });
 
-/** Página RANK: faixas, temporada e Top 200 (público); com sessão, também a posição do jogador. */
+/** Página RANK: faixas, temporada e Top 200 (público); com sessão, também a posição do jogador.
+ *  1.51.105 (contrato): me {tier, level (nível da conta), tierLevel,
+ *  stars, placementDone, placement {results, provisionalTier,
+ *  provisionalLevel}, pos, posCountry, country}, top global, topCountry
+ *  (Top 200 do país do jogador; [] sem país ou sem sessão), rewards
+ *  (11 linhas — "o que ganharia se a temporada terminasse agora").
+ */
 async function authRank(req) {
   if (!rankIpLimit(`rank:${clientIp(req)}`)) {
     return { status: 429, data: { ok: false, error: "RATE_LIMIT", retryAfterSec: 60 } };
   }
   let me = null;
+  let myCountry = null;
   const authed = await authFromHeader(req);
   if (authed) {
     touchRankDisplay(authed.id, rankDisplayInfo(authed));
+    myCountry = rankDisplayInfo(authed)?.country || null;
+    // 1.51.105: quem está no meio da MD10 sem ordem registrada tenta
+    // reconstruir a ordem pelo histórico antes de responder (best-effort).
+    try { await ensurePlacementResults(authed.id); } catch (e) { /* sem histórico: segue com os contadores */ }
+    // rankPublic.level = nível DENTRO da divisão; o spread do display
+    // (nível da conta) prevalece em `level`, como sempre foi aqui, e
+    // `tierLevel`/`accountLevel` ficam explícitos.
     me = { ...rankPublic(authed.id), ...rankDisplayInfo(authed) };
   }
   return {
@@ -1693,6 +1724,8 @@ async function authRank(req) {
       topSize: TOP_SIZE,
       topCoins: TOP_COINS,
       top: topPublic(),
+      topCountry: topCountryPublic(myCountry),
+      rewards: rewardsPublic(),
       me,
     },
   };
